@@ -7,8 +7,8 @@ dependencies = [
     "fastapi[standard]>=0.115.0",
     "vercel>=0.5.1",
     "asyncpg>=0.29.0",
-    "ai>=0.2.0",
     "httpx>=0.28.1",
+    "ai",
 ]
 
 [tool.mypy]
@@ -28,6 +28,9 @@ src = ["."]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.uv.sources]
+ai = { git = "https://github.com/vercel-labs/ai-python", rev = "refactor-ui-adapter" }
 
 [dependency-groups]
 dev = [

@@ -8,18 +8,14 @@ resolution-markers = [
 
 [[package]]
 name = "ai"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.2.1.dev6+eb2d228"
+source = { git = "https://github.com/vercel-labs/ai-python?rev=refactor-ui-adapter#eb2d2288c24a0d4ecae084d7c30155f49d278ca3" }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "modelsdotdev" },
     { name = "pydantic" },
     { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/3e/03/0d0b28884be1e8d0d6659008b9fa62f71b2653ff8ff44cca92ddadc16151/ai-0.2.0.tar.gz", hash = "sha256:9bd43071c0d1297469d4d5184bf7ff586928f0f4fff4e032149223c82a7a10e2", size = 802755, upload-time = "2026-05-14T23:10:15.046Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/3d/3f4da0e53bc24fd522187ce4e992521e646050dd0e390f1430ecbf3613e4/ai-0.2.0-py3-none-any.whl", hash = "sha256:d65f1a42a72086f9c2f6f58c5a776878a61f57dafcc91baa21166554a3d9bf89", size = 114297, upload-time = "2026-05-14T23:10:13.487Z" },
 ]
 
 [[package]]
@@ -116,7 +112,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai", specifier = ">=0.2.0" },
+    { name = "ai", git = "https://github.com/vercel-labs/ai-python?rev=refactor-ui-adapter" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -700,11 +696,11 @@ wheels = [
 
 [[package]]
 name = "modelsdotdev"
-version = "0.20260518.0"
+version = "0.20260519.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/01/78/89526463d4cd68a0a20393fdc73a7838bbbe1c2e20e24a4ad2967d4a01df/modelsdotdev-0.20260518.0.tar.gz", hash = "sha256:d4ac0c6440bf323d06421620cd4ce19650e79cf164b261a7569d0def62ecf2db", size = 756697, upload-time = "2026-05-18T09:26:35.887Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/2b/9aafb554a3df5d93d28e6bcb21a9ba3a1e4a80e8d04e0eae6fef511f1a4f/modelsdotdev-0.20260519.0.tar.gz", hash = "sha256:e8e25497b98367f4502d3b50caed2c7babc206dec0cc7db18d1f936eef60995b", size = 762415, upload-time = "2026-05-19T09:24:12.591Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/be/5dffe345ea6f93d994c2618dcf71c44f91ee343cc9a93776d38fbed6fdd8/modelsdotdev-0.20260518.0-py3-none-any.whl", hash = "sha256:010310c7a7df978fcae9c44f684f480ba5724b478211907796966c7a22a61cce", size = 763250, upload-time = "2026-05-18T09:26:36.869Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/90/df7b50b427f3dc6477191e7a499626c47d53525e34699072ac4fed2b4559/modelsdotdev-0.20260519.0-py3-none-any.whl", hash = "sha256:e647e68d399810ec705bad6f890ca56c5548ee86c12212e4480fd023c0c4c2c8", size = 769175, upload-time = "2026-05-19T09:24:14.274Z" },
 ]
 
 [[package]]
