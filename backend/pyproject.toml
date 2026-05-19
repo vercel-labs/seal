@@ -6,8 +6,8 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.115.0",
     "vercel>=0.5.1",
-    "vercel-ai-sdk>=0.0.1.dev10",
     "asyncpg>=0.29.0",
+    "ai>=0.2.0",
 ]
 
 [tool.mypy]
