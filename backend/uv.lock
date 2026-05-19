@@ -101,6 +101,7 @@ dependencies = [
     { name = "ai" },
     { name = "asyncpg" },
     { name = "fastapi", extra = ["standard"] },
+    { name = "httpx" },
     { name = "vercel" },
 ]
 
@@ -118,6 +119,7 @@ requires-dist = [
     { name = "ai", specifier = ">=0.2.0" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "vercel", specifier = ">=0.5.1" },
 ]
 

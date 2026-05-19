@@ -4,6 +4,11 @@ Neon PostgreSQL storage layer.
 Manages a shared asyncpg pool and exposes async functions for sessions
 and messages.  All IDs are plain text (nanoid-style) so they round-trip
 cleanly with the AI SDK frontend.
+
+Messages are stored in canonical ``ai.messages.Message`` JSON form: the
+``parts`` column holds the discriminated-union output of
+``message.model_dump(mode="json")``.  Conversion to AI SDK UI shape
+happens at the edge via ``ai.agents.ui.ai_sdk.to_ui_messages``.
 """
 
 from __future__ import annotations
@@ -14,8 +19,6 @@ from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
 import pydantic
-
-from replay_types import ReplayState
 
 # ---------------------------------------------------------------------------
 # Schema (inlined so the backend has no runtime dependency on repo layout)
@@ -40,12 +43,10 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, created_at);
 
-CREATE TABLE IF NOT EXISTS session_replays (
-    session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-    payload     JSONB NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+-- Replay state was previously tracked in ``session_replays``.  The new
+-- SDK handles resume natively via ``replay=True`` message flags, so this
+-- table is no longer needed.  Drop is idempotent.
+DROP TABLE IF EXISTS session_replays;
 
 """
 
@@ -267,42 +268,3 @@ async def save_messages_batch(
         + " ON CONFLICT (id) DO UPDATE SET parts = EXCLUDED.parts"
     )
     await pool.execute(sql, *args)
-
-
-# ---------------------------------------------------------------------------
-# Replay state
-# ---------------------------------------------------------------------------
-
-
-async def get_replay(session_id: str) -> ReplayState | None:
-    """Return persisted replay state for a session, if any."""
-    pool = await get_pool()
-    row = await pool.fetchrow(
-        "SELECT payload FROM session_replays WHERE session_id = $1",
-        session_id,
-    )
-    if not row:
-        return None
-    payload = _parse_jsonb(row["payload"])
-    return ReplayState.model_validate(payload)
-
-
-async def save_replay(session_id: str, replay: ReplayState) -> None:
-    """Upsert replay state for a session."""
-    pool = await get_pool()
-    await pool.execute(
-        "INSERT INTO session_replays (session_id, payload) VALUES ($1, $2::jsonb) "
-        "ON CONFLICT (session_id) DO UPDATE "
-        "SET payload = EXCLUDED.payload, updated_at = now()",
-        session_id,
-        json.dumps(replay.model_dump(mode="json")),
-    )
-
-
-async def delete_replay(session_id: str) -> None:
-    """Delete replay state for a session."""
-    pool = await get_pool()
-    await pool.execute(
-        "DELETE FROM session_replays WHERE session_id = $1",
-        session_id,
-    )

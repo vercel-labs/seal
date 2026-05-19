@@ -8,6 +8,7 @@ dependencies = [
     "vercel>=0.5.1",
     "asyncpg>=0.29.0",
     "ai>=0.2.0",
+    "httpx>=0.28.1",
 ]
 
 [tool.mypy]
