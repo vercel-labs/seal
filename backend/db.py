@@ -4,6 +4,11 @@ Neon PostgreSQL storage layer.
 Manages a shared asyncpg pool and exposes async functions for sessions
 and messages.  All IDs are plain text (nanoid-style) so they round-trip
 cleanly with the AI SDK frontend.
+
+Messages are stored in canonical ``ai.messages.Message`` JSON form: the
+``parts`` column holds the discriminated-union output of
+``message.model_dump(mode="json")``.  Conversion to AI SDK UI shape
+happens at the edge via ``ai.agents.ui.ai_sdk.to_ui_messages``.
 """
 
 from __future__ import annotations
@@ -14,8 +19,6 @@ from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
 import pydantic
-
-from replay_types import ReplayState
 
 # ---------------------------------------------------------------------------
 # Schema (inlined so the backend has no runtime dependency on repo layout)
@@ -32,20 +35,47 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS messages (
     id          TEXT PRIMARY KEY,
     session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    seq         INTEGER,
     role        TEXT NOT NULL,
     parts       JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_session
-    ON messages(session_id, created_at);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq INTEGER;
 
-CREATE TABLE IF NOT EXISTS session_replays (
-    session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-    payload     JSONB NOT NULL,
+WITH ranked AS (
+    SELECT
+        id,
+        row_number() OVER (
+            PARTITION BY session_id
+            ORDER BY created_at, id
+        ) - 1 AS seq
+    FROM messages
+    WHERE seq IS NULL
+)
+UPDATE messages
+SET seq = ranked.seq
+FROM ranked
+WHERE messages.id = ranked.id;
+
+ALTER TABLE messages ALTER COLUMN seq SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_messages_session_seq
+    ON messages(session_id, seq, created_at, id);
+
+CREATE TABLE IF NOT EXISTS chat_runs (
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    request_id  TEXT NOT NULL,
+    status      TEXT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, request_id)
 );
+
+-- Replay state was previously tracked in ``session_replays``.  The new
+-- SDK handles resume natively via ``replay=True`` message flags, so this
+-- table is no longer needed.  Drop is idempotent.
+DROP TABLE IF EXISTS session_replays;
 
 """
 
@@ -67,6 +97,7 @@ class StoredMessage(pydantic.BaseModel):
     """A message as stored in the DB (parts already parsed)."""
 
     id: str
+    seq: int
     role: str
     parts: list[dict[str, Any]]
     created_at: str
@@ -127,6 +158,7 @@ def _row_to_message(row: asyncpg.Record) -> StoredMessage:
     """Convert an asyncpg row to a StoredMessage model."""
     return StoredMessage(
         id=row["id"],
+        seq=row["seq"],
         role=row["role"],
         parts=_parse_jsonb(row["parts"]),
         created_at=row["created_at"].isoformat(),
@@ -208,8 +240,8 @@ async def get_messages(session_id: str) -> list[StoredMessage]:
     """Return all messages for a session in chronological order."""
     pool = await get_pool()
     rows = await pool.fetch(
-        "SELECT id, role, parts, created_at "
-        "FROM messages WHERE session_id = $1 ORDER BY created_at",
+        "SELECT id, seq, role, parts, created_at "
+        "FROM messages WHERE session_id = $1 ORDER BY seq, created_at, id",
         session_id,
     )
     return [_row_to_message(r) for r in rows]
@@ -220,24 +252,34 @@ async def save_message(
     session_id: str,
     role: str,
     parts: list[dict[str, Any]],
+    seq: int | None = None,
 ) -> None:
     """Insert or update a single message (upsert on id)."""
     pool = await get_pool()
     await pool.execute(
-        "INSERT INTO messages (id, session_id, role, parts) "
-        "VALUES ($1, $2, $3, $4::jsonb) "
-        "ON CONFLICT (id) DO UPDATE SET parts = EXCLUDED.parts",
+        "WITH next_seq AS ("
+        "  SELECT COALESCE($5::int, COALESCE(MAX(seq) + 1, 0)) AS seq "
+        "  FROM messages WHERE session_id = $2"
+        ") "
+        "INSERT INTO messages (id, session_id, role, parts, seq) "
+        "SELECT $1, $2, $3, $4::jsonb, next_seq.seq FROM next_seq "
+        "ON CONFLICT (id) DO UPDATE SET "
+        "session_id = EXCLUDED.session_id, "
+        "role = EXCLUDED.role, "
+        "parts = EXCLUDED.parts, "
+        "seq = EXCLUDED.seq",
         message_id,
         session_id,
         role,
         json.dumps(parts),
+        seq,
     )
 
 
 async def save_messages_batch(
-    messages: list[tuple[str, str, str, list[dict[str, Any]]]],
+    messages: list[tuple[str, str, int, str, list[dict[str, Any]]]],
 ) -> None:
-    """Batch-upsert messages.  Each tuple is (id, session_id, role, parts).
+    """Batch-upsert messages.  Each tuple is (id, session_id, seq, role, parts).
 
     Duplicates by message ID are deduplicated (last occurrence wins)
     because PostgreSQL's ON CONFLICT DO UPDATE cannot touch the same
@@ -246,8 +288,10 @@ async def save_messages_batch(
     if not messages:
         return
     # Deduplicate: keep last occurrence per message ID.
-    seen: dict[str, tuple[str, str, str, list[dict[str, Any]]]] = {}
+    seen: dict[str, tuple[str, str, int, str, list[dict[str, Any]]]] = {}
     for row in messages:
+        if row[0] in seen:
+            del seen[row[0]]
         seen[row[0]] = row
     deduped = list(seen.values())
 
@@ -255,54 +299,81 @@ async def save_messages_batch(
     # Build a single VALUES clause for all messages.
     args: list[Any] = []
     placeholders: list[str] = []
-    for i, (mid, sid, role, parts) in enumerate(deduped):
-        base = i * 4
+    for i, (mid, sid, seq, role, parts) in enumerate(deduped):
+        base = i * 5
         placeholders.append(
-            f"(${base + 1}, ${base + 2}, ${base + 3}, ${base + 4}::jsonb)"
+            f"(${base + 1}, ${base + 2}, ${base + 3}, ${base + 4}, ${base + 5}::jsonb)"
         )
-        args.extend([mid, sid, role, json.dumps(parts)])
+        args.extend([mid, sid, seq, role, json.dumps(parts)])
     sql = (
-        "INSERT INTO messages (id, session_id, role, parts) VALUES "
+        "INSERT INTO messages (id, session_id, seq, role, parts) VALUES "
         + ", ".join(placeholders)
-        + " ON CONFLICT (id) DO UPDATE SET parts = EXCLUDED.parts"
+        + " ON CONFLICT (id) DO UPDATE SET "
+        + "session_id = EXCLUDED.session_id, "
+        + "seq = EXCLUDED.seq, "
+        + "role = EXCLUDED.role, "
+        + "parts = EXCLUDED.parts"
     )
     await pool.execute(sql, *args)
 
 
 # ---------------------------------------------------------------------------
-# Replay state
+# Chat run idempotency
 # ---------------------------------------------------------------------------
 
 
-async def get_replay(session_id: str) -> ReplayState | None:
-    """Return persisted replay state for a session, if any."""
+async def start_chat_run(session_id: str, request_id: str) -> str:
+    """Try to start an idempotent chat run and return its prior/current state."""
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT payload FROM session_replays WHERE session_id = $1",
+        "INSERT INTO chat_runs (session_id, request_id, status) "
+        "VALUES ($1, $2, 'in_progress') "
+        "ON CONFLICT DO NOTHING "
+        "RETURNING status",
         session_id,
+        request_id,
     )
-    if not row:
-        return None
-    payload = _parse_jsonb(row["payload"])
-    return ReplayState.model_validate(payload)
+    if row is not None:
+        return "started"
+
+    row = await pool.fetchrow(
+        "SELECT status FROM chat_runs WHERE session_id = $1 AND request_id = $2",
+        session_id,
+        request_id,
+    )
+    if row is None:
+        return "started"
+
+    status = str(row["status"])
+    if status == "failed":
+        restarted = await pool.fetchrow(
+            "UPDATE chat_runs SET status = 'in_progress', updated_at = now() "
+            "WHERE session_id = $1 AND request_id = $2 AND status = 'failed' "
+            "RETURNING status",
+            session_id,
+            request_id,
+        )
+        return "started" if restarted is not None else "in_progress"
+    return status
 
 
-async def save_replay(session_id: str, replay: ReplayState) -> None:
-    """Upsert replay state for a session."""
+async def complete_chat_run(session_id: str, request_id: str) -> None:
+    """Mark a chat run completed."""
     pool = await get_pool()
     await pool.execute(
-        "INSERT INTO session_replays (session_id, payload) VALUES ($1, $2::jsonb) "
-        "ON CONFLICT (session_id) DO UPDATE "
-        "SET payload = EXCLUDED.payload, updated_at = now()",
+        "UPDATE chat_runs SET status = 'completed', updated_at = now() "
+        "WHERE session_id = $1 AND request_id = $2",
         session_id,
-        json.dumps(replay.model_dump(mode="json")),
+        request_id,
     )
 
 
-async def delete_replay(session_id: str) -> None:
-    """Delete replay state for a session."""
+async def fail_chat_run(session_id: str, request_id: str) -> None:
+    """Mark a chat run failed so the same request can be retried."""
     pool = await get_pool()
     await pool.execute(
-        "DELETE FROM session_replays WHERE session_id = $1",
+        "UPDATE chat_runs SET status = 'failed', updated_at = now() "
+        "WHERE session_id = $1 AND request_id = $2",
         session_id,
+        request_id,
     )

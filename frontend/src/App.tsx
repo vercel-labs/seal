@@ -129,13 +129,24 @@ function ChatView({
     () =>
       new DefaultChatTransport({
         api: "/api/chat",
-        body: { session_id: sessionId },
+        prepareSendMessagesRequest: ({ id, messages, trigger, messageId }) => {
+          const lastMessage = messages[messages.length - 1];
+          const stableMessageId = messageId ?? lastMessage?.id ?? "empty";
+          return {
+            body: {
+              session_id: id,
+              request_id: `${trigger}:${stableMessageId}`,
+              messages,
+            },
+          };
+        },
       }),
-    [sessionId],
+    [],
   );
 
   const { messages, sendMessage, status, stop, addToolApprovalResponse } =
     useChat({
+      id: sessionId,
       transport,
       messages: initialMessages,
       onFinish: onFinishReply,
