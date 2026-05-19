@@ -114,7 +114,7 @@ export async function fetchSessionMessages(
       id: string;
       role: string;
       parts: Record<string, unknown>[];
-      createdAt: string;
+      createdAt?: string;
     }[];
   } = await res.json();
 
@@ -127,7 +127,7 @@ export async function fetchSessionMessages(
         .filter(
           (part): part is Record<string, unknown> => part !== null,
         ) as UIMessage["parts"],
-      createdAt: new Date(m.createdAt),
+      ...(m.createdAt ? { createdAt: new Date(m.createdAt) } : {}),
     }))
     .filter((m) => m.parts.length > 0);
 }

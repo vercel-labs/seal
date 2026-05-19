@@ -149,6 +149,129 @@ def _serialize_parts(parts: list[ai_messages.Part]) -> list[dict[str, Any]]:
     return [p.model_dump(mode="json") for p in parts]
 
 
+_ASSISTANT_BUBBLE_ROLES = frozenset({"assistant", "tool", "internal"})
+
+
+def _turn_id_from_message_id(message_id: str) -> str | None:
+    """Extract the UI turn id from an adapter-stable message id."""
+    for marker in (":assistant:", ":tool:", ":internal:"):
+        if marker in message_id:
+            return message_id.split(marker, 1)[0]
+    return None
+
+
+def _message_turn_id(message: ai_messages.Message) -> str | None:
+    return message.turn_id or _turn_id_from_message_id(message.id)
+
+
+def _stable_part_id(
+    message_id: str,
+    part: ai_messages.Part,
+    index: int,
+) -> str:
+    """Return the same part-id shape used by the AI SDK UI inbound adapter."""
+    match part:
+        case ai_messages.TextPart():
+            return f"{message_id}:text:{index}"
+        case ai_messages.ReasoningPart():
+            return f"{message_id}:reasoning:{index}"
+        case ai_messages.ToolCallPart(tool_call_id=tool_call_id):
+            return f"{message_id}:call:{tool_call_id}"
+        case ai_messages.ToolResultPart(tool_call_id=tool_call_id):
+            return f"{message_id}:result:{tool_call_id}"
+        case ai_messages.BuiltinToolCallPart(tool_call_id=tool_call_id):
+            return f"{message_id}:builtin-call:{tool_call_id}"
+        case ai_messages.BuiltinToolReturnPart(tool_call_id=tool_call_id):
+            return f"{message_id}:builtin-result:{tool_call_id}"
+        case ai_messages.HookPart():
+            return f"{message_id}:hook:{index}"
+        case ai_messages.FilePart():
+            return f"{message_id}:file:{index}"
+    raise TypeError(f"Unsupported message part: {type(part).__name__}")
+
+
+def _with_stable_part_ids(
+    message_id: str,
+    parts: list[ai_messages.Part],
+) -> list[ai_messages.Part]:
+    counts: dict[str, int] = {}
+    result: list[ai_messages.Part] = []
+
+    for index, part in enumerate(parts):
+        base = _stable_part_id(message_id, part, index)
+        seen = counts.get(base, 0)
+        counts[base] = seen + 1
+        part_id = base if seen == 0 else f"{base}:{seen}"
+        result.append(part.model_copy(update={"id": part_id}))
+
+    return result
+
+
+def _canonicalize_run_messages(
+    messages: list[ai_messages.Message],
+) -> list[ai_messages.Message]:
+    """Normalize message ids to the UI adapter's stable round-trip shape."""
+    result: list[ai_messages.Message] = []
+    i = 0
+
+    while i < len(messages):
+        message = messages[i]
+        if message.role == "system":
+            i += 1
+            continue
+
+        if message.role != "assistant":
+            result.append(
+                message.model_copy(
+                    update={
+                        "parts": _with_stable_part_ids(
+                            message.id,
+                            message.parts,
+                        )
+                    }
+                )
+            )
+            i += 1
+            continue
+
+        turn_id = _message_turn_id(message) or message.id
+        assistant_index = 0
+        tool_index = 0
+        internal_index = 0
+
+        while i < len(messages) and messages[i].role in _ASSISTANT_BUBBLE_ROLES:
+            current = messages[i]
+            match current.role:
+                case "assistant":
+                    message_id = f"{turn_id}:assistant:{assistant_index}"
+                    assistant_index += 1
+                case "tool":
+                    message_id = f"{turn_id}:tool:{tool_index}"
+                    tool_index += 1
+                case "internal":
+                    message_id = f"{turn_id}:internal:{internal_index}"
+                    internal_index += 1
+                case _:
+                    # Narrowed by the while condition; keeps type checkers happy.
+                    message_id = current.id
+
+            result.append(
+                current.model_copy(
+                    update={
+                        "id": message_id,
+                        "turn_id": turn_id,
+                        "parts": _with_stable_part_ids(
+                            message_id,
+                            current.parts,
+                        ),
+                    }
+                )
+            )
+            i += 1
+
+    return result
+
+
 async def _persist_run_messages(
     session_id: str,
     messages: list[ai_messages.Message],
@@ -159,13 +282,18 @@ async def _persist_run_messages(
     request time from ``agent.SYSTEM`` and should never round-trip
     through the database.
     """
-    rows: list[tuple[str, str, str, list[dict[str, Any]]]] = [
-        (m.id, session_id, m.role, _serialize_parts(m.parts))
-        for m in messages
-        if m.role != "system"
+    messages = _canonicalize_run_messages(messages)
+    rows: list[tuple[str, str, int, str, list[dict[str, Any]]]] = [
+        (m.id, session_id, seq, m.role, _serialize_parts(m.parts))
+        for seq, m in enumerate(messages)
     ]
     if rows:
         await db.save_messages_batch(rows)
+
+
+async def _no_op_sse() -> AsyncGenerator[str]:
+    """Return a valid empty UI-message stream for duplicate completed runs."""
+    yield 'data: {"type":"finish","finishReason":"stop"}\n\n'
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +306,7 @@ class ChatRequest(pydantic.BaseModel):
 
     messages: list[UIMessage]
     session_id: str
+    request_id: str | None = None
 
 
 @router.post("/chat")
@@ -200,31 +329,52 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     system = ai.system_message(agent.SYSTEM)
     full_messages = [system, *messages]
 
+    request_id = request.request_id
+    if request_id is not None:
+        run_status = await db.start_chat_run(session_id, request_id)
+        if run_status == "completed":
+            return fastapi.responses.StreamingResponse(
+                _no_op_sse(),
+                headers=UI_MESSAGE_STREAM_HEADERS,
+            )
+        if run_status == "in_progress":
+            raise fastapi.HTTPException(
+                status_code=409,
+                detail="Chat run already in progress",
+            )
+
     model = agent.get_model()
 
     async def stream_response() -> AsyncGenerator[str]:
-        async with agent.seal.run(model, full_messages) as result:
+        try:
+            async with agent.seal.run(model, full_messages) as result:
 
-            async def process() -> AsyncGenerator[ai_events.AgentEvent]:
-                async for event in result:
-                    # Suspend the run when a tool approval is pending.
-                    # The SDK persists the suspension as ``is_hook_pending``
-                    # placeholders on the message history; the next request
-                    # carrying the approval response resumes natively.
-                    if (
-                        isinstance(event, ai_events.HookEvent)
-                        and event.hook.status == "pending"
-                    ):
-                        ai.abort_pending_hook(event.hook)
-                    yield event
+                async def process() -> AsyncGenerator[ai_events.AgentEvent]:
+                    async for event in result:
+                        # Suspend the run when a tool approval is pending.
+                        # The SDK persists the suspension as ``is_hook_pending``
+                        # placeholders on the message history; the next request
+                        # carrying the approval response resumes natively.
+                        if (
+                            isinstance(event, ai_events.HookEvent)
+                            and event.hook.status == "pending"
+                        ):
+                            ai.abort_pending_hook(event.hook)
+                        yield event
 
-            async for chunk in to_sse(process()):
-                yield chunk
+                async for chunk in to_sse(process()):
+                    yield chunk
 
-            # Persist the full updated history once the run finishes
-            # (whether normally or via approval suspension).
-            await _persist_run_messages(session_id, result.messages)
-            await db.touch_session(session_id)
+                # Persist the full updated history once the run finishes
+                # (whether normally or via approval suspension).
+                await _persist_run_messages(session_id, result.messages)
+                await db.touch_session(session_id)
+                if request_id is not None:
+                    await db.complete_chat_run(session_id, request_id)
+        except BaseException:
+            if request_id is not None:
+                await db.fail_chat_run(session_id, request_id)
+            raise
 
     return fastapi.responses.StreamingResponse(
         stream_response(),
