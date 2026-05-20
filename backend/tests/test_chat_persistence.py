@@ -9,12 +9,12 @@ from ai import messages as ai_messages
 from ai.agents.ui.ai_sdk import UIMessage, to_messages, to_ui_messages
 
 import db
-from routers import chat
+from routers import chat, sessions
 
-StoredRow = tuple[str, str, int, str, list[dict[str, Any]]]
+StoredRow = tuple[str, str, int, str, str | None, list[dict[str, Any]]]
 
 
-def test_persist_run_messages_assigns_dense_sequence(
+def test_persist_run_messages_assigns_dense_sequence_and_preserves_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[StoredRow] = []
@@ -26,27 +26,30 @@ def test_persist_run_messages_assigns_dense_sequence(
 
     messages = [
         ai.system_message("system"),
-        ai.user_message("hello"),
-        ai.assistant_message("hi"),
+        ai_messages.Message(
+            id="user-1",
+            role="user",
+            parts=[ai_messages.TextPart(id="user-text-1", text="hello")],
+        ),
+        ai_messages.Message(
+            id="assistant-1",
+            turn_id="turn-1",
+            role="assistant",
+            parts=[ai_messages.TextPart(id="assistant-text-1", text="hi")],
+        ),
     ]
-    user_id = messages[1].id
-    assistant_turn_id = messages[2].id
 
     asyncio.run(chat._persist_run_messages("session-1", messages))
 
-    assert [(row[2], row[3]) for row in captured] == [
-        (0, "user"),
-        (1, "assistant"),
+    assert [(row[0], row[2], row[3], row[4]) for row in captured] == [
+        ("user-1", 0, "user", None),
+        ("assistant-1", 1, "assistant", "turn-1"),
     ]
-    assert [row[0] for row in captured] == [
-        user_id,
-        f"{assistant_turn_id}:assistant:0",
-    ]
-    assert captured[0][4][0]["id"] == f"{user_id}:text:0"
-    assert captured[1][4][0]["id"] == f"{assistant_turn_id}:assistant:0:text:0"
+    assert captured[0][5][0]["id"] == "user-text-1"
+    assert captured[1][5][0]["id"] == "assistant-text-1"
 
 
-def test_persist_run_messages_canonicalizes_multi_step_assistant_turn(
+def test_persist_run_messages_preserves_multi_step_assistant_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[StoredRow] = []
@@ -58,11 +61,13 @@ def test_persist_run_messages_canonicalizes_multi_step_assistant_turn(
 
     messages = [
         ai_messages.Message(
-            id="turn-1",
+            id="assistant-live-id-1",
+            turn_id="turn-1",
             role="assistant",
             parts=[
-                ai_messages.TextPart(text="I'll use a tool."),
+                ai_messages.TextPart(id="text-part-1", text="I'll use a tool."),
                 ai_messages.ToolCallPart(
+                    id="call-part-1",
                     tool_call_id="call-1",
                     tool_name="bash",
                     tool_args='{"command":"echo hi"}',
@@ -71,9 +76,11 @@ def test_persist_run_messages_canonicalizes_multi_step_assistant_turn(
         ),
         ai_messages.Message(
             id="tool-live-id",
+            turn_id="turn-1",
             role="tool",
             parts=[
                 ai_messages.ToolResultPart(
+                    id="result-part-1",
                     tool_call_id="call-1",
                     tool_name="bash",
                     result={"value": "hi\n"},
@@ -82,25 +89,32 @@ def test_persist_run_messages_canonicalizes_multi_step_assistant_turn(
         ),
         ai_messages.Message(
             id="assistant-live-id-2",
+            turn_id="turn-1",
             role="assistant",
-            parts=[ai_messages.TextPart(text="The tool returned hi.")],
+            parts=[
+                ai_messages.TextPart(
+                    id="text-part-2",
+                    text="The tool returned hi.",
+                )
+            ],
         ),
     ]
 
     asyncio.run(chat._persist_run_messages("session-1", messages))
 
     assert [row[0] for row in captured] == [
-        "turn-1:assistant:0",
-        "turn-1:tool:0",
-        "turn-1:assistant:1",
+        "assistant-live-id-1",
+        "tool-live-id",
+        "assistant-live-id-2",
     ]
-    assert captured[0][4][0]["id"] == "turn-1:assistant:0:text:0"
-    assert captured[0][4][1]["id"] == "turn-1:assistant:0:call:call-1"
-    assert captured[1][4][0]["id"] == "turn-1:tool:0:result:call-1"
-    assert captured[2][4][0]["id"] == "turn-1:assistant:1:text:0"
+    assert [row[4] for row in captured] == ["turn-1", "turn-1", "turn-1"]
+    assert captured[0][5][0]["id"] == "text-part-1"
+    assert captured[0][5][1]["id"] == "call-part-1"
+    assert captured[1][5][0]["id"] == "result-part-1"
+    assert captured[2][5][0]["id"] == "text-part-2"
 
 
-def test_persist_run_messages_is_stable_after_ui_roundtrip(
+def test_persist_run_messages_is_stable_after_metadata_roundtrip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_batches: list[list[StoredRow]] = []
@@ -114,12 +128,18 @@ def test_persist_run_messages_is_stable_after_ui_roundtrip(
         ai_messages.Message(
             id="user-1",
             role="user",
-            parts=[ai_messages.TextPart(text="message 1")],
+            parts=[ai_messages.TextPart(id="user-text-1", text="message 1")],
         ),
         ai_messages.Message(
             id="assistant-1",
+            turn_id="turn-1",
             role="assistant",
-            parts=[ai_messages.TextPart(text="reply 1")],
+            parts=[
+                ai_messages.TextPart(
+                    id="assistant-text-1",
+                    text="reply 1",
+                )
+            ],
         ),
     ]
 
@@ -127,16 +147,24 @@ def test_persist_run_messages_is_stable_after_ui_roundtrip(
     first_batch = captured_batches[-1]
     assert [row[0] for row in first_batch] == [
         "user-1",
-        "assistant-1:assistant:0",
+        "assistant-1",
     ]
 
     stored = [
         ai_messages.Message.model_validate(
-            {"id": row[0], "role": row[3], "parts": row[4]}
+            {
+                "id": row[0],
+                "role": row[3],
+                "turn_id": row[4],
+                "parts": row[5],
+            }
         )
         for row in first_batch
     ]
-    ui_messages = to_ui_messages(stored)
+    ui_messages = [
+        UIMessage.model_validate(m.model_dump(mode="json", by_alias=True))
+        for m in to_ui_messages(stored)
+    ]
     roundtripped, _ = to_messages(
         [
             *ui_messages,
@@ -155,10 +183,49 @@ def test_persist_run_messages_is_stable_after_ui_roundtrip(
 
     assert [row[0] for row in second_batch] == [
         "user-1",
-        "assistant-1:assistant:0",
+        "assistant-1",
         "user-2",
     ]
-    assert "assistant-1" not in {row[0] for row in second_batch}
+    assert second_batch[1][4] == "turn-1"
+    assert second_batch[1][5][0]["id"] == "assistant-text-1"
+
+
+def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
+    stored = [
+        db.StoredMessage(
+            id="user-1",
+            seq=0,
+            role="user",
+            parts=[
+                ai_messages.TextPart(
+                    id="user-text-1",
+                    text="message 1",
+                ).model_dump(mode="json")
+            ],
+            created_at="2026-05-20T00:00:00+00:00",
+        ),
+        db.StoredMessage(
+            id="assistant-1",
+            seq=1,
+            turn_id="turn-1",
+            role="assistant",
+            parts=[
+                ai_messages.TextPart(
+                    id="assistant-text-1",
+                    text="reply 1",
+                ).model_dump(mode="json")
+            ],
+            created_at="2026-05-20T00:00:01+00:00",
+        ),
+    ]
+
+    messages = sessions._stored_to_ai_messages(stored)
+
+    assert [(m.id, m.turn_id, m.role) for m in messages] == [
+        ("user-1", None, "user"),
+        ("assistant-1", "turn-1", "assistant"),
+    ]
+    assert sessions._extract_first_user_text(messages) == "message 1"
 
 
 def test_no_op_sse_returns_finish_chunk() -> None:

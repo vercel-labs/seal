@@ -36,12 +36,14 @@ CREATE TABLE IF NOT EXISTS messages (
     id          TEXT PRIMARY KEY,
     session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     seq         INTEGER,
+    turn_id     TEXT,
     role        TEXT NOT NULL,
     parts       JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq INTEGER;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS turn_id TEXT;
 
 WITH ranked AS (
     SELECT
@@ -72,11 +74,6 @@ CREATE TABLE IF NOT EXISTS chat_runs (
     PRIMARY KEY (session_id, request_id)
 );
 
--- Replay state was previously tracked in ``session_replays``.  The new
--- SDK handles resume natively via ``replay=True`` message flags, so this
--- table is no longer needed.  Drop is idempotent.
-DROP TABLE IF EXISTS session_replays;
-
 """
 
 # ---------------------------------------------------------------------------
@@ -98,6 +95,7 @@ class StoredMessage(pydantic.BaseModel):
 
     id: str
     seq: int
+    turn_id: str | None = None
     role: str
     parts: list[dict[str, Any]]
     created_at: str
@@ -159,6 +157,7 @@ def _row_to_message(row: asyncpg.Record) -> StoredMessage:
     return StoredMessage(
         id=row["id"],
         seq=row["seq"],
+        turn_id=row["turn_id"],
         role=row["role"],
         parts=_parse_jsonb(row["parts"]),
         created_at=row["created_at"].isoformat(),
@@ -240,7 +239,7 @@ async def get_messages(session_id: str) -> list[StoredMessage]:
     """Return all messages for a session in chronological order."""
     pool = await get_pool()
     rows = await pool.fetch(
-        "SELECT id, seq, role, parts, created_at "
+        "SELECT id, seq, turn_id, role, parts, created_at "
         "FROM messages WHERE session_id = $1 ORDER BY seq, created_at, id",
         session_id,
     )
@@ -253,6 +252,7 @@ async def save_message(
     role: str,
     parts: list[dict[str, Any]],
     seq: int | None = None,
+    turn_id: str | None = None,
 ) -> None:
     """Insert or update a single message (upsert on id)."""
     pool = await get_pool()
@@ -261,25 +261,29 @@ async def save_message(
         "  SELECT COALESCE($5::int, COALESCE(MAX(seq) + 1, 0)) AS seq "
         "  FROM messages WHERE session_id = $2"
         ") "
-        "INSERT INTO messages (id, session_id, role, parts, seq) "
-        "SELECT $1, $2, $3, $4::jsonb, next_seq.seq FROM next_seq "
+        "INSERT INTO messages (id, session_id, role, parts, seq, turn_id) "
+        "SELECT $1, $2, $3, $4::jsonb, next_seq.seq, $6 FROM next_seq "
         "ON CONFLICT (id) DO UPDATE SET "
         "session_id = EXCLUDED.session_id, "
         "role = EXCLUDED.role, "
         "parts = EXCLUDED.parts, "
-        "seq = EXCLUDED.seq",
+        "seq = EXCLUDED.seq, "
+        "turn_id = EXCLUDED.turn_id",
         message_id,
         session_id,
         role,
         json.dumps(parts),
         seq,
+        turn_id,
     )
 
 
 async def save_messages_batch(
-    messages: list[tuple[str, str, int, str, list[dict[str, Any]]]],
+    messages: list[tuple[str, str, int, str, str | None, list[dict[str, Any]]]],
 ) -> None:
-    """Batch-upsert messages.  Each tuple is (id, session_id, seq, role, parts).
+    """Batch-upsert messages.
+
+    Each tuple is (id, session_id, seq, role, turn_id, parts).
 
     Duplicates by message ID are deduplicated (last occurrence wins)
     because PostgreSQL's ON CONFLICT DO UPDATE cannot touch the same
@@ -288,7 +292,10 @@ async def save_messages_batch(
     if not messages:
         return
     # Deduplicate: keep last occurrence per message ID.
-    seen: dict[str, tuple[str, str, int, str, list[dict[str, Any]]]] = {}
+    seen: dict[
+        str,
+        tuple[str, str, int, str, str | None, list[dict[str, Any]]],
+    ] = {}
     for row in messages:
         if row[0] in seen:
             del seen[row[0]]
@@ -299,19 +306,21 @@ async def save_messages_batch(
     # Build a single VALUES clause for all messages.
     args: list[Any] = []
     placeholders: list[str] = []
-    for i, (mid, sid, seq, role, parts) in enumerate(deduped):
-        base = i * 5
+    for i, (mid, sid, seq, role, turn_id, parts) in enumerate(deduped):
+        base = i * 6
         placeholders.append(
-            f"(${base + 1}, ${base + 2}, ${base + 3}, ${base + 4}, ${base + 5}::jsonb)"
+            f"(${base + 1}, ${base + 2}, ${base + 3}, ${base + 4}, "
+            f"${base + 5}, ${base + 6}::jsonb)"
         )
-        args.extend([mid, sid, seq, role, json.dumps(parts)])
+        args.extend([mid, sid, seq, role, turn_id, json.dumps(parts)])
     sql = (
-        "INSERT INTO messages (id, session_id, seq, role, parts) VALUES "
+        "INSERT INTO messages (id, session_id, seq, role, turn_id, parts) VALUES "
         + ", ".join(placeholders)
         + " ON CONFLICT (id) DO UPDATE SET "
         + "session_id = EXCLUDED.session_id, "
         + "seq = EXCLUDED.seq, "
         + "role = EXCLUDED.role, "
+        + "turn_id = EXCLUDED.turn_id, "
         + "parts = EXCLUDED.parts"
     )
     await pool.execute(sql, *args)
