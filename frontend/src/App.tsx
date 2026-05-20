@@ -1,9 +1,11 @@
 import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
+  getToolName,
+  isToolUIPart,
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from "ai";
-import type { FileUIPart, ToolUIPart, UIMessage } from "ai";
+import type { FileUIPart, UIMessage } from "ai";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -192,31 +194,31 @@ function ChatView({
               messages.map((message) => (
                 <Fragment key={message.id}>
                   {message.parts.map((part, partIndex) => {
-                    if (
-                      typeof part.type === "string" &&
-                      part.type.startsWith("tool-")
-                    ) {
-                      const toolPart = part as ToolUIPart;
-                      const hasApproval = !!toolPart.approval;
-                      const isComplete = toolPart.state === "output-available";
-                      const needsApproval =
-                        toolPart.state === "approval-requested";
+                    if (isToolUIPart(part)) {
+                      const hasApproval = !!part.approval;
+                      const isComplete = part.state === "output-available";
+                      const needsApproval = part.state === "approval-requested";
 
                       return (
                         <Tool
                           key={`${message.id}-${partIndex}`}
                           defaultOpen={isComplete || needsApproval}
                         >
-                          <ToolHeader
-                            type={toolPart.type}
-                            state={toolPart.state}
-                          />
+                          {part.type === "dynamic-tool" ? (
+                            <ToolHeader
+                              type={part.type}
+                              state={part.state}
+                              toolName={getToolName(part)}
+                            />
+                          ) : (
+                            <ToolHeader type={part.type} state={part.state} />
+                          )}
                           <ToolContent>
-                            <ToolInput input={toolPart.input} />
+                            <ToolInput input={part.input} />
                             {hasApproval && (
                               <Confirmation
-                                approval={toolPart.approval}
-                                state={toolPart.state}
+                                approval={part.approval}
+                                state={part.state}
                               >
                                 <ConfirmationRequest>
                                   This tool requires your approval to run.
@@ -232,7 +234,7 @@ function ChatView({
                                     variant="outline"
                                     onClick={() =>
                                       addToolApprovalResponse({
-                                        id: toolPart.approval!.id,
+                                        id: part.approval!.id,
                                         approved: false,
                                       })
                                     }
@@ -243,7 +245,7 @@ function ChatView({
                                     variant="default"
                                     onClick={() =>
                                       addToolApprovalResponse({
-                                        id: toolPart.approval!.id,
+                                        id: part.approval!.id,
                                         approved: true,
                                       })
                                     }
@@ -254,8 +256,8 @@ function ChatView({
                               </Confirmation>
                             )}
                             <ToolOutput
-                              output={toolPart.output}
-                              errorText={toolPart.errorText}
+                              output={part.output}
+                              errorText={part.errorText}
                             />
                           </ToolContent>
                         </Tool>

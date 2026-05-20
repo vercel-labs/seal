@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterable, Callable
 from typing import Any
 
 import ai
@@ -17,8 +17,11 @@ from ai.agents.ui.ai_sdk import (
     UIMessage,
     apply_approvals,
     to_messages,
-    to_sse,
+    to_stream,
+    to_ui_messages,
 )
+from ai.agents.ui.ai_sdk.outbound.sse import format_done_sse, format_sse
+from ai.agents.ui.ai_sdk.protocol import FinishPart
 from vercel.blob import AsyncBlobClient
 
 import agent
@@ -126,11 +129,7 @@ async def _inline_file_parts(
                 data_url = f"data:{media_type};base64,{b64}"
 
                 new_parts.append(
-                    ai_messages.FilePart(
-                        data=data_url,
-                        media_type=media_type,
-                        filename=part.filename,
-                    )
+                    part.model_copy(update={"data": data_url, "media_type": media_type})
                 )
             else:
                 new_parts.append(part)
@@ -149,129 +148,6 @@ def _serialize_parts(parts: list[ai_messages.Part]) -> list[dict[str, Any]]:
     return [p.model_dump(mode="json") for p in parts]
 
 
-_ASSISTANT_BUBBLE_ROLES = frozenset({"assistant", "tool", "internal"})
-
-
-def _turn_id_from_message_id(message_id: str) -> str | None:
-    """Extract the UI turn id from an adapter-stable message id."""
-    for marker in (":assistant:", ":tool:", ":internal:"):
-        if marker in message_id:
-            return message_id.split(marker, 1)[0]
-    return None
-
-
-def _message_turn_id(message: ai_messages.Message) -> str | None:
-    return message.turn_id or _turn_id_from_message_id(message.id)
-
-
-def _stable_part_id(
-    message_id: str,
-    part: ai_messages.Part,
-    index: int,
-) -> str:
-    """Return the same part-id shape used by the AI SDK UI inbound adapter."""
-    match part:
-        case ai_messages.TextPart():
-            return f"{message_id}:text:{index}"
-        case ai_messages.ReasoningPart():
-            return f"{message_id}:reasoning:{index}"
-        case ai_messages.ToolCallPart(tool_call_id=tool_call_id):
-            return f"{message_id}:call:{tool_call_id}"
-        case ai_messages.ToolResultPart(tool_call_id=tool_call_id):
-            return f"{message_id}:result:{tool_call_id}"
-        case ai_messages.BuiltinToolCallPart(tool_call_id=tool_call_id):
-            return f"{message_id}:builtin-call:{tool_call_id}"
-        case ai_messages.BuiltinToolReturnPart(tool_call_id=tool_call_id):
-            return f"{message_id}:builtin-result:{tool_call_id}"
-        case ai_messages.HookPart():
-            return f"{message_id}:hook:{index}"
-        case ai_messages.FilePart():
-            return f"{message_id}:file:{index}"
-    raise TypeError(f"Unsupported message part: {type(part).__name__}")
-
-
-def _with_stable_part_ids(
-    message_id: str,
-    parts: list[ai_messages.Part],
-) -> list[ai_messages.Part]:
-    counts: dict[str, int] = {}
-    result: list[ai_messages.Part] = []
-
-    for index, part in enumerate(parts):
-        base = _stable_part_id(message_id, part, index)
-        seen = counts.get(base, 0)
-        counts[base] = seen + 1
-        part_id = base if seen == 0 else f"{base}:{seen}"
-        result.append(part.model_copy(update={"id": part_id}))
-
-    return result
-
-
-def _canonicalize_run_messages(
-    messages: list[ai_messages.Message],
-) -> list[ai_messages.Message]:
-    """Normalize message ids to the UI adapter's stable round-trip shape."""
-    result: list[ai_messages.Message] = []
-    i = 0
-
-    while i < len(messages):
-        message = messages[i]
-        if message.role == "system":
-            i += 1
-            continue
-
-        if message.role != "assistant":
-            result.append(
-                message.model_copy(
-                    update={
-                        "parts": _with_stable_part_ids(
-                            message.id,
-                            message.parts,
-                        )
-                    }
-                )
-            )
-            i += 1
-            continue
-
-        turn_id = _message_turn_id(message) or message.id
-        assistant_index = 0
-        tool_index = 0
-        internal_index = 0
-
-        while i < len(messages) and messages[i].role in _ASSISTANT_BUBBLE_ROLES:
-            current = messages[i]
-            match current.role:
-                case "assistant":
-                    message_id = f"{turn_id}:assistant:{assistant_index}"
-                    assistant_index += 1
-                case "tool":
-                    message_id = f"{turn_id}:tool:{tool_index}"
-                    tool_index += 1
-                case "internal":
-                    message_id = f"{turn_id}:internal:{internal_index}"
-                    internal_index += 1
-                case _:
-                    # Narrowed by the while condition; keeps type checkers happy.
-                    message_id = current.id
-
-            result.append(
-                current.model_copy(
-                    update={
-                        "id": message_id,
-                        "turn_id": turn_id,
-                        "parts": _with_stable_part_ids(
-                            message_id,
-                            current.parts,
-                        ),
-                    }
-                )
-            )
-            i += 1
-
-    return result
-
-
 async def _persist_run_messages(
     session_id: str,
     messages: list[ai_messages.Message],
@@ -282,13 +158,32 @@ async def _persist_run_messages(
     request time from ``agent.SYSTEM`` and should never round-trip
     through the database.
     """
-    messages = _canonicalize_run_messages(messages)
-    rows: list[tuple[str, str, int, str, list[dict[str, Any]]]] = [
-        (m.id, session_id, seq, m.role, _serialize_parts(m.parts))
-        for seq, m in enumerate(messages)
+    stored_messages = [m for m in messages if m.role != "system"]
+    rows: list[tuple[str, str, int, str, str | None, list[dict[str, Any]]]] = [
+        (m.id, session_id, seq, m.role, m.turn_id, _serialize_parts(m.parts))
+        for seq, m in enumerate(stored_messages)
     ]
     if rows:
         await db.save_messages_batch(rows)
+
+
+def _latest_assistant_metadata(messages: list[ai_messages.Message]) -> Any | None:
+    ui_messages = to_ui_messages([m for m in messages if m.role != "system"])
+    for message in reversed(ui_messages):
+        if message.role == "assistant":
+            return message.metadata
+    return None
+
+
+async def _to_sse_with_roundtrip_metadata(
+    events: AsyncIterable[ai_events.AgentEvent],
+    get_messages: Callable[[], list[ai_messages.Message]],
+) -> AsyncGenerator[str]:
+    async for part in to_stream(events):
+        if isinstance(part, FinishPart):
+            part.message_metadata = _latest_assistant_metadata(get_messages())
+        yield format_sse(part)
+    yield format_done_sse()
 
 
 async def _no_op_sse() -> AsyncGenerator[str]:
@@ -362,7 +257,10 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                             ai.abort_pending_hook(event.hook)
                         yield event
 
-                async for chunk in to_sse(process()):
+                async for chunk in _to_sse_with_roundtrip_metadata(
+                    process(),
+                    lambda: result.messages,
+                ):
                     yield chunk
 
                 # Persist the full updated history once the run finishes

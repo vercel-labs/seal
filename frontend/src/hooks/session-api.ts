@@ -51,54 +51,6 @@ export async function generateSessionTitle(id: string): Promise<Session> {
 // Messages
 // ---------------------------------------------------------------------------
 
-/** Part types the UI knows how to render. */
-const KNOWN_TYPES = new Set([
-  "text",
-  "file",
-  "step-start",
-  "source-url",
-  "source-document",
-  "reasoning",
-]);
-
-function isKnownPart(p: Record<string, unknown>): boolean {
-  const t = p.type as string | undefined;
-  if (!t) return false;
-  return KNOWN_TYPES.has(t) || t.startsWith("tool-");
-}
-
-function normalizePart(
-  part: Record<string, unknown>,
-): Record<string, unknown> | null {
-  if (!isKnownPart(part)) return null;
-
-  if (typeof part.type === "string" && part.type.startsWith("tool-")) {
-    if (part.output !== undefined) {
-      return {
-        ...part,
-        state:
-          part.state === "output-error" || typeof part.errorText === "string"
-            ? "output-error"
-            : part.state === "output-denied" ||
-                (typeof part.approval === "object" &&
-                  part.approval !== null &&
-                  (part.approval as { approved?: unknown }).approved === false)
-              ? "output-denied"
-              : "output-available",
-      };
-    }
-
-    if (part.state === "call") {
-      return {
-        ...part,
-        state: "input-available",
-      };
-    }
-  }
-
-  return part;
-}
-
 /**
  * Fetch messages for a session and convert them to the UIMessage shape
  * that `useChat` expects as `initialMessages`.
@@ -113,8 +65,8 @@ export async function fetchSessionMessages(
     messages: {
       id: string;
       role: string;
-      parts: Record<string, unknown>[];
-      createdAt?: string;
+      metadata?: UIMessage["metadata"];
+      parts: UIMessage["parts"];
     }[];
   } = await res.json();
 
@@ -122,12 +74,8 @@ export async function fetchSessionMessages(
     .map((m) => ({
       id: m.id,
       role: m.role as UIMessage["role"],
-      parts: m.parts
-        .map(normalizePart)
-        .filter(
-          (part): part is Record<string, unknown> => part !== null,
-        ) as UIMessage["parts"],
-      ...(m.createdAt ? { createdAt: new Date(m.createdAt) } : {}),
+      ...(m.metadata !== undefined ? { metadata: m.metadata } : {}),
+      parts: m.parts,
     }))
     .filter((m) => m.parts.length > 0);
 }
