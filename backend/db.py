@@ -20,6 +20,8 @@ from typing import Any
 import asyncpg  # type: ignore[import-untyped]
 import pydantic
 
+StoredRow = tuple[str, str, int, str, str | None, list[dict[str, Any]]]
+
 # ---------------------------------------------------------------------------
 # Schema (inlined so the backend has no runtime dependency on repo layout)
 # ---------------------------------------------------------------------------
@@ -270,7 +272,7 @@ async def save_message(
 
 
 async def save_messages_batch(
-    messages: list[tuple[str, str, int, str, str | None, list[dict[str, Any]]]],
+    messages: list[StoredRow],
 ) -> None:
     """Batch-upsert messages.
 
@@ -306,3 +308,68 @@ async def save_messages_batch(
         + "parts = EXCLUDED.parts"
     )
     await pool.execute(sql, *args)
+
+
+def _assert_valid_snapshot(session_id: str, messages: list[StoredRow]) -> None:
+    message_ids = [row[0] for row in messages]
+    assert len(message_ids) == len(set(message_ids)), (
+        "save_messages_snapshot received duplicate message IDs"
+    )
+
+    session_ids = {row[1] for row in messages}
+    assert session_ids <= {session_id}, (
+        "save_messages_snapshot received rows for a different session"
+    )
+
+    seqs = [row[2] for row in messages]
+    assert seqs == list(range(len(messages))), (
+        "save_messages_snapshot requires dense sequence numbers"
+    )
+
+
+async def save_messages_snapshot(
+    session_id: str,
+    messages: list[StoredRow],
+) -> None:
+    """Replace a session's persisted messages with the supplied snapshot.
+
+    Rows are upserted by message ID, then any existing rows for the session
+    absent from this snapshot are deleted.  This keeps the database aligned
+    with the backend's canonical run history instead of accumulating stale
+    rows from earlier attempts with fresh assistant/tool IDs.
+    """
+    _assert_valid_snapshot(session_id, messages)
+    message_ids = [row[0] for row in messages]
+
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        if not messages:
+            await conn.execute("DELETE FROM messages WHERE session_id = $1", session_id)
+            return
+
+        args: list[Any] = []
+        placeholders: list[str] = []
+        for i, (mid, sid, seq, role, turn_id, parts) in enumerate(messages):
+            base = i * 6
+            placeholders.append(
+                f"(${base + 1}, ${base + 2}, ${base + 3}, ${base + 4}, "
+                f"${base + 5}, ${base + 6}::jsonb)"
+            )
+            args.extend([mid, sid, seq, role, turn_id, json.dumps(parts)])
+
+        sql = (
+            "INSERT INTO messages (id, session_id, seq, role, turn_id, parts) VALUES "
+            + ", ".join(placeholders)
+            + " ON CONFLICT (id) DO UPDATE SET "
+            + "session_id = EXCLUDED.session_id, "
+            + "seq = EXCLUDED.seq, "
+            + "role = EXCLUDED.role, "
+            + "turn_id = EXCLUDED.turn_id, "
+            + "parts = EXCLUDED.parts"
+        )
+        await conn.execute(sql, *args)
+        await conn.execute(
+            "DELETE FROM messages WHERE session_id = $1 AND NOT (id = ANY($2::text[]))",
+            session_id,
+            message_ids,
+        )

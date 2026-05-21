@@ -37,7 +37,7 @@ async def create_session(body: CreateSessionRequest) -> db.Session:
 def _stored_to_ai_messages(
     rows: list[db.StoredMessage],
 ) -> list[ai_messages.Message]:
-    """Decode canonical persisted rows into ``ai.messages.Message`` objects."""
+    """Decode canonical persisted rows into framework messages."""
     return [
         ai_messages.Message.model_validate(
             {
