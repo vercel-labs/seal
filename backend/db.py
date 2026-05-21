@@ -65,15 +65,6 @@ ALTER TABLE messages ALTER COLUMN seq SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_session_seq
     ON messages(session_id, seq, created_at, id);
 
-CREATE TABLE IF NOT EXISTS chat_runs (
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    request_id  TEXT NOT NULL,
-    status      TEXT NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (session_id, request_id)
-);
-
 """
 
 # ---------------------------------------------------------------------------
@@ -324,65 +315,3 @@ async def save_messages_batch(
         + "parts = EXCLUDED.parts"
     )
     await pool.execute(sql, *args)
-
-
-# ---------------------------------------------------------------------------
-# Chat run idempotency
-# ---------------------------------------------------------------------------
-
-
-async def start_chat_run(session_id: str, request_id: str) -> str:
-    """Try to start an idempotent chat run and return its prior/current state."""
-    pool = await get_pool()
-    row = await pool.fetchrow(
-        "INSERT INTO chat_runs (session_id, request_id, status) "
-        "VALUES ($1, $2, 'in_progress') "
-        "ON CONFLICT DO NOTHING "
-        "RETURNING status",
-        session_id,
-        request_id,
-    )
-    if row is not None:
-        return "started"
-
-    row = await pool.fetchrow(
-        "SELECT status FROM chat_runs WHERE session_id = $1 AND request_id = $2",
-        session_id,
-        request_id,
-    )
-    if row is None:
-        return "started"
-
-    status = str(row["status"])
-    if status == "failed":
-        restarted = await pool.fetchrow(
-            "UPDATE chat_runs SET status = 'in_progress', updated_at = now() "
-            "WHERE session_id = $1 AND request_id = $2 AND status = 'failed' "
-            "RETURNING status",
-            session_id,
-            request_id,
-        )
-        return "started" if restarted is not None else "in_progress"
-    return status
-
-
-async def complete_chat_run(session_id: str, request_id: str) -> None:
-    """Mark a chat run completed."""
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE chat_runs SET status = 'completed', updated_at = now() "
-        "WHERE session_id = $1 AND request_id = $2",
-        session_id,
-        request_id,
-    )
-
-
-async def fail_chat_run(session_id: str, request_id: str) -> None:
-    """Mark a chat run failed so the same request can be retried."""
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE chat_runs SET status = 'failed', updated_at = now() "
-        "WHERE session_id = $1 AND request_id = $2",
-        session_id,
-        request_id,
-    )
