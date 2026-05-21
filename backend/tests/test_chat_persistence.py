@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterable
-from typing import Any, cast
+from typing import Any
 
 import ai
 import pytest
-from ai import events as ai_events
 from ai import messages as ai_messages
-from ai.agents.ui.ai_sdk import UIMessage, to_messages, to_ui_messages, ui_events
+from ai.agents.ui.ai_sdk import UIMessage, to_messages, to_ui_messages
 
 import db
 from routers import chat, sessions
@@ -228,45 +226,3 @@ def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
         ("assistant-1", "turn-1", "assistant"),
     ]
     assert sessions._extract_first_user_text(messages) == "message 1"
-
-
-def test_to_sse_with_roundtrip_metadata_injects_finish_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fake_to_stream(
-        events: AsyncIterable[ai_events.AgentEvent],
-    ) -> AsyncGenerator[ui_events.UIMessageStreamEvent]:
-        _ = events
-        yield ui_events.UIFinishEvent(finish_reason="stop")
-
-    async def no_events() -> AsyncGenerator[ai_events.AgentEvent]:
-        if False:
-            yield cast(ai_events.AgentEvent, None)
-
-    messages = [
-        ai_messages.Message(
-            id="assistant-1",
-            turn_id="turn-1",
-            role="assistant",
-            parts=[ai_messages.TextPart(id="text-1", text="hi")],
-        )
-    ]
-
-    async def collect() -> list[str]:
-        return [
-            chunk
-            async for chunk in chat._to_sse_with_roundtrip_metadata(
-                no_events(),
-                lambda: messages,
-            )
-        ]
-
-    monkeypatch.setattr(chat, "to_stream", fake_to_stream)
-
-    chunks = asyncio.run(collect())
-
-    assert chunks[0].startswith('data: {"type": "finish"')
-    assert '"messageMetadata":' in chunks[0]
-    assert '"sourceMessages":' in chunks[0]
-    assert '"id": "assistant-1"' in chunks[0]
-    assert chunks[1] == "data: [DONE]\n\n"

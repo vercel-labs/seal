@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncGenerator, AsyncIterable, Callable
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import ai
@@ -16,11 +16,8 @@ from ai.agents.ui.ai_sdk import (
     UI_MESSAGE_STREAM_HEADERS,
     UIMessage,
     apply_approvals,
-    outbound_stream,
     to_messages,
-    to_stream,
-    to_ui_messages,
-    ui_events,
+    to_sse,
 )
 from vercel.blob import AsyncBlobClient
 
@@ -167,25 +164,6 @@ async def _persist_run_messages(
         await db.save_messages_batch(rows)
 
 
-def _latest_assistant_metadata(messages: list[ai_messages.Message]) -> Any | None:
-    ui_messages = to_ui_messages([m for m in messages if m.role != "system"])
-    for message in reversed(ui_messages):
-        if message.role == "assistant":
-            return message.metadata
-    return None
-
-
-async def _to_sse_with_roundtrip_metadata(
-    events: AsyncIterable[ai_events.AgentEvent],
-    get_messages: Callable[[], list[ai_messages.Message]],
-) -> AsyncGenerator[str]:
-    async for part in to_stream(events):
-        if isinstance(part, ui_events.UIFinishEvent):
-            part.message_metadata = _latest_assistant_metadata(get_messages())
-        yield outbound_stream.format_sse(part)
-    yield outbound_stream.format_done_sse()
-
-
 # ---------------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------------
@@ -236,10 +214,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                         ai.abort_pending_hook(event.hook)
                     yield event
 
-            async for chunk in _to_sse_with_roundtrip_metadata(
-                process(),
-                lambda: result.messages,
-            ):
+            async for chunk in to_sse(process()):
                 yield chunk
 
             # Persist the full updated history once the run finishes
