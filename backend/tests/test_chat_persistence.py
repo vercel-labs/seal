@@ -230,16 +230,6 @@ def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
     assert sessions._extract_first_user_text(messages) == "message 1"
 
 
-def test_no_op_sse_returns_finish_chunk() -> None:
-    async def collect() -> list[str]:
-        return [chunk async for chunk in chat._no_op_sse()]
-
-    assert asyncio.run(collect()) == [
-        'data: {"type": "finish", "finishReason": "stop"}\n\n',
-        "data: [DONE]\n\n",
-    ]
-
-
 def test_to_sse_with_roundtrip_metadata_injects_finish_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

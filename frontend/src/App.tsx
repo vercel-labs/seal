@@ -131,13 +131,10 @@ function ChatView({
     () =>
       new DefaultChatTransport({
         api: "/api/chat",
-        prepareSendMessagesRequest: ({ id, messages, trigger, messageId }) => {
-          const lastMessage = messages[messages.length - 1];
-          const stableMessageId = messageId ?? lastMessage?.id ?? "empty";
+        prepareSendMessagesRequest: ({ id, messages }) => {
           return {
             body: {
               session_id: id,
-              request_id: `${trigger}:${stableMessageId}`,
               messages,
             },
           };

@@ -186,12 +186,6 @@ async def _to_sse_with_roundtrip_metadata(
     yield outbound_stream.format_done_sse()
 
 
-async def _no_op_sse() -> AsyncGenerator[str]:
-    """Return a valid empty UI-message stream for duplicate completed runs."""
-    yield outbound_stream.format_sse(ui_events.UIFinishEvent(finish_reason="stop"))
-    yield outbound_stream.format_done_sse()
-
-
 # ---------------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------------
@@ -202,7 +196,6 @@ class ChatRequest(pydantic.BaseModel):
 
     messages: list[UIMessage]
     session_id: str
-    request_id: str | None = None
 
 
 @router.post("/chat")
@@ -225,55 +218,34 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     system = ai.system_message(agent.SYSTEM)
     full_messages = [system, *messages]
 
-    request_id = request.request_id
-    if request_id is not None:
-        run_status = await db.start_chat_run(session_id, request_id)
-        if run_status == "completed":
-            return fastapi.responses.StreamingResponse(
-                _no_op_sse(),
-                headers=UI_MESSAGE_STREAM_HEADERS,
-            )
-        if run_status == "in_progress":
-            raise fastapi.HTTPException(
-                status_code=409,
-                detail="Chat run already in progress",
-            )
-
     model = agent.get_model()
 
     async def stream_response() -> AsyncGenerator[str]:
-        try:
-            async with agent.seal.run(model, full_messages) as result:
+        async with agent.seal.run(model, full_messages) as result:
 
-                async def process() -> AsyncGenerator[ai_events.AgentEvent]:
-                    async for event in result:
-                        # Suspend the run when a tool approval is pending.
-                        # The SDK persists the suspension as ``is_hook_pending``
-                        # placeholders on the message history; the next request
-                        # carrying the approval response resumes natively.
-                        if (
-                            isinstance(event, ai_events.HookEvent)
-                            and event.hook.status == "pending"
-                        ):
-                            ai.abort_pending_hook(event.hook)
-                        yield event
+            async def process() -> AsyncGenerator[ai_events.AgentEvent]:
+                async for event in result:
+                    # Suspend the run when a tool approval is pending.
+                    # The SDK persists the suspension as ``is_hook_pending``
+                    # placeholders on the message history; the next request
+                    # carrying the approval response resumes natively.
+                    if (
+                        isinstance(event, ai_events.HookEvent)
+                        and event.hook.status == "pending"
+                    ):
+                        ai.abort_pending_hook(event.hook)
+                    yield event
 
-                async for chunk in _to_sse_with_roundtrip_metadata(
-                    process(),
-                    lambda: result.messages,
-                ):
-                    yield chunk
+            async for chunk in _to_sse_with_roundtrip_metadata(
+                process(),
+                lambda: result.messages,
+            ):
+                yield chunk
 
-                # Persist the full updated history once the run finishes
-                # (whether normally or via approval suspension).
-                await _persist_run_messages(session_id, result.messages)
-                await db.touch_session(session_id)
-                if request_id is not None:
-                    await db.complete_chat_run(session_id, request_id)
-        except BaseException:
-            if request_id is not None:
-                await db.fail_chat_run(session_id, request_id)
-            raise
+            # Persist the full updated history once the run finishes
+            # (whether normally or via approval suspension).
+            await _persist_run_messages(session_id, result.messages)
+            await db.touch_session(session_id)
 
     return fastapi.responses.StreamingResponse(
         stream_response(),
