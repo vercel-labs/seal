@@ -226,3 +226,13 @@ def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
         ("assistant-1", "turn-1", "assistant"),
     ]
     assert sessions._extract_first_user_text(messages) == "message 1"
+
+
+def test_save_messages_batch_rejects_duplicate_message_ids() -> None:
+    rows: list[StoredRow] = [
+        ("message-1", "session-1", 0, "user", None, []),
+        ("message-1", "session-1", 1, "assistant", "turn-1", []),
+    ]
+
+    with pytest.raises(AssertionError, match="duplicate message IDs"):
+        asyncio.run(db.save_messages_batch(rows))

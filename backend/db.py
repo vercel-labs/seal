@@ -275,29 +275,20 @@ async def save_messages_batch(
     """Batch-upsert messages.
 
     Each tuple is (id, session_id, seq, role, turn_id, parts).
-
-    Duplicates by message ID are deduplicated (last occurrence wins)
-    because PostgreSQL's ON CONFLICT DO UPDATE cannot touch the same
-    row twice in a single statement.
     """
     if not messages:
         return
-    # Deduplicate: keep last occurrence per message ID.
-    seen: dict[
-        str,
-        tuple[str, str, int, str, str | None, list[dict[str, Any]]],
-    ] = {}
-    for row in messages:
-        if row[0] in seen:
-            del seen[row[0]]
-        seen[row[0]] = row
-    deduped = list(seen.values())
+
+    message_ids = [row[0] for row in messages]
+    assert len(message_ids) == len(set(message_ids)), (
+        "save_messages_batch received duplicate message IDs"
+    )
 
     pool = await get_pool()
     # Build a single VALUES clause for all messages.
     args: list[Any] = []
     placeholders: list[str] = []
-    for i, (mid, sid, seq, role, turn_id, parts) in enumerate(deduped):
+    for i, (mid, sid, seq, role, turn_id, parts) in enumerate(messages):
         base = i * 6
         placeholders.append(
             f"(${base + 1}, ${base + 2}, ${base + 3}, ${base + 4}, "
