@@ -8,8 +8,8 @@ resolution-markers = [
 
 [[package]]
 name = "ai"
-version = "0.2.1.dev8+438a504"
-source = { git = "https://github.com/vercel-labs/ai-python?rev=refactor-ui-adapter#438a5046bde87b00e5184b059c72767947cc0090" }
+version = "0.2.1.dev15+8106729"
+source = { git = "https://github.com/vercel-labs/ai-python?rev=refactor-ui-adapter#8106729d51f3d1ab8cae1d3f1fa6df2ffcc75370" }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },

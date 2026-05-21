@@ -16,12 +16,12 @@ from ai.agents.ui.ai_sdk import (
     UI_MESSAGE_STREAM_HEADERS,
     UIMessage,
     apply_approvals,
+    outbound_stream,
     to_messages,
     to_stream,
     to_ui_messages,
+    ui_events,
 )
-from ai.agents.ui.ai_sdk.outbound.sse import format_done_sse, format_sse
-from ai.agents.ui.ai_sdk.protocol import FinishPart
 from vercel.blob import AsyncBlobClient
 
 import agent
@@ -180,15 +180,16 @@ async def _to_sse_with_roundtrip_metadata(
     get_messages: Callable[[], list[ai_messages.Message]],
 ) -> AsyncGenerator[str]:
     async for part in to_stream(events):
-        if isinstance(part, FinishPart):
+        if isinstance(part, ui_events.UIFinishEvent):
             part.message_metadata = _latest_assistant_metadata(get_messages())
-        yield format_sse(part)
-    yield format_done_sse()
+        yield outbound_stream.format_sse(part)
+    yield outbound_stream.format_done_sse()
 
 
 async def _no_op_sse() -> AsyncGenerator[str]:
     """Return a valid empty UI-message stream for duplicate completed runs."""
-    yield 'data: {"type":"finish","finishReason":"stop"}\n\n'
+    yield outbound_stream.format_sse(ui_events.UIFinishEvent(finish_reason="stop"))
+    yield outbound_stream.format_done_sse()
 
 
 # ---------------------------------------------------------------------------
