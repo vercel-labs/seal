@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 from collections.abc import AsyncGenerator
-from typing import Any
 
 import ai
 import fastapi
@@ -12,19 +11,17 @@ import fastapi.responses
 import pydantic
 from ai import events as ai_events
 from ai import messages as ai_messages
-from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
 from ai.agents.ui.ai_sdk import (
     UI_MESSAGE_STREAM_HEADERS,
     UIMessage,
     apply_approvals,
     to_messages,
     to_sse,
-    to_ui_messages,
 )
 from vercel.blob import AsyncBlobClient
 
 import agent
-import db
+import sessions as session_store
 
 router = fastapi.APIRouter()
 
@@ -135,151 +132,6 @@ async def _inline_file_parts(
 
 
 # ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
-
-
-def _history_signature(messages: list[ai_messages.Message]) -> list[dict[str, Any]]:
-    """Stable comparison shape for framework-normalized history.
-
-    Internal hook records and pending hook-result placeholders are framework
-    control state. They are persisted, but frontend requests may represent
-    them as approval UI state instead.
-    """
-    result: list[dict[str, Any]] = []
-    for message in messages:
-        if message.role in ("system", "internal"):
-            continue
-
-        parts: list[dict[str, Any]] = []
-        for part in message.parts:
-            if isinstance(part, ai_messages.ToolResultPart) and part.is_hook_pending:
-                continue
-            parts.append(part.model_dump(mode="json"))
-
-        if not parts and message.role == "tool":
-            continue
-
-        result.append(
-            {
-                "id": message.id,
-                "turn_id": message.turn_id,
-                "role": message.role,
-                "parts": parts,
-            }
-        )
-    return result
-
-
-def _assert_matching_history(
-    *,
-    request_messages: list[UIMessage],
-    stored_messages: list[ai_messages.Message],
-) -> UIMessage | None:
-    """Validate frontend history and return the latest new user message."""
-    stored_ui_messages = [
-        UIMessage.model_validate(m.model_dump(mode="json", by_alias=True))
-        for m in to_ui_messages(stored_messages)
-    ]
-
-    latest_user: UIMessage | None = None
-    request_history = request_messages
-    if (
-        len(request_messages) == len(stored_ui_messages) + 1
-        and request_messages[-1].role == "user"
-    ):
-        latest_user = request_messages[-1]
-        request_history = request_messages[:-1]
-
-    if len(request_history) != len(stored_ui_messages):
-        raise fastapi.HTTPException(
-            status_code=409,
-            detail="Frontend message history does not match stored history",
-        )
-
-    request_ai_messages, _ = to_messages(request_history)
-    stored_ai_messages, _ = to_messages(stored_ui_messages)
-    if _history_signature(request_ai_messages) != _history_signature(
-        stored_ai_messages
-    ):
-        raise fastapi.HTTPException(
-            status_code=409,
-            detail="Frontend message history does not match stored history",
-        )
-
-    return latest_user
-
-
-def _tool_call_id_for_hook(hook: ai_messages.HookPart[Any]) -> str | None:
-    if hook.hook_type != TOOL_APPROVAL_HOOK_TYPE:
-        return None
-    prefix = "approve_"
-    if not hook.hook_id.startswith(prefix):
-        return None
-    return hook.hook_id[len(prefix) :]
-
-
-def _turn_id_for_tool_call(
-    messages: list[ai_messages.Message],
-    tool_call_id: str,
-) -> str | None:
-    for message in reversed(messages):
-        if message.role != "assistant":
-            continue
-        if any(part.tool_call_id == tool_call_id for part in message.tool_calls):
-            return message.turn_id or message.id
-    return None
-
-
-def _with_pending_hook_messages(
-    messages: list[ai_messages.Message],
-    pending_hook_messages: list[ai_messages.Message],
-) -> list[ai_messages.Message]:
-    """Attach pending internal hook messages to the persisted snapshot."""
-    result = list(messages)
-    for message in pending_hook_messages:
-        if len(message.parts) != 1 or not isinstance(
-            message.parts[0], ai_messages.HookPart
-        ):
-            result.append(message)
-            continue
-
-        tool_call_id = _tool_call_id_for_hook(message.parts[0])
-        turn_id = (
-            _turn_id_for_tool_call(messages, tool_call_id)
-            if tool_call_id is not None
-            else None
-        )
-        result.append(message.model_copy(update={"turn_id": turn_id}))
-    return result
-
-
-async def _persist_run_messages(
-    session_id: str,
-    messages: list[ai_messages.Message],
-) -> None:
-    """Persist the latest canonical framework snapshot for a session.
-
-    The system message we prepended is dropped — it's reconstructed at
-    request time from ``agent.SYSTEM`` and should never round-trip
-    through the database.
-    """
-    stored_messages = [m for m in messages if m.role != "system"]
-    rows: list[tuple[str, str, int, str, str | None, list[dict[str, Any]]]] = [
-        (
-            m.id,
-            session_id,
-            seq,
-            m.role,
-            m.turn_id,
-            [p.model_dump(mode="json") for p in m.parts],
-        )
-        for seq, m in enumerate(stored_messages)
-    ]
-    await db.save_messages_snapshot(session_id, rows)
-
-
-# ---------------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------------
 
@@ -296,25 +148,16 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     """Handle chat requests and stream responses."""
     session_id = request.session_id
 
-    # Ensure the session exists (create if somehow missing).
-    if not await db.get_session(session_id):
-        await db.create_session(session_id)
-
-    stored_messages = [
-        ai_messages.Message.model_validate(
-            {
-                "id": row.id,
-                "turn_id": row.turn_id,
-                "role": row.role,
-                "parts": row.parts,
-            }
+    await session_store.get_or_create_session(session_id)
+    stored_messages = await session_store.load_ai_messages(session_id)
+    try:
+        latest_user_ui = session_store.validate_chat_history(
+            request_messages=request.messages,
+            stored_messages=stored_messages,
         )
-        for row in await db.get_messages(session_id)
-    ]
-    latest_user_ui = _assert_matching_history(
-        request_messages=request.messages,
-        stored_messages=stored_messages,
-    )
+    except session_store.HistoryMismatchError as exc:
+        raise fastapi.HTTPException(status_code=409, detail=str(exc)) from exc
+
     latest_user: ai_messages.Message | None = None
     if latest_user_ui is not None:
         latest_user_messages, _ = to_messages([latest_user_ui])
@@ -372,14 +215,14 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
             # Persist the full updated history once the run finishes
             # (whether normally or via approval suspension).
-            await _persist_run_messages(
+            await session_store.persist_ai_messages(
                 session_id,
-                _with_pending_hook_messages(
+                session_store.with_pending_hook_messages(
                     result.messages,
                     pending_hook_messages,
                 ),
             )
-            await db.touch_session(session_id)
+            await session_store.touch_session(session_id)
 
     return fastapi.responses.StreamingResponse(
         stream_response(),

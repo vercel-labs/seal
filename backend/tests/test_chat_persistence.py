@@ -4,14 +4,13 @@ import asyncio
 from typing import Any
 
 import ai
-import fastapi
 import pytest
 from ai import messages as ai_messages
 from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
 from ai.agents.ui.ai_sdk import UIMessage, to_messages, to_ui_messages
 
 import db
-from routers import chat, sessions
+import sessions as session_store
 
 StoredRow = tuple[str, str, int, str, str | None, list[dict[str, Any]]]
 
@@ -28,7 +27,9 @@ def test_persist_run_messages_assigns_dense_sequence_and_preserves_ids(
         assert session_id == "session-1"
         captured.extend(rows)
 
-    monkeypatch.setattr(db, "save_messages_snapshot", fake_save_messages_snapshot)
+    monkeypatch.setattr(
+        session_store, "save_messages_snapshot", fake_save_messages_snapshot
+    )
 
     messages = [
         ai.system_message("system"),
@@ -45,7 +46,7 @@ def test_persist_run_messages_assigns_dense_sequence_and_preserves_ids(
         ),
     ]
 
-    asyncio.run(chat._persist_run_messages("session-1", messages))
+    asyncio.run(session_store.persist_ai_messages("session-1", messages))
 
     assert [(row[0], row[2], row[3], row[4]) for row in captured] == [
         ("user-1", 0, "user", None),
@@ -67,7 +68,9 @@ def test_persist_run_messages_preserves_multi_step_assistant_turn(
         assert session_id == "session-1"
         captured.extend(rows)
 
-    monkeypatch.setattr(db, "save_messages_snapshot", fake_save_messages_snapshot)
+    monkeypatch.setattr(
+        session_store, "save_messages_snapshot", fake_save_messages_snapshot
+    )
 
     messages = [
         ai_messages.Message(
@@ -110,7 +113,7 @@ def test_persist_run_messages_preserves_multi_step_assistant_turn(
         ),
     ]
 
-    asyncio.run(chat._persist_run_messages("session-1", messages))
+    asyncio.run(session_store.persist_ai_messages("session-1", messages))
 
     assert [row[0] for row in captured] == [
         "assistant-live-id-1",
@@ -136,7 +139,9 @@ def test_persist_run_messages_is_stable_after_metadata_roundtrip(
         assert session_id == "session-1"
         captured_batches.append(rows)
 
-    monkeypatch.setattr(db, "save_messages_snapshot", fake_save_messages_snapshot)
+    monkeypatch.setattr(
+        session_store, "save_messages_snapshot", fake_save_messages_snapshot
+    )
 
     first_run = [
         ai_messages.Message(
@@ -157,7 +162,7 @@ def test_persist_run_messages_is_stable_after_metadata_roundtrip(
         ),
     ]
 
-    asyncio.run(chat._persist_run_messages("session-1", first_run))
+    asyncio.run(session_store.persist_ai_messages("session-1", first_run))
     first_batch = captured_batches[-1]
     assert [row[0] for row in first_batch] == [
         "user-1",
@@ -192,7 +197,7 @@ def test_persist_run_messages_is_stable_after_metadata_roundtrip(
         ]
     )
 
-    asyncio.run(chat._persist_run_messages("session-1", roundtripped))
+    asyncio.run(session_store.persist_ai_messages("session-1", roundtripped))
     second_batch = captured_batches[-1]
 
     assert [row[0] for row in second_batch] == [
@@ -206,7 +211,7 @@ def test_persist_run_messages_is_stable_after_metadata_roundtrip(
 
 def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
     stored = [
-        db.StoredMessage(
+        session_store.StoredMessage(
             id="user-1",
             seq=0,
             role="user",
@@ -218,7 +223,7 @@ def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
             ],
             created_at="2026-05-20T00:00:00+00:00",
         ),
-        db.StoredMessage(
+        session_store.StoredMessage(
             id="assistant-1",
             seq=1,
             turn_id="turn-1",
@@ -233,13 +238,13 @@ def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
         ),
     ]
 
-    messages = sessions._stored_to_ai_messages(stored)
+    messages = session_store.stored_to_ai_messages(stored)
 
     assert [(m.id, m.turn_id, m.role) for m in messages] == [
         ("user-1", None, "user"),
         ("assistant-1", "turn-1", "assistant"),
     ]
-    assert sessions._extract_first_user_text(messages) == "message 1"
+    assert session_store.first_user_text(messages) == "message 1"
 
 
 def test_framework_renders_persisted_pending_approval() -> None:
@@ -339,7 +344,7 @@ def test_history_assertion_uses_framework_normalization() -> None:
         )
     )
 
-    latest_user = chat._assert_matching_history(
+    latest_user = session_store.validate_chat_history(
         request_messages=request_messages,
         stored_messages=stored_messages,
     )
@@ -403,7 +408,7 @@ def test_history_assertion_accepts_approval_response() -> None:
             part["approval"] = {"id": "approve_call-1", "approved": True}
     request_messages = [UIMessage.model_validate(request_data[0])]
 
-    latest_user = chat._assert_matching_history(
+    latest_user = session_store.validate_chat_history(
         request_messages=request_messages,
         stored_messages=stored_messages,
     )
@@ -429,12 +434,11 @@ def test_history_assertion_rejects_changed_stored_history() -> None:
         )
     ]
 
-    with pytest.raises(fastapi.HTTPException) as exc_info:
-        chat._assert_matching_history(
+    with pytest.raises(session_store.HistoryMismatchError):
+        session_store.validate_chat_history(
             request_messages=request_messages,
             stored_messages=stored_messages,
         )
-    assert exc_info.value.status_code == 409
 
 
 def test_save_messages_batch_rejects_duplicate_message_ids() -> None:
@@ -444,7 +448,7 @@ def test_save_messages_batch_rejects_duplicate_message_ids() -> None:
     ]
 
     with pytest.raises(AssertionError, match="duplicate message IDs"):
-        asyncio.run(db.save_messages_batch(rows))
+        asyncio.run(session_store.save_messages_batch(rows))
 
 
 def test_save_messages_snapshot_rejects_duplicate_message_ids() -> None:
@@ -454,7 +458,7 @@ def test_save_messages_snapshot_rejects_duplicate_message_ids() -> None:
     ]
 
     with pytest.raises(AssertionError, match="duplicate message IDs"):
-        asyncio.run(db.save_messages_snapshot("session-1", rows))
+        asyncio.run(session_store.save_messages_snapshot("session-1", rows))
 
 
 def test_save_messages_snapshot_deletes_stale_rows(
@@ -502,7 +506,7 @@ def test_save_messages_snapshot_deletes_stale_rows(
         ("message-1", "session-1", 0, "user", None, []),
         ("message-2", "session-1", 1, "assistant", "turn-1", []),
     ]
-    asyncio.run(db.save_messages_snapshot("session-1", rows))
+    asyncio.run(session_store.save_messages_snapshot("session-1", rows))
 
     delete_call = calls[-1]
     assert delete_call[0].startswith("DELETE FROM messages WHERE session_id = $1")
