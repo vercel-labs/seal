@@ -15,7 +15,6 @@ from ai.agents.ui.ai_sdk import (
     UI_MESSAGE_STREAM_HEADERS,
     UIMessage,
     apply_approvals,
-    to_messages,
     to_sse,
 )
 from vercel.blob import AsyncBlobClient
@@ -150,40 +149,24 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
     await session_store.get_or_create_session(session_id)
     stored_messages = await session_store.load_ai_messages(session_id)
-    try:
-        latest_user_ui = session_store.validate_chat_history(
-            request_messages=request.messages,
-            stored_messages=stored_messages,
-        )
-    except session_store.HistoryMismatchError as exc:
-        raise fastapi.HTTPException(status_code=409, detail=str(exc)) from exc
-
-    latest_user: ai_messages.Message | None = None
-    if latest_user_ui is not None:
-        latest_user_messages, _ = to_messages([latest_user_ui])
-        if len(latest_user_messages) != 1 or latest_user_messages[0].role != "user":
-            raise fastapi.HTTPException(
-                status_code=400,
-                detail="Latest message must be a user message",
-            )
-        latest_user = latest_user_messages[0]
-
-    # Convert UI messages only to extract approval responses. Conversation
-    # history itself comes from the DB framework snapshot above.
-    _, approvals = to_messages(request.messages)
-    apply_approvals(approvals)
+    prepared = session_store.prepare_chat_request(
+        request_messages=request.messages,
+        stored_messages=stored_messages,
+    )
+    apply_approvals(prepared.approvals)
 
     # Inline blob URLs so the gateway can see the bytes.
-    messages = [m for m in stored_messages if m.role not in ("system", "internal")]
-    if latest_user is not None:
-        messages.append(latest_user)
+    messages = [m for m in prepared.messages if m.role not in ("system", "internal")]
     messages = await _inline_file_parts(messages)
 
-    if latest_user is None and not approvals:
+    if not prepared.has_work:
         raise fastapi.HTTPException(
             status_code=400,
             detail="No new user message or approval response to process",
         )
+
+    if prepared.changed:
+        await session_store.persist_ai_messages(session_id, prepared.messages)
 
     # Prepend the system prompt.
     system = ai.system_message(agent.SYSTEM)

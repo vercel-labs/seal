@@ -9,13 +9,14 @@ import fastapi
 import fastapi.middleware.cors
 
 import db
+import sessions
 from routers import chat, session
 
 
 @asynccontextmanager
 async def lifespan(_app: fastapi.FastAPI) -> AsyncIterator[None]:
-    """Create the DB pool + tables on startup, close on shutdown."""
-    await db.ensure_schema()
+    """Create configured storage on startup, close DB pool on shutdown."""
+    await sessions.ensure_schema()
     yield
     await db.close_pool()
 
