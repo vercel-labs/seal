@@ -207,3 +207,7 @@ class Session:
             if self._leaf_id is not None
             else []
         )
+
+
+def get_session(session_id: str | None = None, *, storage: Storage) -> Session:
+    return Session(SessionTree(storage), session_id)
