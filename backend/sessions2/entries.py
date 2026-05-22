@@ -1,9 +1,27 @@
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 import ai
 import pydantic
+
+
+def now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def new_entry_id(existing: set[str]) -> str:
+    for _ in range(100):
+        candidate = uuid.uuid4().hex[:8]
+        if candidate not in existing:
+            return candidate
+    return uuid.uuid4().hex
+
+
+def new_session_id() -> str:
+    return uuid.uuid4().hex
 
 
 class ModelSettings(pydantic.BaseModel):
@@ -52,3 +70,6 @@ Entry = Annotated[
     MessageEntry | ModelSettingsEntry | SessionInfoEntry | LeafEntry | CustomEntry,
     pydantic.Field(discriminator="kind"),
 ]
+
+
+ENTRY_ADAPTER: pydantic.TypeAdapter[Entry] = pydantic.TypeAdapter(Entry)
