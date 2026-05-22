@@ -1,132 +1,58 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterable
-from typing import Any, cast
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Any
 
 import ai
-import pytest
-from ai import events as ai_events
 from ai import messages as ai_messages
-from ai.agents.ui.ai_sdk import UIMessage, to_messages, to_ui_messages, ui_events
+from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
+from ai.agents.ui.ai_sdk import UIMessage, to_ui_messages
 
-import db
-from routers import chat, sessions
-
-StoredRow = tuple[str, str, int, str, str | None, list[dict[str, Any]]]
+import sessions as session_store
 
 
-def test_persist_run_messages_assigns_dense_sequence_and_preserves_ids(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[StoredRow] = []
-
-    async def fake_save_messages_batch(rows: list[StoredRow]) -> None:
-        captured.extend(rows)
-
-    monkeypatch.setattr(db, "save_messages_batch", fake_save_messages_batch)
-
-    messages = [
-        ai.system_message("system"),
-        ai_messages.Message(
-            id="user-1",
-            role="user",
-            parts=[ai_messages.TextPart(id="user-text-1", text="hello")],
-        ),
-        ai_messages.Message(
-            id="assistant-1",
-            turn_id="turn-1",
-            role="assistant",
-            parts=[ai_messages.TextPart(id="assistant-text-1", text="hi")],
-        ),
-    ]
-
-    asyncio.run(chat._persist_run_messages("session-1", messages))
-
-    assert [(row[0], row[2], row[3], row[4]) for row in captured] == [
-        ("user-1", 0, "user", None),
-        ("assistant-1", 1, "assistant", "turn-1"),
-    ]
-    assert captured[0][5][0]["id"] == "user-text-1"
-    assert captured[1][5][0]["id"] == "assistant-text-1"
+def run[T](coro: Coroutine[Any, Any, T]) -> T:
+    return asyncio.run(coro)
 
 
-def test_persist_run_messages_preserves_multi_step_assistant_turn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[StoredRow] = []
-
-    async def fake_save_messages_batch(rows: list[StoredRow]) -> None:
-        captured.extend(rows)
-
-    monkeypatch.setattr(db, "save_messages_batch", fake_save_messages_batch)
-
-    messages = [
-        ai_messages.Message(
-            id="assistant-live-id-1",
-            turn_id="turn-1",
-            role="assistant",
-            parts=[
-                ai_messages.TextPart(id="text-part-1", text="I'll use a tool."),
-                ai_messages.ToolCallPart(
-                    id="call-part-1",
-                    tool_call_id="call-1",
-                    tool_name="bash",
-                    tool_args='{"command":"echo hi"}',
-                ),
-            ],
-        ),
-        ai_messages.Message(
-            id="tool-live-id",
-            turn_id="turn-1",
-            role="tool",
-            parts=[
-                ai_messages.ToolResultPart(
-                    id="result-part-1",
-                    tool_call_id="call-1",
-                    tool_name="bash",
-                    result={"value": "hi\n"},
-                )
-            ],
-        ),
-        ai_messages.Message(
-            id="assistant-live-id-2",
-            turn_id="turn-1",
-            role="assistant",
-            parts=[
-                ai_messages.TextPart(
-                    id="text-part-2",
-                    text="The tool returned hi.",
-                )
-            ],
-        ),
-    ]
-
-    asyncio.run(chat._persist_run_messages("session-1", messages))
-
-    assert [row[0] for row in captured] == [
-        "assistant-live-id-1",
-        "tool-live-id",
-        "assistant-live-id-2",
-    ]
-    assert [row[4] for row in captured] == ["turn-1", "turn-1", "turn-1"]
-    assert captured[0][5][0]["id"] == "text-part-1"
-    assert captured[0][5][1]["id"] == "call-part-1"
-    assert captured[1][5][0]["id"] == "result-part-1"
-    assert captured[2][5][0]["id"] == "text-part-2"
+def make_store(tmp_path: Path) -> session_store.JsonlSessionStore:
+    return session_store.JsonlSessionStore(tmp_path / "sessions")
 
 
-def test_persist_run_messages_is_stable_after_metadata_roundtrip(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_batches: list[list[StoredRow]] = []
+def test_jsonl_store_roundtrips_canonical_ai_messages(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    session_store.set_store_for_tests(store)
+    try:
+        messages = [
+            ai_messages.Message(
+                id="user-1",
+                role="user",
+                parts=[ai_messages.TextPart(id="part-1", text="hello")],
+            ),
+            ai_messages.Message(
+                id="assistant-1",
+                turn_id="turn-1",
+                role="assistant",
+                parts=[ai_messages.TextPart(id="part-2", text="hi")],
+            ),
+        ]
 
-    async def fake_save_messages_batch(rows: list[StoredRow]) -> None:
-        captured_batches.append(rows)
+        run(session_store.create_session("session-1", "Title"))
+        run(session_store.persist_ai_messages("session-1", messages))
+        loaded = run(session_store.load_ai_messages("session-1"))
 
-    monkeypatch.setattr(db, "save_messages_batch", fake_save_messages_batch)
+        assert [m.model_dump(mode="json") for m in loaded] == [
+            m.model_dump(mode="json") for m in messages
+        ]
+        assert run(session_store.list_sessions())[0].title == "Title"
+    finally:
+        session_store.set_store_for_tests(None)
 
-    first_run = [
+
+def test_prepare_chat_request_accepts_ui_only_step_start_shape() -> None:
+    stored_messages = [
         ai_messages.Message(
             id="user-1",
             role="user",
@@ -136,137 +62,208 @@ def test_persist_run_messages_is_stable_after_metadata_roundtrip(
             id="assistant-1",
             turn_id="turn-1",
             role="assistant",
+            parts=[ai_messages.TextPart(id="assistant-text-1", text="reply 1")],
+        ),
+    ]
+    request_messages = [
+        UIMessage.model_validate(m.model_dump(mode="json", by_alias=True))
+        for m in to_ui_messages(stored_messages)
+    ]
+    assistant_data = request_messages[1].model_dump(mode="json", by_alias=True)
+    assistant_data["parts"] = [{"type": "step-start"}, *assistant_data["parts"]]
+    request_messages[1] = UIMessage.model_validate(assistant_data)
+    request_messages.append(
+        UIMessage.model_validate(
+            {
+                "id": "user-2",
+                "role": "user",
+                "parts": [{"type": "text", "text": "message 2"}],
+            }
+        )
+    )
+
+    prepared = session_store.prepare_chat_request(
+        request_messages=request_messages,
+        stored_messages=stored_messages,
+    )
+
+    assert prepared.has_work is True
+    assert prepared.changed is True
+    assert [(m.id, m.role) for m in prepared.messages] == [
+        ("user-1", "user"),
+        ("assistant-1", "assistant"),
+        ("user-2", "user"),
+    ]
+
+
+def test_prepare_chat_request_accepts_approval_response() -> None:
+    stored_messages = [
+        ai_messages.Message(
+            id="assistant-1",
+            turn_id="turn-1",
+            role="assistant",
             parts=[
-                ai_messages.TextPart(
-                    id="assistant-text-1",
-                    text="reply 1",
+                ai_messages.TextPart(id="text-1", text="Need approval"),
+                ai_messages.ToolCallPart(
+                    id="call-part-1",
+                    tool_call_id="call-1",
+                    tool_name="bash",
+                    tool_args="{}",
+                ),
+            ],
+        ),
+        ai_messages.Message(
+            id="tool-1",
+            turn_id="turn-1",
+            role="tool",
+            parts=[
+                ai_messages.ToolResultPart(
+                    id="result-1",
+                    tool_call_id="call-1",
+                    tool_name="bash",
+                    result="Pending",
+                    is_error=True,
+                    is_hook_pending=True,
+                )
+            ],
+        ),
+        ai_messages.Message(
+            id="internal-1",
+            turn_id="turn-1",
+            role="internal",
+            parts=[
+                ai_messages.HookPart(
+                    id="hook-part-1",
+                    hook_id="approve_call-1",
+                    hook_type=TOOL_APPROVAL_HOOK_TYPE,
+                    status="pending",
+                    metadata={"tool": "bash"},
                 )
             ],
         ),
     ]
+    request_data = [
+        m.model_dump(mode="json", by_alias=True)
+        for m in to_ui_messages(stored_messages)
+    ]
+    for part in request_data[0]["parts"]:
+        if part.get("toolCallId") == "call-1":
+            part["state"] = "approval-responded"
+            part["approval"] = {"id": "approve_call-1", "approved": True}
 
-    asyncio.run(chat._persist_run_messages("session-1", first_run))
-    first_batch = captured_batches[-1]
-    assert [row[0] for row in first_batch] == [
-        "user-1",
-        "assistant-1",
-    ]
-
-    stored = [
-        ai_messages.Message.model_validate(
-            {
-                "id": row[0],
-                "role": row[3],
-                "turn_id": row[4],
-                "parts": row[5],
-            }
-        )
-        for row in first_batch
-    ]
-    ui_messages = [
-        UIMessage.model_validate(m.model_dump(mode="json", by_alias=True))
-        for m in to_ui_messages(stored)
-    ]
-    roundtripped, _ = to_messages(
-        [
-            *ui_messages,
-            UIMessage.model_validate(
-                {
-                    "id": "user-2",
-                    "role": "user",
-                    "parts": [{"type": "text", "text": "message 2"}],
-                }
-            ),
-        ]
+    prepared = session_store.prepare_chat_request(
+        request_messages=[UIMessage.model_validate(request_data[0])],
+        stored_messages=stored_messages,
     )
 
-    asyncio.run(chat._persist_run_messages("session-1", roundtripped))
-    second_batch = captured_batches[-1]
-
-    assert [row[0] for row in second_batch] == [
-        "user-1",
-        "assistant-1",
-        "user-2",
-    ]
-    assert second_batch[1][4] == "turn-1"
-    assert second_batch[1][5][0]["id"] == "assistant-text-1"
-
-
-def test_stored_to_ai_messages_preserves_canonical_turn_id() -> None:
-    stored = [
-        db.StoredMessage(
-            id="user-1",
-            seq=0,
-            role="user",
-            parts=[
-                ai_messages.TextPart(
-                    id="user-text-1",
-                    text="message 1",
-                ).model_dump(mode="json")
-            ],
-            created_at="2026-05-20T00:00:00+00:00",
-        ),
-        db.StoredMessage(
-            id="assistant-1",
-            seq=1,
-            turn_id="turn-1",
-            role="assistant",
-            parts=[
-                ai_messages.TextPart(
-                    id="assistant-text-1",
-                    text="reply 1",
-                ).model_dump(mode="json")
-            ],
-            created_at="2026-05-20T00:00:01+00:00",
-        ),
+    assert prepared.has_work is True
+    assert prepared.changed is False
+    assert prepared.messages is stored_messages
+    assert [(a.hook_id, a.granted) for a in prepared.approvals] == [
+        ("approve_call-1", True)
     ]
 
-    messages = sessions._stored_to_ai_messages(stored)
 
-    assert [(m.id, m.turn_id, m.role) for m in messages] == [
-        ("user-1", None, "user"),
-        ("assistant-1", "turn-1", "assistant"),
-    ]
-    assert sessions._extract_first_user_text(messages) == "message 1"
-
-
-def test_to_sse_with_roundtrip_metadata_injects_finish_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fake_to_stream(
-        events: AsyncIterable[ai_events.AgentEvent],
-    ) -> AsyncGenerator[ui_events.UIMessageStreamEvent]:
-        _ = events
-        yield ui_events.UIFinishEvent(finish_reason="stop")
-
-    async def no_events() -> AsyncGenerator[ai_events.AgentEvent]:
-        if False:
-            yield cast(ai_events.AgentEvent, None)
-
+def test_framework_renders_persisted_pending_approval() -> None:
     messages = [
         ai_messages.Message(
             id="assistant-1",
             turn_id="turn-1",
             role="assistant",
-            parts=[ai_messages.TextPart(id="text-1", text="hi")],
-        )
+            parts=[
+                ai_messages.TextPart(id="text-1", text="Need approval"),
+                ai_messages.ToolCallPart(
+                    id="call-part-1",
+                    tool_call_id="call-1",
+                    tool_name="bash",
+                    tool_args="{}",
+                ),
+            ],
+        ),
+        ai_messages.Message(
+            id="tool-1",
+            turn_id="turn-1",
+            role="tool",
+            parts=[
+                ai_messages.ToolResultPart(
+                    id="result-1",
+                    tool_call_id="call-1",
+                    tool_name="bash",
+                    result="Pending",
+                    is_error=True,
+                    is_hook_pending=True,
+                )
+            ],
+        ),
+        ai_messages.Message(
+            id="internal-1",
+            turn_id="turn-1",
+            role="internal",
+            parts=[
+                ai_messages.HookPart(
+                    id="hook-part-1",
+                    hook_id="approve_call-1",
+                    hook_type=TOOL_APPROVAL_HOOK_TYPE,
+                    status="pending",
+                    metadata={"tool": "bash"},
+                )
+            ],
+        ),
     ]
 
-    async def collect() -> list[str]:
-        return [
-            chunk
-            async for chunk in chat._to_sse_with_roundtrip_metadata(
-                no_events(),
-                lambda: messages,
-            )
+    ui_messages = to_ui_messages(messages)
+    tool_part = next(
+        part.model_dump(mode="json", by_alias=True)
+        for part in ui_messages[0].parts
+        if getattr(part, "tool_call_id", None) == "call-1"
+    )
+
+    assert tool_part["state"] == "approval-requested"
+    assert tool_part["approval"]["id"] == "approve_call-1"
+
+
+def test_branch_fork_label_and_compact_use_active_ai_messages(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    session_store.set_store_for_tests(store)
+    try:
+        original = [
+            ai.user_message("one"),
+            ai.assistant_message("two"),
+        ]
+        branch = [
+            ai.user_message("one"),
+            ai.assistant_message("alternate"),
         ]
 
-    monkeypatch.setattr(chat, "to_stream", fake_to_stream)
+        run(session_store.create_session("session-1"))
+        run(session_store.persist_ai_messages("session-1", original))
+        tree = run(session_store.get_tree("session-1"))
+        assert tree is not None
+        first_leaf = tree["leaf_id"]
 
-    chunks = asyncio.run(collect())
+        run(session_store.persist_ai_messages("session-1", branch))
+        assert run(session_store.move_leaf("session-1", first_leaf)) is True
+        assert [m.text for m in run(session_store.load_ai_messages("session-1"))] == [
+            "one",
+            "two",
+        ]
 
-    assert chunks[0].startswith('data: {"type": "finish"')
-    assert '"messageMetadata":' in chunks[0]
-    assert '"sourceMessages":' in chunks[0]
-    assert '"id": "assistant-1"' in chunks[0]
-    assert chunks[1] == "data: [DONE]\n\n"
+        assert run(session_store.label_entry("session-1", first_leaf, "checkpoint"))
+        labeled_tree = run(session_store.get_tree("session-1"))
+        assert labeled_tree is not None
+        labeled = next(e for e in labeled_tree["entries"] if e["id"] == first_leaf)
+        assert labeled["label"] == "checkpoint"
+
+        forked = run(session_store.fork_session("session-1", "session-2"))
+        assert forked is not None
+        assert [m.text for m in run(session_store.load_ai_messages("session-2"))] == [
+            "one",
+            "two",
+        ]
+
+        assert run(session_store.compact_session("session-2", "summary", keep_last=1))
+        compacted = run(session_store.load_ai_messages("session-2"))
+        assert compacted[0].text.startswith("Previous conversation summary")
+        assert compacted[-1].text == "two"
+    finally:
+        session_store.set_store_for_tests(None)

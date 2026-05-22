@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncGenerator, AsyncIterable, Callable
-from typing import Any
+from collections.abc import AsyncGenerator
 
 import ai
 import fastapi
@@ -16,16 +15,12 @@ from ai.agents.ui.ai_sdk import (
     UI_MESSAGE_STREAM_HEADERS,
     UIMessage,
     apply_approvals,
-    outbound_stream,
-    to_messages,
-    to_stream,
-    to_ui_messages,
-    ui_events,
+    to_sse,
 )
 from vercel.blob import AsyncBlobClient
 
 import agent
-import db
+import sessions as session_store
 
 router = fastapi.APIRouter()
 
@@ -95,13 +90,6 @@ async def get_file(pathname: str) -> fastapi.responses.Response:
 # ---------------------------------------------------------------------------
 
 
-def _extract_blob_pathname(url: str) -> str | None:
-    """Extract the blob pathname from a proxy URL, or return None."""
-    if url.startswith(FILES_PREFIX):
-        return url[len(FILES_PREFIX) :]
-    return None
-
-
 async def _inline_file_parts(
     messages: list[ai_messages.Message],
 ) -> list[ai_messages.Message]:
@@ -116,8 +104,12 @@ async def _inline_file_parts(
         new_parts: list[ai_messages.Part] = []
         for part in msg.parts:
             pathname = (
-                _extract_blob_pathname(part.data)
-                if isinstance(part, ai_messages.FilePart) and isinstance(part.data, str)
+                part.data[len(FILES_PREFIX) :]
+                if (
+                    isinstance(part, ai_messages.FilePart)
+                    and isinstance(part.data, str)
+                    and part.data.startswith(FILES_PREFIX)
+                )
                 else None
             )
             if isinstance(part, ai_messages.FilePart) and pathname is not None:
@@ -139,54 +131,6 @@ async def _inline_file_parts(
 
 
 # ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
-
-
-def _serialize_parts(parts: list[ai_messages.Part]) -> list[dict[str, Any]]:
-    """Serialize message parts to JSON-safe dicts for DB storage."""
-    return [p.model_dump(mode="json") for p in parts]
-
-
-async def _persist_run_messages(
-    session_id: str,
-    messages: list[ai_messages.Message],
-) -> None:
-    """Batch-upsert all messages from this run.
-
-    The system message we prepended is dropped — it's reconstructed at
-    request time from ``agent.SYSTEM`` and should never round-trip
-    through the database.
-    """
-    stored_messages = [m for m in messages if m.role != "system"]
-    rows: list[tuple[str, str, int, str, str | None, list[dict[str, Any]]]] = [
-        (m.id, session_id, seq, m.role, m.turn_id, _serialize_parts(m.parts))
-        for seq, m in enumerate(stored_messages)
-    ]
-    if rows:
-        await db.save_messages_batch(rows)
-
-
-def _latest_assistant_metadata(messages: list[ai_messages.Message]) -> Any | None:
-    ui_messages = to_ui_messages([m for m in messages if m.role != "system"])
-    for message in reversed(ui_messages):
-        if message.role == "assistant":
-            return message.metadata
-    return None
-
-
-async def _to_sse_with_roundtrip_metadata(
-    events: AsyncIterable[ai_events.AgentEvent],
-    get_messages: Callable[[], list[ai_messages.Message]],
-) -> AsyncGenerator[str]:
-    async for part in to_stream(events):
-        if isinstance(part, ui_events.UIFinishEvent):
-            part.message_metadata = _latest_assistant_metadata(get_messages())
-        yield outbound_stream.format_sse(part)
-    yield outbound_stream.format_done_sse()
-
-
-# ---------------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------------
 
@@ -203,16 +147,26 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     """Handle chat requests and stream responses."""
     session_id = request.session_id
 
-    # Ensure the session exists (create if somehow missing).
-    if not await db.get_session(session_id):
-        await db.create_session(session_id)
-
-    # Convert UI messages to SDK messages and extract any approval responses.
-    messages, approvals = to_messages(request.messages)
-    apply_approvals(approvals)
+    await session_store.get_or_create_session(session_id)
+    stored_messages = await session_store.load_ai_messages(session_id)
+    prepared = session_store.prepare_chat_request(
+        request_messages=request.messages,
+        stored_messages=stored_messages,
+    )
+    apply_approvals(prepared.approvals)
 
     # Inline blob URLs so the gateway can see the bytes.
+    messages = [m for m in prepared.messages if m.role not in ("system", "internal")]
     messages = await _inline_file_parts(messages)
+
+    if not prepared.has_work:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="No new user message or approval response to process",
+        )
+
+    if prepared.changed:
+        await session_store.persist_ai_messages(session_id, prepared.messages)
 
     # Prepend the system prompt.
     system = ai.system_message(agent.SYSTEM)
@@ -221,6 +175,8 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     model = agent.get_model()
 
     async def stream_response() -> AsyncGenerator[str]:
+        pending_hook_messages: list[ai_messages.Message] = []
+
         async with agent.seal.run(model, full_messages) as result:
 
             async def process() -> AsyncGenerator[ai_events.AgentEvent]:
@@ -233,19 +189,23 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                         isinstance(event, ai_events.HookEvent)
                         and event.hook.status == "pending"
                     ):
+                        pending_hook_messages.append(event.message)
                         ai.abort_pending_hook(event.hook)
                     yield event
 
-            async for chunk in _to_sse_with_roundtrip_metadata(
-                process(),
-                lambda: result.messages,
-            ):
+            async for chunk in to_sse(process()):
                 yield chunk
 
             # Persist the full updated history once the run finishes
             # (whether normally or via approval suspension).
-            await _persist_run_messages(session_id, result.messages)
-            await db.touch_session(session_id)
+            await session_store.persist_ai_messages(
+                session_id,
+                session_store.with_pending_hook_messages(
+                    result.messages,
+                    pending_hook_messages,
+                ),
+            )
+            await session_store.touch_session(session_id)
 
     return fastapi.responses.StreamingResponse(
         stream_response(),
