@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 from collections.abc import AsyncGenerator
 from typing import Any, NamedTuple
 
@@ -149,38 +148,21 @@ class PreparedChat(NamedTuple):
     changed: bool
 
 
-def _message_signature(message: ai_messages.Message) -> str:
-    return json.dumps(
-        message.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    )
-
-
 def prepare_chat_request(
     *,
     request_messages: list[UIMessage],
     stored_messages: list[ai_messages.Message],
 ) -> PreparedChat:
-    """Normalize a useChat request without raw UI-shape history validation."""
+    """Use backend history plus the request's last new user message."""
     request_ai_messages, approvals = to_messages(request_messages)
-    if not request_ai_messages:
-        return PreparedChat(stored_messages, approvals, bool(approvals), False)
-
-    if not stored_messages:
-        return PreparedChat(request_ai_messages, approvals, True, True)
-
-    latest = request_ai_messages[-1]
-    if latest.role == "user":
-        stored_by_id = {m.id: m for m in stored_messages}
-        stored_latest = stored_by_id.get(latest.id)
-        if stored_latest is None:
-            return PreparedChat([*stored_messages, latest], approvals, True, True)
-        if _message_signature(stored_latest) != _message_signature(latest):
-            return PreparedChat(request_ai_messages, approvals, True, True)
-
-    if approvals:
-        return PreparedChat(stored_messages, approvals, True, False)
-
-    return PreparedChat(stored_messages, approvals, False, False)
+    new_messages = sessions.get_new_messages(request_ai_messages, stored_messages)
+    messages = [*stored_messages, *new_messages]
+    return PreparedChat(
+        messages=messages,
+        approvals=approvals,
+        has_work=bool(new_messages or approvals),
+        changed=bool(new_messages),
+    )
 
 
 def _tool_call_id_for_hook(hook: ai_messages.HookPart[Any]) -> str | None:
@@ -244,9 +226,11 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     """Handle chat requests and stream responses."""
     session_id = request.session_id
 
-    repo = sessions.get_repo()
-    session = await repo.open(session_id) or await repo.create(session_id)
-    stored_messages = await session.load_messages()
+    session = await sessions.get_session(session_id)
+    stored_messages = session.messages if session is not None else []
+    if session is None:
+        await sessions.create_session(session_id)
+
     prepared = prepare_chat_request(
         request_messages=request.messages,
         stored_messages=stored_messages,
@@ -264,7 +248,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
         )
 
     if prepared.changed:
-        await session.save_messages(prepared.messages)
+        await sessions.save_messages(session_id, prepared.messages)
 
     # Prepend the system prompt.
     system = ai.system_message(agent.SYSTEM)
@@ -296,8 +280,9 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
             # Persist the full updated history once the run finishes
             # (whether normally or via approval suspension).
-            await session.save_messages(
-                with_pending_hook_messages(result.messages, pending_hook_messages)
+            await sessions.save_messages(
+                session_id,
+                with_pending_hook_messages(result.messages, pending_hook_messages),
             )
 
     return fastapi.responses.StreamingResponse(
