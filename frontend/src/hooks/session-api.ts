@@ -59,7 +59,8 @@ export async function fetchSessionMessages(
   sessionId: string,
 ): Promise<UIMessage[]> {
   const res = await fetch(`/api/sessions/${sessionId}`);
-  if (!res.ok) return [];
+  if (res.status === 404) throw new Error("Session not found");
+  if (!res.ok) throw new Error("Failed to fetch session");
 
   const data: {
     messages: {

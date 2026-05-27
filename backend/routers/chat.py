@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import AsyncGenerator
+from typing import Any, NamedTuple
 
 import ai
 import fastapi
@@ -11,16 +12,19 @@ import fastapi.responses
 import pydantic
 from ai import events as ai_events
 from ai import messages as ai_messages
+from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
 from ai.agents.ui.ai_sdk import (
     UI_MESSAGE_STREAM_HEADERS,
+    ApprovalResponse,
     UIMessage,
     apply_approvals,
+    to_messages,
     to_sse,
 )
 from vercel.blob import AsyncBlobClient
 
 import agent
-import sessions as session_store
+import sessions
 
 router = fastapi.APIRouter()
 
@@ -131,6 +135,81 @@ async def _inline_file_parts(
 
 
 # ---------------------------------------------------------------------------
+# Chat-request normalization
+# ---------------------------------------------------------------------------
+
+
+class PreparedChat(NamedTuple):
+    """Canonical messages and side effects extracted from a useChat request."""
+
+    messages: list[ai_messages.Message]
+    approvals: list[ApprovalResponse]
+    has_work: bool
+    changed: bool
+
+
+def prepare_chat_request(
+    *,
+    request_messages: list[UIMessage],
+    stored_messages: list[ai_messages.Message],
+) -> PreparedChat:
+    """Use backend history plus the request's last new user message."""
+    request_ai_messages, approvals = to_messages(request_messages)
+    new_messages = sessions.get_new_messages(request_ai_messages, stored_messages)
+    messages = [*stored_messages, *new_messages]
+    return PreparedChat(
+        messages=messages,
+        approvals=approvals,
+        has_work=bool(new_messages or approvals),
+        changed=bool(new_messages),
+    )
+
+
+def _tool_call_id_for_hook(hook: ai_messages.HookPart[Any]) -> str | None:
+    if hook.hook_type != TOOL_APPROVAL_HOOK_TYPE:
+        return None
+    prefix = "approve_"
+    if not hook.hook_id.startswith(prefix):
+        return None
+    return hook.hook_id[len(prefix) :]
+
+
+def _turn_id_for_tool_call(
+    messages: list[ai_messages.Message],
+    tool_call_id: str,
+) -> str | None:
+    for message in reversed(messages):
+        if message.role != "assistant":
+            continue
+        if any(part.tool_call_id == tool_call_id for part in message.tool_calls):
+            return message.turn_id or message.id
+    return None
+
+
+def with_pending_hook_messages(
+    messages: list[ai_messages.Message],
+    pending_hook_messages: list[ai_messages.Message],
+) -> list[ai_messages.Message]:
+    """Attach pending internal hook messages to the persisted snapshot."""
+    result = list(messages)
+    for message in pending_hook_messages:
+        if len(message.parts) != 1 or not isinstance(
+            message.parts[0], ai_messages.HookPart
+        ):
+            result.append(message)
+            continue
+
+        tool_call_id = _tool_call_id_for_hook(message.parts[0])
+        turn_id = (
+            _turn_id_for_tool_call(messages, tool_call_id)
+            if tool_call_id is not None
+            else None
+        )
+        result.append(message.model_copy(update={"turn_id": turn_id}))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------------
 
@@ -147,9 +226,12 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     """Handle chat requests and stream responses."""
     session_id = request.session_id
 
-    await session_store.get_or_create_session(session_id)
-    stored_messages = await session_store.load_ai_messages(session_id)
-    prepared = session_store.prepare_chat_request(
+    session = await sessions.get_session(session_id)
+    stored_messages = session.messages if session is not None else []
+    if session is None:
+        await sessions.create_session(session_id)
+
+    prepared = prepare_chat_request(
         request_messages=request.messages,
         stored_messages=stored_messages,
     )
@@ -166,7 +248,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
         )
 
     if prepared.changed:
-        await session_store.persist_ai_messages(session_id, prepared.messages)
+        await sessions.save_messages(session_id, prepared.messages)
 
     # Prepend the system prompt.
     system = ai.system_message(agent.SYSTEM)
@@ -198,14 +280,10 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
             # Persist the full updated history once the run finishes
             # (whether normally or via approval suspension).
-            await session_store.persist_ai_messages(
+            await sessions.save_messages(
                 session_id,
-                session_store.with_pending_hook_messages(
-                    result.messages,
-                    pending_hook_messages,
-                ),
+                with_pending_hook_messages(result.messages, pending_hook_messages),
             )
-            await session_store.touch_session(session_id)
 
     return fastapi.responses.StreamingResponse(
         stream_response(),
