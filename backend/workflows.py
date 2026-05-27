@@ -40,6 +40,10 @@ def dump_message(message: Any) -> dict[str, Any]:
     return cast(dict[str, Any], message.model_dump(mode="json"))
 
 
+def dump_agent_event(event: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], event.model_dump(mode="json"))
+
+
 def load_message(data: dict[str, Any]) -> ai.messages.Message:
     import ai
 
@@ -94,9 +98,7 @@ def _approval_id(tool_call: Any) -> str:
 
 def _tool_call_data(tool_call: Any) -> dict[str, Any]:
     return (
-        tool_call
-        if isinstance(tool_call, dict)
-        else tool_call.model_dump(mode="json")
+        tool_call if isinstance(tool_call, dict) else tool_call.model_dump(mode="json")
     )
 
 
@@ -211,11 +213,15 @@ def _tool_message(
 
 
 @workflow_app.step
-async def llm_step(messages_data: list[dict[str, Any]]) -> dict[str, Any]:
+async def llm_step(
+    stream_id: str,
+    messages_data: list[dict[str, Any]],
+) -> dict[str, Any]:
     import ai
 
     import agent
     import attachments
+    import stream_store
 
     messages = [
         ai.messages.Message.model_validate(message)
@@ -230,9 +236,14 @@ async def llm_step(messages_data: list[dict[str, Any]]) -> dict[str, Any]:
         full_messages,
         tools=[tool.tool for tool in agent.TOOLS],
     ) as stream:
-        async for _ in stream:
-            pass
+        async for event in stream:
+            await stream_store.append_event(stream_id, dump_agent_event(event))
+        if stream.message is None:
+            raise RuntimeError("LLM stream ended without a final message")
         return dump_message(stream.message)
+
+
+llm_step.max_retries = 0
 
 
 @workflow_app.step
@@ -286,6 +297,55 @@ execute_tool_step.max_retries = 0
 
 
 @workflow_app.step
+async def append_hook_event_step(
+    stream_id: str,
+    message_data: dict[str, Any],
+) -> None:
+    import ai
+
+    import stream_store
+
+    message = load_message(message_data)
+    hook = next(
+        (part for part in message.parts if isinstance(part, ai.messages.HookPart)),
+        None,
+    )
+    if hook is None:
+        return
+    event = ai.events.HookEvent(message=message, hook=hook)
+    await stream_store.append_event(stream_id, dump_agent_event(event))
+
+
+append_hook_event_step.max_retries = 0
+
+
+@workflow_app.step
+async def append_tool_result_event_step(
+    stream_id: str,
+    message_data: dict[str, Any],
+) -> None:
+    import ai
+
+    import stream_store
+
+    event = ai.tool_result(load_message(message_data))
+    await stream_store.append_event(stream_id, dump_agent_event(event))
+
+
+append_tool_result_event_step.max_retries = 0
+
+
+@workflow_app.step
+async def set_stream_status_step(
+    stream_id: str,
+    status: Literal["idle", "running", "waiting", "completed", "failed"],
+) -> None:
+    import stream_store
+
+    await stream_store.set_status(stream_id, status)
+
+
+@workflow_app.step
 async def persist_messages_step(
     session_id: str,
     messages_data: list[dict[str, Any]],
@@ -314,12 +374,13 @@ async def _persist(
 @workflow_app.workflow
 async def run_agent(
     session_id: str,
+    stream_id: str,
     messages_data: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     messages = messages_data
 
     while messages and _message_role(messages[-1]) != "assistant":
-        assistant_message = await llm_step(messages)
+        assistant_message = await llm_step(stream_id, messages)
         messages.append(assistant_message)
         await _persist(session_id, messages)
 
@@ -328,31 +389,33 @@ async def run_agent(
             if tool_requires_approval(_tool_name(tool_call)):
                 approval_id = _approval_id(tool_call)
                 approval_event = ToolApprovalHook.wait(token=approval_id)
-                messages.append(
-                    _hook_message_data(
-                        tool_call=tool_call,
-                        assistant_message=assistant_message,
-                        status="pending",
-                    )
+                hook_message = _hook_message_data(
+                    tool_call=tool_call,
+                    assistant_message=assistant_message,
+                    status="pending",
                 )
+                messages.append(hook_message)
                 await _persist(session_id, messages)
+                await append_hook_event_step(stream_id, hook_message)
+                await set_stream_status_step(stream_id, "waiting")
 
                 approval = await approval_event
+                await set_stream_status_step(stream_id, "running")
                 granted = bool(approval and approval.granted)
                 reason = approval.reason if approval else "cancelled"
                 resolution = {
                     "granted": granted,
                     "reason": reason,
                 }
-                messages.append(
-                    _hook_message_data(
-                        tool_call=tool_call,
-                        assistant_message=assistant_message,
-                        status="resolved",
-                        resolution=resolution,
-                    )
+                hook_message = _hook_message_data(
+                    tool_call=tool_call,
+                    assistant_message=assistant_message,
+                    status="resolved",
+                    resolution=resolution,
                 )
+                messages.append(hook_message)
                 await _persist(session_id, messages)
+                await append_hook_event_step(stream_id, hook_message)
 
                 if not granted:
                     tool_results.append(_denied_tool_result(tool_call, reason))
@@ -363,15 +426,16 @@ async def run_agent(
         if not tool_results:
             break
 
-        messages.append(
-            _tool_message_data(
-                assistant_message=assistant_message,
-                parts_data=tool_results,
-            )
+        tool_message = _tool_message_data(
+            assistant_message=assistant_message,
+            parts_data=tool_results,
         )
+        messages.append(tool_message)
         await _persist(session_id, messages)
+        await append_tool_result_event_step(stream_id, tool_message)
 
     await clear_active_run_step(session_id)
+    await set_stream_status_step(stream_id, "completed")
     return messages
 
 

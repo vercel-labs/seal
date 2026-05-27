@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 
-import ai
 import fastapi
 import fastapi.responses
 import pydantic
@@ -24,6 +23,7 @@ from vercel.workflow import Run, start
 
 import attachments
 import sessions
+import stream_store
 import workflows
 
 router = fastapi.APIRouter()
@@ -126,25 +126,27 @@ class ChatRequest(pydantic.BaseModel):
     session_id: str
 
 
-async def _events_for_messages(
-    messages: list[ai_messages.Message],
-) -> AsyncGenerator[ai_events.AgentEvent]:
-    for message in messages:
-        if message.role == "assistant":
-            async for event in ai_events.replay_message_events(message):
-                yield event
-        elif message.role == "tool":
-            yield ai.tool_result(message)
-        elif message.role == "internal":
-            for part in message.parts:
-                if isinstance(part, ai_messages.HookPart):
-                    yield ai_events.HookEvent(message=message, hook=part)
+_MODEL_EVENT_ADAPTER: pydantic.TypeAdapter[Any] = pydantic.TypeAdapter(
+    ai_events.DiscriminatedEvent
+)
 
 
-async def _watch_workflow_events(
+def _load_agent_event(data: dict[str, object]) -> ai_events.AgentEvent:
+    kind = data.get("kind")
+    if kind == "tool_call_result":
+        return ai_events.ToolCallResult.model_validate(data)
+    if kind == "hook":
+        return ai_events.HookEvent.model_validate(data)
+    if kind == "partial_tool_call_result":
+        return ai_events.PartialToolCallResult.model_validate(data)
+    return cast(ai_events.AgentEvent, _MODEL_EVENT_ADAPTER.validate_python(data))
+
+
+async def _watch_stream_events(
     *,
     session_id: str,
     run_id: str,
+    stream_id: str,
     start_index: int,
 ) -> AsyncGenerator[ai_events.AgentEvent]:
     last_index = start_index
@@ -152,22 +154,81 @@ async def _watch_workflow_events(
     terminal = {"completed", "failed", "cancelled"}
 
     while True:
-        session = await sessions.get_session(session_id)
-        messages = session.messages if session is not None else []
-        if len(messages) > last_index:
-            new_messages = messages[last_index:]
-            last_index = len(messages)
-            async for event in _events_for_messages(new_messages):
-                yield event
+        events = await stream_store.list_events(stream_id, last_index)
+        if events:
+            for event in events:
+                last_index = event.index + 1
+                yield _load_agent_event(event.data)
             continue
 
-        if await run.status() in terminal:
+        status = await stream_store.get_status(stream_id)
+        if status in ("waiting", "completed", "failed"):
+            return
+
+        run_status = await run.status()
+        if run_status in terminal:
+            if run_status == "failed":
+                await stream_store.set_status(stream_id, "failed")
             current = await sessions.get_session(session_id)
             if current is not None and current.active_run_id == run_id:
                 await sessions.set_active_run(session_id, None)
             return
 
         await asyncio.sleep(0.5)
+
+
+@router.get("/chat/{session_id}/stream")
+async def resume_chat_stream(
+    session_id: str,
+    request: fastapi.Request,
+) -> fastapi.responses.Response:
+    """Resume an active durable chat stream."""
+    session = await sessions.get_session(session_id)
+    if session is None or session.active_run_id is None:
+        return fastapi.responses.Response(status_code=204)
+
+    run_id = session.active_run_id
+    stream_id = session_id
+    status = await stream_store.get_status(stream_id)
+    if status != "running":
+        return fastapi.responses.Response(status_code=204)
+
+    raw_start_index = request.query_params.get("startIndex")
+    if raw_start_index is None:
+        raw_start_index = request.query_params.get("start_index")
+
+    if raw_start_index is None:
+        start_index = await stream_store.get_active_start_index(stream_id)
+    else:
+        try:
+            start_index = int(raw_start_index)
+        except ValueError:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail="startIndex must be a non-negative integer",
+            ) from None
+
+    if start_index < 0:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="startIndex must be a non-negative integer",
+        )
+
+    async def stream_response() -> AsyncGenerator[str]:
+        async for chunk in to_sse(
+            _watch_stream_events(
+                session_id=session_id,
+                run_id=run_id,
+                stream_id=stream_id,
+                start_index=start_index,
+            )
+        ):
+            yield chunk
+
+    return fastapi.responses.StreamingResponse(
+        stream_response(),
+        headers=UI_MESSAGE_STREAM_HEADERS,
+    )
 
 
 @router.post("/chat")
@@ -199,7 +260,8 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
     active_run_id = session.active_run_id if session is not None else None
     run_id: str | None = active_run_id
-    start_index = len(stored_messages)
+    stream_id = session_id
+    start_index = await stream_store.count_events(stream_id)
 
     if prepared.changed:
         if active_run_id is not None:
@@ -208,10 +270,12 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 detail="Session already has an active agent run",
             )
         await sessions.save_messages(session_id, prepared.messages)
-        start_index = len(prepared.messages)
+        await stream_store.set_active_start_index(stream_id, start_index)
+        await stream_store.set_status(stream_id, "running")
         run = await start(
             workflows.run_agent,
             session_id,
+            stream_id,
             workflows.dump_messages(prepared.messages),
         )
         run_id = run.run_id
@@ -223,6 +287,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 status_code=400,
                 detail="No active workflow run for approval response",
             )
+        await stream_store.set_status(stream_id, "running")
         await workflows.resume_tool_approval(
             approval.hook_id,
             granted=approval.granted,
@@ -237,9 +302,10 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
     async def stream_response() -> AsyncGenerator[str]:
         async for chunk in to_sse(
-            _watch_workflow_events(
+            _watch_stream_events(
                 session_id=session_id,
                 run_id=run_id,
+                stream_id=stream_id,
                 start_index=start_index,
             )
         ):

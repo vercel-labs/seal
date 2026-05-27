@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
+from ai import events as ai_events
 from ai import messages as ai_messages
 from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
 from ai.agents.ui.ai_sdk import UIMessage, to_ui_messages
@@ -108,3 +111,65 @@ def test_framework_renders_persisted_pending_approval() -> None:
 
     assert tool_part["state"] == "approval-requested"
     assert tool_part["approval"]["id"] == "approve_call-1"
+
+
+def test_load_agent_event_round_trips_model_event() -> None:
+    event = ai_events.TextDelta(
+        block_id="text-1",
+        chunk="hello",
+        message=ai_messages.Message(
+            id="assistant-1",
+            role="assistant",
+            parts=[ai_messages.TextPart(id="text-1", text="hello")],
+        ),
+    )
+
+    loaded = chat_router._load_agent_event(event.model_dump(mode="json"))
+
+    assert isinstance(loaded, ai_events.TextDelta)
+    assert loaded.chunk == "hello"
+
+
+def test_load_agent_event_round_trips_tool_result_event() -> None:
+    message = ai_messages.Message(
+        id="tool-1",
+        role="tool",
+        parts=[
+            ai_messages.ToolResultPart(
+                id="result-1",
+                tool_call_id="call-1",
+                tool_name="bash",
+                result="ok",
+                is_error=False,
+            )
+        ],
+    )
+    event = ai_events.ToolCallResult(message=message, results=message.tool_results)
+
+    loaded = chat_router._load_agent_event(event.model_dump(mode="json"))
+
+    assert isinstance(loaded, ai_events.ToolCallResult)
+    assert loaded.results[0].result == "ok"
+
+
+def test_load_agent_event_round_trips_hook_event() -> None:
+    message = ai_messages.Message(
+        id="internal-1",
+        role="internal",
+        parts=[
+            ai_messages.HookPart(
+                id="hook-part-1",
+                hook_id="approve_call-1",
+                hook_type=TOOL_APPROVAL_HOOK_TYPE,
+                status="pending",
+                metadata={"tool": "bash"},
+            )
+        ],
+    )
+    hook = cast(ai_messages.HookPart[Any], message.parts[0])
+    event = ai_events.HookEvent(message=message, hook=hook)
+
+    loaded = chat_router._load_agent_event(event.model_dump(mode="json"))
+
+    assert isinstance(loaded, ai_events.HookEvent)
+    assert loaded.hook.hook_id == "approve_call-1"

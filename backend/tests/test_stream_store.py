@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+import stream_store
+
+
+def test_local_stream_store_appends_and_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SEAL_STREAMS_DIR", str(tmp_path))
+
+    async def run() -> None:
+        await stream_store.ensure_schema()
+        await stream_store.ensure_stream("s1")
+        assert await stream_store.get_status("s1") == "idle"
+        assert await stream_store.count_events("s1") == 0
+
+        await stream_store.set_status("s1", "running")
+        await stream_store.set_active_start_index("s1", 3)
+        first = await stream_store.append_event("s1", {"kind": "stream_start"})
+        second = await stream_store.append_event(
+            "s1",
+            {"kind": "text_delta", "chunk": "hi", "block_id": "text-1"},
+        )
+
+        assert first == 0
+        assert second == 1
+        assert await stream_store.get_status("s1") == "running"
+        assert await stream_store.get_active_start_index("s1") == 3
+        assert await stream_store.count_events("s1") == 2
+
+        events = await stream_store.list_events("s1", 1)
+        assert [event.index for event in events] == [1]
+        assert events[0].data["chunk"] == "hi"
+
+        await stream_store.set_status("s1", "completed")
+        assert await stream_store.get_status("s1") == "completed"
+
+    asyncio.run(run())
