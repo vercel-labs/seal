@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import base64
+import asyncio
 from collections.abc import AsyncGenerator
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import ai
 import fastapi
@@ -12,27 +12,21 @@ import fastapi.responses
 import pydantic
 from ai import events as ai_events
 from ai import messages as ai_messages
-from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
 from ai.agents.ui.ai_sdk import (
     UI_MESSAGE_STREAM_HEADERS,
     ApprovalResponse,
     UIMessage,
-    apply_approvals,
     to_messages,
     to_sse,
 )
 from vercel.blob import AsyncBlobClient
+from vercel.workflow import Run, start
 
-import agent
+import attachments
 import sessions
+import workflows
 
 router = fastapi.APIRouter()
-
-# Prefix used by proxy URLs returned from the upload endpoint.
-# Includes /api so the browser can fetch directly (Vercel routes /api/* to
-# the backend and strips the prefix before forwarding).
-FILES_PREFIX = "/api/files/"
-
 
 # ---------------------------------------------------------------------------
 # File upload & serving
@@ -66,7 +60,7 @@ async def upload(file: fastapi.UploadFile) -> UploadResponse:
     # Return a proxy URL so the browser fetches through our backend,
     # keeping the blob private.
     return UploadResponse(
-        url=f"{FILES_PREFIX}{result.pathname}",
+        url=f"{attachments.FILES_PREFIX}{result.pathname}",
         media_type=media_type,
         filename=filename,
     )
@@ -87,51 +81,6 @@ async def get_file(pathname: str) -> fastapi.responses.Response:
             "Cache-Control": "public, max-age=31536000, immutable",
         },
     )
-
-
-# ---------------------------------------------------------------------------
-# File inlining
-# ---------------------------------------------------------------------------
-
-
-async def _inline_file_parts(
-    messages: list[ai_messages.Message],
-) -> list[ai_messages.Message]:
-    """Replace proxy-URL file parts with inline base64 data URLs.
-
-    The AI Gateway requires file content as data URLs (not raw HTTP URLs).
-    Our proxy URLs (``/api/files/...``) aren't reachable from the gateway,
-    so we fetch the blob content here and inline it before sending.
-    """
-    result: list[ai_messages.Message] = []
-    for msg in messages:
-        new_parts: list[ai_messages.Part] = []
-        for part in msg.parts:
-            pathname = (
-                part.data[len(FILES_PREFIX) :]
-                if (
-                    isinstance(part, ai_messages.FilePart)
-                    and isinstance(part.data, str)
-                    and part.data.startswith(FILES_PREFIX)
-                )
-                else None
-            )
-            if isinstance(part, ai_messages.FilePart) and pathname is not None:
-                async with AsyncBlobClient() as client:
-                    blob = await client.get(pathname, access="private")
-
-                b64 = base64.b64encode(blob.content).decode("ascii")
-                media_type = blob.content_type or part.media_type
-                data_url = f"data:{media_type};base64,{b64}"
-
-                new_parts.append(
-                    part.model_copy(update={"data": data_url, "media_type": media_type})
-                )
-            else:
-                new_parts.append(part)
-
-        result.append(msg.model_copy(update={"parts": new_parts}))
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -165,50 +114,6 @@ def prepare_chat_request(
     )
 
 
-def _tool_call_id_for_hook(hook: ai_messages.HookPart[Any]) -> str | None:
-    if hook.hook_type != TOOL_APPROVAL_HOOK_TYPE:
-        return None
-    prefix = "approve_"
-    if not hook.hook_id.startswith(prefix):
-        return None
-    return hook.hook_id[len(prefix) :]
-
-
-def _turn_id_for_tool_call(
-    messages: list[ai_messages.Message],
-    tool_call_id: str,
-) -> str | None:
-    for message in reversed(messages):
-        if message.role != "assistant":
-            continue
-        if any(part.tool_call_id == tool_call_id for part in message.tool_calls):
-            return message.turn_id or message.id
-    return None
-
-
-def with_pending_hook_messages(
-    messages: list[ai_messages.Message],
-    pending_hook_messages: list[ai_messages.Message],
-) -> list[ai_messages.Message]:
-    """Attach pending internal hook messages to the persisted snapshot."""
-    result = list(messages)
-    for message in pending_hook_messages:
-        if len(message.parts) != 1 or not isinstance(
-            message.parts[0], ai_messages.HookPart
-        ):
-            result.append(message)
-            continue
-
-        tool_call_id = _tool_call_id_for_hook(message.parts[0])
-        turn_id = (
-            _turn_id_for_tool_call(messages, tool_call_id)
-            if tool_call_id is not None
-            else None
-        )
-        result.append(message.model_copy(update={"turn_id": turn_id}))
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------------
@@ -219,6 +124,50 @@ class ChatRequest(pydantic.BaseModel):
 
     messages: list[UIMessage]
     session_id: str
+
+
+async def _events_for_messages(
+    messages: list[ai_messages.Message],
+) -> AsyncGenerator[ai_events.AgentEvent]:
+    for message in messages:
+        if message.role == "assistant":
+            async for event in ai_events.replay_message_events(message):
+                yield event
+        elif message.role == "tool":
+            yield ai.tool_result(message)
+        elif message.role == "internal":
+            for part in message.parts:
+                if isinstance(part, ai_messages.HookPart):
+                    yield ai_events.HookEvent(message=message, hook=part)
+
+
+async def _watch_workflow_events(
+    *,
+    session_id: str,
+    run_id: str,
+    start_index: int,
+) -> AsyncGenerator[ai_events.AgentEvent]:
+    last_index = start_index
+    run = Run(run_id)
+    terminal = {"completed", "failed", "cancelled"}
+
+    while True:
+        session = await sessions.get_session(session_id)
+        messages = session.messages if session is not None else []
+        if len(messages) > last_index:
+            new_messages = messages[last_index:]
+            last_index = len(messages)
+            async for event in _events_for_messages(new_messages):
+                yield event
+            continue
+
+        if await run.status() in terminal:
+            current = await sessions.get_session(session_id)
+            if current is not None and current.active_run_id == run_id:
+                await sessions.set_active_run(session_id, None)
+            return
+
+        await asyncio.sleep(0.5)
 
 
 @router.post("/chat")
@@ -235,11 +184,6 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
         request_messages=request.messages,
         stored_messages=stored_messages,
     )
-    apply_approvals(prepared.approvals)
-
-    # Inline blob URLs so the gateway can see the bytes.
-    messages = [m for m in prepared.messages if m.role not in ("system", "internal")]
-    messages = await _inline_file_parts(messages)
 
     if not prepared.has_work:
         raise fastapi.HTTPException(
@@ -247,43 +191,59 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
             detail="No new user message or approval response to process",
         )
 
+    if prepared.approvals and prepared.changed:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="Cannot approve a tool and send a new message in the same request",
+        )
+
+    active_run_id = session.active_run_id if session is not None else None
+    run_id: str | None = active_run_id
+    start_index = len(stored_messages)
+
     if prepared.changed:
+        if active_run_id is not None:
+            raise fastapi.HTTPException(
+                status_code=409,
+                detail="Session already has an active agent run",
+            )
         await sessions.save_messages(session_id, prepared.messages)
+        start_index = len(prepared.messages)
+        run = await start(
+            workflows.run_agent,
+            session_id,
+            workflows.dump_messages(prepared.messages),
+        )
+        run_id = run.run_id
+        await sessions.set_active_run(session_id, run_id)
 
-    # Prepend the system prompt.
-    system = ai.system_message(agent.SYSTEM)
-    full_messages = [system, *messages]
+    for approval in prepared.approvals:
+        if run_id is None:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail="No active workflow run for approval response",
+            )
+        await workflows.resume_tool_approval(
+            approval.hook_id,
+            granted=approval.granted,
+            reason=approval.reason,
+        )
 
-    model = agent.get_model()
+    if run_id is None:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="No workflow run to stream",
+        )
 
     async def stream_response() -> AsyncGenerator[str]:
-        pending_hook_messages: list[ai_messages.Message] = []
-
-        async with agent.seal.run(model, full_messages) as result:
-
-            async def process() -> AsyncGenerator[ai_events.AgentEvent]:
-                async for event in result:
-                    # Suspend the run when a tool approval is pending.
-                    # The SDK persists the suspension as ``is_hook_pending``
-                    # placeholders on the message history; the next request
-                    # carrying the approval response resumes natively.
-                    if (
-                        isinstance(event, ai_events.HookEvent)
-                        and event.hook.status == "pending"
-                    ):
-                        pending_hook_messages.append(event.message)
-                        ai.abort_pending_hook(event.hook)
-                    yield event
-
-            async for chunk in to_sse(process()):
-                yield chunk
-
-            # Persist the full updated history once the run finishes
-            # (whether normally or via approval suspension).
-            await sessions.save_messages(
-                session_id,
-                with_pending_hook_messages(result.messages, pending_hook_messages),
+        async for chunk in to_sse(
+            _watch_workflow_events(
+                session_id=session_id,
+                run_id=run_id,
+                start_index=start_index,
             )
+        ):
+            yield chunk
 
     return fastapi.responses.StreamingResponse(
         stream_response(),
