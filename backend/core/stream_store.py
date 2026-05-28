@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 
 import pydantic
 
-import db
+from core import db
 
 StreamStatus = Literal["idle", "running", "waiting", "completed", "failed"]
 

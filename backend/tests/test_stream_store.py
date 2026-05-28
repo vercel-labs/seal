@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import stream_store
+from core import stream_store
 
 
 def test_local_stream_store_appends_and_reads(

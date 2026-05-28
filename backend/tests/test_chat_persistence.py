@@ -13,8 +13,7 @@ from ai import messages as ai_messages
 from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
 from ai.agents.ui.ai_sdk import UIMessage, to_ui_messages
 
-import sessions
-import stream_store
+from core import durable_agent, sessions, stream_store
 from routers import chat as chat_router
 from routers import session as session_router
 
@@ -133,7 +132,7 @@ def test_load_agent_event_round_trips_model_event() -> None:
         ),
     )
 
-    loaded = chat_router._load_agent_event(event.model_dump(mode="json"))
+    loaded = durable_agent.load_agent_event(event.model_dump(mode="json"))
 
     assert isinstance(loaded, ai_events.TextDelta)
     assert loaded.chunk == "hello"
@@ -155,7 +154,7 @@ def test_load_agent_event_round_trips_tool_result_event() -> None:
     )
     event = ai_events.ToolCallResult(message=message, results=message.tool_results)
 
-    loaded = chat_router._load_agent_event(event.model_dump(mode="json"))
+    loaded = durable_agent.load_agent_event(event.model_dump(mode="json"))
 
     assert isinstance(loaded, ai_events.ToolCallResult)
     assert loaded.results[0].result == "ok"
@@ -178,7 +177,7 @@ def test_load_agent_event_round_trips_hook_event() -> None:
     hook = cast(ai_messages.HookPart[Any], message.parts[0])
     event = ai_events.HookEvent(message=message, hook=hook)
 
-    loaded = chat_router._load_agent_event(event.model_dump(mode="json"))
+    loaded = durable_agent.load_agent_event(event.model_dump(mode="json"))
 
     assert isinstance(loaded, ai_events.HookEvent)
     assert loaded.hook.hook_id == "approve_call-1"
@@ -234,7 +233,7 @@ def test_supported_sse_filters_approval_response_chunk() -> None:
                 results=result_message.tool_results,
             )
 
-        return [chunk async for chunk in chat_router._to_supported_sse(events())]
+        return [chunk async for chunk in durable_agent.to_supported_sse(events())]
 
     types = _sse_event_types(asyncio.run(run()))
 
@@ -282,7 +281,7 @@ def test_supported_sse_keeps_denied_state_for_rejected_approval() -> None:
                 results=result_message.tool_results,
             )
 
-        return [chunk async for chunk in chat_router._to_supported_sse(events())]
+        return [chunk async for chunk in durable_agent.to_supported_sse(events())]
 
     types = _sse_event_types(asyncio.run(run()))
 

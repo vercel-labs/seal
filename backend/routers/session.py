@@ -8,9 +8,7 @@ import fastapi
 import pydantic
 from ai.agents.ui.ai_sdk import to_ui_messages
 
-import agent
-import sessions
-import stream_store
+from core import durable_agent, sessions, stream_store
 
 router = fastapi.APIRouter()
 
@@ -76,7 +74,10 @@ async def generate_title(session_id: str) -> sessions.SessionMeta:
             detail="No user message to generate title from",
         )
 
-    meta = await sessions.set_title(session_id, await agent.generate_title(first_text))
+    meta = await sessions.set_title(
+        session_id,
+        await durable_agent.generate_title(first_text),
+    )
     if meta is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
     return meta

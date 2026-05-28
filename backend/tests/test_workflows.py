@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,27 +10,29 @@ import pytest
 from ai import messages as ai_messages
 from ai.agents.hooks import TOOL_APPROVAL_HOOK_TYPE
 
-import sessions
-import workflows
+from core import durable_agent, sessions
 
 
 def test_workflow_module_imports_inside_workflow_sandbox() -> None:
     import vercel._internal.workflow.py_sandbox as py_sandbox
 
-    with py_sandbox.workflow_sandbox(random_seed="workflow-import"):
-        module = importlib.import_module("workflows")
+    previous = sys.modules.pop("core.durable_agent", None)
+    try:
+        with py_sandbox.workflow_sandbox(random_seed="workflow-import"):
+            module = importlib.import_module("core.durable_agent")
+    finally:
+        if previous is not None:
+            sys.modules["core.durable_agent"] = previous
 
     assert module.workflow_app is not None
 
 
 def test_workflow_approval_tool_names_match_agent_tools() -> None:
-    import agent
-
     approval_required = frozenset(
-        tool.name for tool in agent.TOOLS if tool.require_approval
+        tool.name for tool in durable_agent.get_tools() if tool.require_approval
     )
 
-    assert approval_required == workflows.APPROVAL_REQUIRED_TOOLS
+    assert approval_required == durable_agent.APPROVAL_REQUIRED_TOOLS
 
 
 def test_vercel_dev_local_world_uses_release_local_deployment_marker(
@@ -75,7 +78,7 @@ def test_workflow_pending_approval_message_uses_ai_sdk_shape() -> None:
         ],
     )
 
-    message = workflows._hook_message(
+    message = durable_agent._hook_message(
         tool_call=assistant.tool_calls[0],
         assistant_message=assistant,
         status="pending",
@@ -132,7 +135,7 @@ def test_workflow_records_all_pending_approvals_before_waiting(
         stream_id: str,
         messages_data: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        return workflows.dump_message(assistant)
+        return durable_agent.dump_message(assistant)
 
     async def fake_persist(
         session_id: str,
@@ -152,27 +155,27 @@ def test_workflow_records_all_pending_approvals_before_waiting(
     async def fake_sleep(delay: float) -> None:
         raise Suspended
 
-    monkeypatch.setattr(workflows, "llm_step", fake_llm_step)
-    monkeypatch.setattr(workflows, "_persist", fake_persist)
+    monkeypatch.setattr(durable_agent, "llm_step", fake_llm_step)
+    monkeypatch.setattr(durable_agent, "_persist", fake_persist)
     monkeypatch.setattr(
-        workflows,
+        durable_agent,
         "set_stream_status_step",
         fake_set_stream_status_step,
     )
     monkeypatch.setattr(
-        workflows,
+        durable_agent,
         "load_tool_approvals_step",
         fake_load_tool_approvals_step,
     )
-    monkeypatch.setattr(cast(Any, workflows).workflow, "sleep", fake_sleep)
+    monkeypatch.setattr(cast(Any, durable_agent).workflow, "sleep", fake_sleep)
 
     async def run() -> None:
         with pytest.raises(Suspended):
             await asyncio.wait_for(
-                cast(Any, workflows.run_agent).func(
+                cast(Any, durable_agent.run_agent).func(
                     "session-1",
                     "stream-1",
-                    [workflows.dump_message(user)],
+                    [durable_agent.dump_message(user)],
                 ),
                 timeout=1,
             )

@@ -18,7 +18,7 @@ from urllib.parse import quote
 import pydantic
 from ai import messages as ai_messages
 
-import db
+from core import db
 
 
 class SessionMeta(pydantic.BaseModel):

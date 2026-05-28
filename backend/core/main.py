@@ -8,9 +8,7 @@ from contextlib import asynccontextmanager
 import fastapi
 import fastapi.middleware.cors
 
-import db
-import sessions
-import stream_store
+from core import db, sessions, stream_store
 from routers import chat, session
 
 
