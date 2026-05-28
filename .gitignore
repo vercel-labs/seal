@@ -16,6 +16,7 @@ data/
 
 # Vercel
 .vercel/
+.workflow-data/
 
 # macOS
 .DS_Store

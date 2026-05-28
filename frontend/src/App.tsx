@@ -148,6 +148,7 @@ function ChatView({
       id: sessionId,
       transport,
       messages: initialMessages,
+      resume: true,
       onFinish: onFinishReply,
       sendAutomaticallyWhen:
         lastAssistantMessageIsCompleteWithApprovalResponses,

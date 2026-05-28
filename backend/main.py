@@ -10,6 +10,7 @@ import fastapi.middleware.cors
 
 import db
 import sessions
+import stream_store
 from routers import chat, session
 
 
@@ -17,6 +18,7 @@ from routers import chat, session
 async def lifespan(_app: fastapi.FastAPI) -> AsyncIterator[None]:
     """Create configured storage on startup, close DB pool on shutdown."""
     await sessions.ensure_schema()
+    await stream_store.ensure_schema()
     yield
     await db.close_pool()
 

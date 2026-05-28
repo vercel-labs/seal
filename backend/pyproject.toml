@@ -5,7 +5,8 @@ description = "Seal – personal AI assistant backend"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.115.0",
-    "vercel>=0.5.1",
+    "vercel>=0.5.9",
+    "vercel-workers>=0.0.22",
     "asyncpg>=0.29.0",
     "httpx>=0.28.1",
     "ai",
