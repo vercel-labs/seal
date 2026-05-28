@@ -63,3 +63,46 @@ def test_local_stream_store_appends_and_reads(
         assert await stream_store.get_status("s1") == "completed"
 
     asyncio.run(run())
+
+
+def test_local_stream_store_tracks_ui_stream_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SEAL_STREAMS_DIR", str(tmp_path))
+
+    async def run() -> None:
+        await stream_store.create_ui_stream(
+            "ui-1",
+            session_id="s1",
+            source_stream_id="s1",
+            source_start_index=3,
+            history_message_count=2,
+        )
+
+        stream = await stream_store.get_ui_stream("ui-1")
+        assert stream is not None
+        assert stream.status == "running"
+        assert stream.source_stream_id == "s1"
+        assert stream.source_start_index == 3
+        assert stream.source_next_index == 3
+        assert stream.history_message_count == 2
+
+        await stream_store.append_ui_chunk("ui-1", 'data: {"type":"start"}\n\n')
+        await stream_store.append_ui_chunk("ui-1", 'data: {"type":"finish"}\n\n')
+        assert await stream_store.claim_ui_stream_source_index("ui-1", 3) is True
+        assert await stream_store.claim_ui_stream_source_index("ui-1", 3) is False
+        await stream_store.complete_ui_stream_source_index("ui-1", 3, 5)
+        assert await stream_store.claim_ui_stream_source_index("ui-1", 3) is False
+
+        chunks = await stream_store.list_ui_chunks("ui-1", 1)
+        assert [chunk.index for chunk in chunks] == [1]
+        assert chunks[0].chunk == 'data: {"type":"finish"}\n\n'
+        assert await stream_store.count_ui_chunks("ui-1") == 2
+
+        stream = await stream_store.get_ui_stream("ui-1")
+        assert stream is not None
+        assert stream.source_next_index == 5
+
+    asyncio.run(run())

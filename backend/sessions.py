@@ -31,6 +31,7 @@ class SessionMeta(pydantic.BaseModel):
 class SessionRecord(SessionMeta):
     messages: list[ai_messages.Message] = pydantic.Field(default_factory=list)
     active_run_id: str | None = None
+    active_stream_id: str | None = None
 
 
 _SCHEMA = """\
@@ -48,6 +49,8 @@ ALTER TABLE sessions
     ADD COLUMN IF NOT EXISTS messages JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sessions
     ADD COLUMN IF NOT EXISTS active_run_id TEXT;
+ALTER TABLE sessions
+    ADD COLUMN IF NOT EXISTS active_stream_id TEXT;
 ALTER TABLE sessions
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE sessions
@@ -114,6 +117,7 @@ def _record_from_row(row: Any) -> SessionRecord:
         created_at=row["created_at"].isoformat(),
         updated_at=row["updated_at"].isoformat(),
         active_run_id=row["active_run_id"],
+        active_stream_id=row["active_stream_id"],
         messages=_load_messages(row["messages"]),
     )
 
@@ -150,7 +154,8 @@ async def list_sessions() -> list[SessionMeta]:
     if _use_postgres():
         pool = await db.get_pool()
         rows = await pool.fetch(
-            "SELECT id, title, created_at, updated_at, active_run_id, messages "
+            "SELECT id, title, created_at, updated_at, active_run_id, "
+            "active_stream_id, messages "
             "FROM sessions ORDER BY updated_at DESC"
         )
         return [_meta(_record_from_row(row)) for row in rows]
@@ -174,13 +179,15 @@ async def create_session(session_id: str, title: str | None = None) -> SessionMe
                 "INSERT INTO sessions (id, title, messages) "
                 "VALUES ($1, $2, '[]'::jsonb) "
                 "ON CONFLICT (id) DO NOTHING "
-                "RETURNING id, title, created_at, updated_at, active_run_id, messages",
+                "RETURNING id, title, created_at, updated_at, active_run_id, "
+                "active_stream_id, messages",
                 session_id,
                 title,
             )
             if row is None:
                 row = await conn.fetchrow(
-                    "SELECT id, title, created_at, updated_at, active_run_id, messages "
+                    "SELECT id, title, created_at, updated_at, active_run_id, "
+                    "active_stream_id, messages "
                     "FROM sessions WHERE id = $1",
                     session_id,
                 )
@@ -207,7 +214,8 @@ async def get_session(session_id: str) -> SessionRecord | None:
     if _use_postgres():
         pool = await db.get_pool()
         row = await pool.fetchrow(
-            "SELECT id, title, created_at, updated_at, active_run_id, messages "
+            "SELECT id, title, created_at, updated_at, active_run_id, "
+            "active_stream_id, messages "
             "FROM sessions WHERE id = $1",
             session_id,
         )
@@ -227,7 +235,8 @@ async def save_messages(
             "INSERT INTO sessions (id, messages) "
             "VALUES ($1, $2::jsonb) "
             "ON CONFLICT (id) DO UPDATE SET messages = $2::jsonb, updated_at = now() "
-            "RETURNING id, title, created_at, updated_at, active_run_id, messages",
+            "RETURNING id, title, created_at, updated_at, active_run_id, "
+            "active_stream_id, messages",
             session_id,
             json.dumps(_dump_messages(messages), separators=(",", ":")),
         )
@@ -242,6 +251,7 @@ async def save_messages(
             created_at=existing.created_at if existing else now,
             updated_at=now,
             active_run_id=existing.active_run_id if existing else None,
+            active_stream_id=existing.active_stream_id if existing else None,
             messages=_load_messages(_dump_messages(messages)),
         )
         _write_local(record)
@@ -254,7 +264,8 @@ async def set_title(session_id: str, title: str) -> SessionMeta | None:
         row = await pool.fetchrow(
             "UPDATE sessions SET title = $2, updated_at = now() "
             "WHERE id = $1 "
-            "RETURNING id, title, created_at, updated_at, active_run_id, messages",
+            "RETURNING id, title, created_at, updated_at, active_run_id, "
+            "active_stream_id, messages",
             session_id,
             title,
         )
@@ -279,7 +290,8 @@ async def set_active_run(
         row = await pool.fetchrow(
             "UPDATE sessions SET active_run_id = $2, updated_at = now() "
             "WHERE id = $1 "
-            "RETURNING id, title, created_at, updated_at, active_run_id, messages",
+            "RETURNING id, title, created_at, updated_at, active_run_id, "
+            "active_stream_id, messages",
             session_id,
             run_id,
         )
@@ -291,6 +303,62 @@ async def set_active_run(
             return None
         record = existing.model_copy(
             update={"active_run_id": run_id, "updated_at": _now()}
+        )
+        _write_local(record)
+        return _meta(record)
+
+
+async def set_active_stream(
+    session_id: str,
+    stream_id: str | None,
+) -> SessionMeta | None:
+    """Set or clear the UI stream currently visible for a session."""
+    if _use_postgres():
+        pool = await db.get_pool()
+        row = await pool.fetchrow(
+            "UPDATE sessions SET active_stream_id = $2, updated_at = now() "
+            "WHERE id = $1 "
+            "RETURNING id, title, created_at, updated_at, active_run_id, "
+            "active_stream_id, messages",
+            session_id,
+            stream_id,
+        )
+        return _meta(_record_from_row(row)) if row is not None else None
+
+    async with _lock_for(session_id):
+        existing = _read_local(session_id)
+        if existing is None:
+            return None
+        record = existing.model_copy(
+            update={"active_stream_id": stream_id, "updated_at": _now()}
+        )
+        _write_local(record)
+        return _meta(record)
+
+
+async def clear_active_stream(
+    session_id: str,
+    stream_id: str,
+) -> SessionMeta | None:
+    """Clear the active UI stream if it still points at ``stream_id``."""
+    if _use_postgres():
+        pool = await db.get_pool()
+        row = await pool.fetchrow(
+            "UPDATE sessions SET active_stream_id = NULL, updated_at = now() "
+            "WHERE id = $1 AND active_stream_id = $2 "
+            "RETURNING id, title, created_at, updated_at, active_run_id, "
+            "active_stream_id, messages",
+            session_id,
+            stream_id,
+        )
+        return _meta(_record_from_row(row)) if row is not None else None
+
+    async with _lock_for(session_id):
+        existing = _read_local(session_id)
+        if existing is None or existing.active_stream_id != stream_id:
+            return None
+        record = existing.model_copy(
+            update={"active_stream_id": None, "updated_at": _now()}
         )
         _write_local(record)
         return _meta(record)

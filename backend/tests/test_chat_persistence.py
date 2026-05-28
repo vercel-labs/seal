@@ -16,6 +16,7 @@ from ai.agents.ui.ai_sdk import UIMessage, to_ui_messages
 import sessions
 import stream_store
 from routers import chat as chat_router
+from routers import session as session_router
 
 
 def test_prepare_chat_request_accepts_ui_only_step_start_shape() -> None:
@@ -290,7 +291,7 @@ def test_supported_sse_keeps_denied_state_for_rejected_approval() -> None:
     assert "tool-output-error" not in types
 
 
-def test_resume_chat_stream_accepts_waiting_status(
+def test_resume_chat_stream_returns_204_without_active_ui_stream(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -315,4 +316,83 @@ def test_resume_chat_stream_accepts_waiting_status(
 
     response = asyncio.run(run())
 
+    assert response.status_code == 204
+
+
+def test_resume_chat_stream_accepts_active_ui_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SEAL_SESSIONS_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("SEAL_STREAMS_DIR", str(tmp_path / "streams"))
+
+    async def run() -> fastapi.responses.Response:
+        await sessions.create_session("s1")
+        await sessions.set_active_run("s1", "wrun_1")
+        await stream_store.set_status("s1", "running")
+        await stream_store.create_ui_stream(
+            "ui-1",
+            session_id="s1",
+            source_stream_id="s1",
+            source_start_index=0,
+            history_message_count=1,
+        )
+        await sessions.set_active_stream("s1", "ui-1")
+        request = fastapi.Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/chat/s1/stream",
+                "headers": [],
+                "query_string": b"",
+            }
+        )
+        return await chat_router.resume_chat_stream("s1", request)
+
+    response = asyncio.run(run())
+
     assert response.status_code == 200
+
+
+def test_session_hydration_trims_only_while_run_is_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SEAL_SESSIONS_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("SEAL_STREAMS_DIR", str(tmp_path / "streams"))
+
+    user = ai_messages.Message(
+        id="user-1",
+        role="user",
+        parts=[ai_messages.TextPart(id="user-text-1", text="hi")],
+    )
+    assistant = ai_messages.Message(
+        id="assistant-1",
+        role="assistant",
+        parts=[ai_messages.TextPart(id="assistant-text-1", text="hello")],
+    )
+
+    async def run() -> tuple[int, int]:
+        await sessions.save_messages("s1", [user, assistant])
+        await stream_store.create_ui_stream(
+            "ui-1",
+            session_id="s1",
+            source_stream_id="s1",
+            source_start_index=0,
+            history_message_count=1,
+        )
+        await sessions.set_active_stream("s1", "ui-1")
+
+        inactive = await session_router.get_session("s1")
+
+        await sessions.set_active_run("s1", "wrun_1")
+        active = await session_router.get_session("s1")
+
+        return len(inactive["messages"]), len(active["messages"])
+
+    inactive_count, active_count = asyncio.run(run())
+
+    assert inactive_count == 2
+    assert active_count == 1

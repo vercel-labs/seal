@@ -10,6 +10,7 @@ from ai.agents.ui.ai_sdk import to_ui_messages
 
 import agent
 import sessions
+import stream_store
 
 router = fastapi.APIRouter()
 
@@ -43,7 +44,13 @@ async def get_session(session_id: str) -> dict[str, Any]:
     session = await sessions.get_session(session_id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
-    ui_messages = to_ui_messages(session.messages)
+    messages = session.messages
+    if session.active_run_id is not None and session.active_stream_id is not None:
+        active_stream = await stream_store.get_ui_stream(session.active_stream_id)
+        if active_stream is not None and active_stream.status == "running":
+            messages = messages[: active_stream.history_message_count]
+
+    ui_messages = to_ui_messages(messages)
     result = _meta(session).model_dump()
     result["messages"] = [
         message.model_dump(mode="json", by_alias=True) for message in ui_messages
