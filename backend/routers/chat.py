@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterable
 from typing import Any, NamedTuple, cast
 
+import ai.agents.ui.ai_sdk.outbound_stream as ai_sdk_outbound_stream
 import fastapi
 import fastapi.responses
 import pydantic
@@ -16,7 +17,7 @@ from ai.agents.ui.ai_sdk import (
     ApprovalResponse,
     UIMessage,
     to_messages,
-    to_sse,
+    to_stream,
 )
 from vercel.blob import AsyncBlobClient
 from vercel.workflow import Run, start
@@ -142,6 +143,34 @@ def _load_agent_event(data: dict[str, object]) -> ai_events.AgentEvent:
     return cast(ai_events.AgentEvent, _MODEL_EVENT_ADAPTER.validate_python(data))
 
 
+async def _to_supported_sse(
+    events: AsyncIterable[ai_events.AgentEvent],
+) -> AsyncGenerator[str]:
+    """Convert events to SSE chunks supported by the installed JS AI SDK."""
+    denied_tool_call_ids: set[str] = set()
+
+    async for event in to_stream(events):
+        event_type = getattr(event, "type", None)
+        tool_call_id = getattr(event, "tool_call_id", None)
+
+        if event_type == "tool-approval-response":
+            continue
+
+        if isinstance(tool_call_id, str) and event_type == "tool-output-denied":
+            denied_tool_call_ids.add(tool_call_id)
+
+        if (
+            isinstance(tool_call_id, str)
+            and event_type == "tool-output-error"
+            and tool_call_id in denied_tool_call_ids
+        ):
+            continue
+
+        yield ai_sdk_outbound_stream.format_sse(event)
+
+    yield ai_sdk_outbound_stream.format_done_sse()
+
+
 async def _watch_stream_events(
     *,
     session_id: str,
@@ -190,7 +219,7 @@ async def resume_chat_stream(
     run_id = session.active_run_id
     stream_id = session_id
     status = await stream_store.get_status(stream_id)
-    if status != "running":
+    if status not in ("running", "waiting"):
         return fastapi.responses.Response(status_code=204)
 
     raw_start_index = request.query_params.get("startIndex")
@@ -215,7 +244,7 @@ async def resume_chat_stream(
         )
 
     async def stream_response() -> AsyncGenerator[str]:
-        async for chunk in to_sse(
+        async for chunk in _to_supported_sse(
             _watch_stream_events(
                 session_id=session_id,
                 run_id=run_id,
@@ -301,7 +330,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
         )
 
     async def stream_response() -> AsyncGenerator[str]:
-        async for chunk in to_sse(
+        async for chunk in _to_supported_sse(
             _watch_stream_events(
                 session_id=session_id,
                 run_id=run_id,
