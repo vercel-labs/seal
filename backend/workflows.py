@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -16,12 +15,6 @@ TOOL_APPROVAL_HOOK_TYPE = "ToolApproval"
 APPROVAL_REQUIRED_TOOLS = frozenset({"bash", "web_fetch"})
 
 workflow_app = workflow.Workflows()
-
-
-@dataclasses.dataclass
-class ToolApprovalHook(workflow.BaseHook):
-    granted: bool
-    reason: str | None = None
 
 
 def dump_messages(messages: list[Any]) -> list[dict[str, Any]]:
@@ -236,8 +229,33 @@ async def llm_step(
         full_messages,
         tools=[tool.tool for tool in agent.TOOLS],
     ) as stream:
+        emitted_approval_ids: set[str] = set()
         async for event in stream:
             await stream_store.append_event(stream_id, dump_agent_event(event))
+            if not isinstance(event, ai.events.ToolEnd):
+                continue
+            tool_call = event.tool_call
+            if not tool_requires_approval(tool_call.tool_name):
+                continue
+            approval_id = _approval_id(tool_call)
+            if approval_id in emitted_approval_ids:
+                continue
+            emitted_approval_ids.add(approval_id)
+
+            hook_message = _hook_message(
+                tool_call=tool_call,
+                assistant_message=event.message,
+                status="pending",
+            )
+            hook = next(
+                part
+                for part in hook_message.parts
+                if isinstance(part, ai.messages.HookPart)
+            )
+            await stream_store.append_event(
+                stream_id,
+                dump_agent_event(ai.events.HookEvent(message=hook_message, hook=hook)),
+            )
         if stream.message is None:
             raise RuntimeError("LLM stream ended without a final message")
         return dump_message(stream.message)
@@ -336,6 +354,19 @@ append_tool_result_event_step.max_retries = 0
 
 
 @workflow_app.step
+async def load_tool_approvals_step(
+    stream_id: str,
+    approval_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    import stream_store
+
+    return await stream_store.list_tool_approvals(stream_id, approval_ids)
+
+
+load_tool_approvals_step.max_retries = 0
+
+
+@workflow_app.step
 async def set_stream_status_step(
     stream_id: str,
     status: Literal["idle", "running", "waiting", "completed", "failed"],
@@ -384,11 +415,12 @@ async def run_agent(
         messages.append(assistant_message)
         await _persist(session_id, messages)
 
-        tool_results: list[dict[str, Any]] = []
-        for tool_call in _tool_call_parts(assistant_message):
+        tool_calls = _tool_call_parts(assistant_message)
+        approval_ids_by_call: dict[str, str] = {}
+        for tool_call in tool_calls:
             if tool_requires_approval(_tool_name(tool_call)):
                 approval_id = _approval_id(tool_call)
-                approval_event = ToolApprovalHook.wait(token=approval_id)
+                approval_ids_by_call[_tool_call_id(tool_call)] = approval_id
                 hook_message = _hook_message_data(
                     tool_call=tool_call,
                     assistant_message=assistant_message,
@@ -396,13 +428,33 @@ async def run_agent(
                 )
                 messages.append(hook_message)
                 await _persist(session_id, messages)
-                await append_hook_event_step(stream_id, hook_message)
-                await set_stream_status_step(stream_id, "waiting")
 
-                approval = await approval_event
-                await set_stream_status_step(stream_id, "running")
-                granted = bool(approval and approval.granted)
-                reason = approval.reason if approval else "cancelled"
+        approval_resolutions: dict[str, tuple[bool, str | None]] = {}
+        approval_ids = list(approval_ids_by_call.values())
+        while len(approval_resolutions) < len(approval_ids_by_call):
+            await set_stream_status_step(stream_id, "waiting")
+            approvals = await load_tool_approvals_step(stream_id, approval_ids)
+            for tool_call_id, approval_id in approval_ids_by_call.items():
+                if tool_call_id in approval_resolutions:
+                    continue
+                approval = approvals.get(approval_id)
+                if approval is None:
+                    continue
+                approval_resolutions[tool_call_id] = (
+                    bool(approval["granted"]),
+                    cast(str | None, approval.get("reason")),
+                )
+            if len(approval_resolutions) < len(approval_ids_by_call):
+                await workflow.sleep(0.5)
+
+        if approval_resolutions:
+            await set_stream_status_step(stream_id, "running")
+
+        tool_results: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            tool_call_id = _tool_call_id(tool_call)
+            if tool_call_id in approval_resolutions:
+                granted, reason = approval_resolutions[tool_call_id]
                 resolution = {
                     "granted": granted,
                     "reason": reason,
@@ -437,12 +489,3 @@ async def run_agent(
     await clear_active_run_step(session_id)
     await set_stream_status_step(stream_id, "completed")
     return messages
-
-
-async def resume_tool_approval(
-    approval_id: str,
-    *,
-    granted: bool,
-    reason: str | None,
-) -> None:
-    await ToolApprovalHook(granted=granted, reason=reason).resume(approval_id)

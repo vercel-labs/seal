@@ -316,12 +316,14 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 status_code=400,
                 detail="No active workflow run for approval response",
             )
-        await stream_store.set_status(stream_id, "running")
-        await workflows.resume_tool_approval(
-            approval.hook_id,
+        await stream_store.save_tool_approval(
+            stream_id,
+            approval_id=approval.hook_id,
+            tool_call_id=approval.tool_call_id,
             granted=approval.granted,
             reason=approval.reason,
         )
+        await stream_store.set_status(stream_id, "running")
 
     if run_id is None:
         raise fastapi.HTTPException(

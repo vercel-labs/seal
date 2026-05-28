@@ -90,6 +90,109 @@ def test_workflow_pending_approval_message_uses_ai_sdk_shape() -> None:
     assert hook.status == "pending"
 
 
+def test_workflow_records_all_pending_approvals_before_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = ai_messages.Message(
+        id="user-1",
+        role="user",
+        parts=[ai_messages.TextPart(id="user-text-1", text="run two tools")],
+    )
+    assistant = ai_messages.Message(
+        id="assistant-1",
+        role="assistant",
+        parts=[
+            ai_messages.ToolCallPart(
+                id="call-part-1",
+                tool_call_id="call-1",
+                tool_name="bash",
+                tool_args='{"command":"pwd"}',
+            ),
+            ai_messages.ToolCallPart(
+                id="call-part-2",
+                tool_call_id="call-2",
+                tool_name="web_fetch",
+                tool_args='{"url":"https://example.com"}',
+            ),
+            ai_messages.ToolCallPart(
+                id="call-part-3",
+                tool_call_id="call-3",
+                tool_name="bash",
+                tool_args='{"command":"ls"}',
+            ),
+        ],
+    )
+    persisted: list[list[dict[str, Any]]] = []
+    statuses: list[str] = []
+
+    class Suspended(Exception):
+        pass
+
+    async def fake_llm_step(
+        stream_id: str,
+        messages_data: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return workflows.dump_message(assistant)
+
+    async def fake_persist(
+        session_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        persisted.append([*messages])
+
+    async def fake_set_stream_status_step(stream_id: str, status: str) -> None:
+        statuses.append(status)
+
+    async def fake_load_tool_approvals_step(
+        stream_id: str,
+        approval_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        return {}
+
+    async def fake_sleep(delay: float) -> None:
+        raise Suspended
+
+    monkeypatch.setattr(workflows, "llm_step", fake_llm_step)
+    monkeypatch.setattr(workflows, "_persist", fake_persist)
+    monkeypatch.setattr(
+        workflows,
+        "set_stream_status_step",
+        fake_set_stream_status_step,
+    )
+    monkeypatch.setattr(
+        workflows,
+        "load_tool_approvals_step",
+        fake_load_tool_approvals_step,
+    )
+    monkeypatch.setattr(cast(Any, workflows).workflow, "sleep", fake_sleep)
+
+    async def run() -> None:
+        with pytest.raises(Suspended):
+            await asyncio.wait_for(
+                cast(Any, workflows.run_agent).func(
+                    "session-1",
+                    "stream-1",
+                    [workflows.dump_message(user)],
+                ),
+                timeout=1,
+            )
+
+    asyncio.run(run())
+
+    pending_hooks = [
+        message["parts"][0]["hook_id"]
+        for message in persisted[-1]
+        if message["role"] == "internal"
+    ]
+
+    assert pending_hooks == [
+        "approve_call-1",
+        "approve_call-2",
+        "approve_call-3",
+    ]
+    assert statuses == ["waiting"]
+
+
 def test_session_active_run_round_trips(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

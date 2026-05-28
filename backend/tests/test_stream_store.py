@@ -39,6 +39,26 @@ def test_local_stream_store_appends_and_reads(
         assert [event.index for event in events] == [1]
         assert events[0].data["chunk"] == "hi"
 
+        await stream_store.save_tool_approval(
+            "s1",
+            approval_id="approve_call-1",
+            tool_call_id="call-1",
+            granted=True,
+            reason=None,
+        )
+        approvals = await stream_store.list_tool_approvals(
+            "s1",
+            ["approve_call-1", "approve_call-2"],
+        )
+        assert approvals == {
+            "approve_call-1": {
+                "tool_call_id": "call-1",
+                "granted": True,
+                "reason": None,
+            }
+        }
+        assert await stream_store.count_events("s1") == 2
+
         await stream_store.set_status("s1", "completed")
         assert await stream_store.get_status("s1") == "completed"
 

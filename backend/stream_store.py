@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS seal_stream_events (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (stream_id, idx)
 );
+
+CREATE TABLE IF NOT EXISTS seal_stream_approvals (
+    stream_id    TEXT NOT NULL REFERENCES seal_streams(id) ON DELETE CASCADE,
+    approval_id  TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    granted      BOOLEAN NOT NULL,
+    reason       TEXT,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (stream_id, approval_id)
+);
 """
 
 _DEFAULT_DIR = pathlib.Path("data/streams")
@@ -292,6 +302,93 @@ async def count_events(stream_id: str) -> int:
 
     async with _lock_for(stream_id):
         return sum(1 for item in _read_local(stream_id) if item.get("kind") == "event")
+
+
+async def save_tool_approval(
+    stream_id: str,
+    *,
+    approval_id: str,
+    tool_call_id: str,
+    granted: bool,
+    reason: str | None,
+) -> None:
+    await ensure_stream(stream_id)
+    if _use_postgres():
+        pool = await db.get_pool()
+        await pool.execute(
+            "INSERT INTO seal_stream_approvals "
+            "(stream_id, approval_id, tool_call_id, granted, reason) "
+            "VALUES ($1, $2, $3, $4, $5) "
+            "ON CONFLICT (stream_id, approval_id) DO UPDATE SET "
+            "tool_call_id = $3, granted = $4, reason = $5, updated_at = now()",
+            stream_id,
+            approval_id,
+            tool_call_id,
+            granted,
+            reason,
+        )
+        return
+
+    async with _lock_for(stream_id):
+        _write_local(
+            stream_id,
+            {
+                "kind": "approval",
+                "approval_id": approval_id,
+                "tool_call_id": tool_call_id,
+                "granted": granted,
+                "reason": reason,
+                "updated_at": _now(),
+            },
+        )
+
+
+async def list_tool_approvals(
+    stream_id: str,
+    approval_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    await ensure_stream(stream_id)
+    if not approval_ids:
+        return {}
+
+    approval_id_set = set(approval_ids)
+    if _use_postgres():
+        pool = await db.get_pool()
+        rows = await pool.fetch(
+            "SELECT approval_id, tool_call_id, granted, reason "
+            "FROM seal_stream_approvals "
+            "WHERE stream_id = $1 AND approval_id = ANY($2::text[])",
+            stream_id,
+            approval_ids,
+        )
+        return {
+            str(row["approval_id"]): {
+                "tool_call_id": str(row["tool_call_id"]),
+                "granted": bool(row["granted"]),
+                "reason": row["reason"],
+            }
+            for row in rows
+        }
+
+    async with _lock_for(stream_id):
+        approvals: dict[str, dict[str, Any]] = {}
+        for item in _read_local(stream_id):
+            if item.get("kind") != "approval":
+                continue
+            approval_id = item.get("approval_id")
+            if not isinstance(approval_id, str) or approval_id not in approval_id_set:
+                continue
+            tool_call_id = item.get("tool_call_id")
+            granted = item.get("granted")
+            if not isinstance(tool_call_id, str) or not isinstance(granted, bool):
+                continue
+            reason = item.get("reason")
+            approvals[approval_id] = {
+                "tool_call_id": tool_call_id,
+                "granted": granted,
+                "reason": reason if isinstance(reason, str) else None,
+            }
+        return approvals
 
 
 _STATUS_VALUES = frozenset({"idle", "running", "waiting", "completed", "failed"})
