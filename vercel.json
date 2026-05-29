@@ -1,19 +1,9 @@
 {
   "fluid": true,
   "experimentalServices": {
-    "frontend": {
-      "framework": "vite",
-      "entrypoint": "frontend",
-      "routePrefix": "/"
-    },
-    "backend": {
-      "framework": "fastapi",
-      "entrypoint": "backend/core/main.py",
-      "routePrefix": "/api"
-    },
-    "workflow": {
+    "agent": {
       "type": "worker",
-      "entrypoint": "backend/core/durable_agent.py",
+      "entrypoint": "backend/agent/main.py",
       "topics": ["__wkf_*"]
     }
   }

@@ -1,0 +1,269 @@
+from collections.abc import AsyncGenerator
+from typing import ClassVar
+
+import ai
+import vercel.workflow
+
+workflow = vercel.workflow.Workflows()
+
+
+@workflow.step
+async def _bash(command: str, timeout: int | None = None) -> str:
+    import asyncio
+
+    proc = await asyncio.create_subprocess_exec(
+        "bash",
+        "-c",
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return f"Command timed out after {timeout}s."
+
+    output = stdout.decode() if stdout else ""
+    if proc.returncode != 0:
+        return f"[exit code {proc.returncode}]\n{output}"
+    return output
+
+
+@ai.tool
+async def bash(command: str, timeout: int | None = None) -> str:
+    """Execute a bash command.
+
+    Use timeout (seconds) to limit long-running commands.
+    """
+    return await _bash(command, timeout)
+
+
+@workflow.step
+async def _web_fetch(
+    url: str,
+    method: str = "GET",
+    headers: str = "",
+    body: str = "",
+) -> str:
+    import httpx
+
+    parsed_headers: dict[str, str] = {}
+    for line in headers.strip().splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            parsed_headers[key.strip()] = value.strip()
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        response = await client.request(
+            method,
+            url,
+            headers=parsed_headers or None,
+            content=body or None,
+        )
+
+    parts = [
+        f"HTTP {response.status_code}",
+        *(f"{key}: {value}" for key, value in response.headers.items()),
+        "",
+        response.text[:50_000],
+    ]
+    return "\n".join(parts)
+
+
+@ai.tool
+async def web_fetch(
+    url: str,
+    method: str = "GET",
+    headers: str = "",
+    body: str = "",
+) -> str:
+    """Fetch a URL and return the response.
+
+    Args:
+        url: The URL to fetch.
+        method: HTTP method (GET, POST, PUT, DELETE, etc.).
+        headers: Optional headers as newline-separated "Key: Value" pairs.
+        body: Optional request body for POST/PUT.
+    """
+    return await _web_fetch(url, method, headers, body)
+
+
+@workflow.step
+async def stream_llm(
+    stream_key: str,
+    messages: list[dict[str, object]],
+    tool_schemas: list[dict[str, object]] | None = None,
+    model_id: str = "gateway:anthropic/claude-sonnet-4.6",
+) -> dict[str, object]:
+    """Durable wrapper around ``ai.stream``.
+
+    Runs the model call as a workflow step (durable, retried) while
+    streaming every event to a side-channel keyed by ``stream_key`` so a
+    caller can render live tokens. Returns the final assistant message as
+    a JSON-serializable dict (the step's durable result).
+
+    ``stream_key`` must be supplied by the caller (e.g. the HTTP request
+    id) and threaded in via ``workflow.start`` -> workflow -> step. Do NOT
+    generate it randomly inside the workflow: steps retry up to 3 times and
+    the drainer must keep targeting the same channel.
+
+    How to replace a naked ``ai.stream`` *inside a workflow*::
+
+        # BEFORE (not durable, no side-channel):
+        #   async with ai.stream(model, messages, tools=tools) as s:
+        #       async for event in s:
+        #           ...
+        #       final = s.message
+        #
+        # AFTER:
+        result = await stream_llm(
+            stream_key,
+            [m.model_dump(mode="json") for m in messages],
+            tool_schemas=[
+                {"name": t.name, "args": t.args.model_dump(mode="json")}
+                for t in tools
+            ],
+        )
+        final = ai.messages.Message.model_validate(result)
+
+    How to start it and drain the live stream *at the HTTP callsite*::
+
+        # stream_key = request_id  # stable id, generated OUTSIDE the workflow
+        # run = await vercel.workflow.start(my_workflow, stream_key, ...)
+        #
+        # # tail ./.streams/{stream_key}.jsonl line-by-line, e.g. for SSE:
+        # import json, asyncio, pathlib
+        # path = pathlib.Path(f"./.streams/{stream_key}.jsonl")
+        # while not path.exists():
+        #     await asyncio.sleep(0.05)
+        # with path.open() as fh:
+        #     while True:
+        #         line = fh.readline()
+        #         if not line:
+        #             await asyncio.sleep(0.05)
+        #             continue
+        #         record = json.loads(line)
+        #         if record["type"] == "done":
+        #             break
+        #         if record["type"] == "TextDelta":
+        #             yield record["data"]["chunk"]  # push to client
+        #
+        # # durable final message:
+        # final = await vercel.workflow.Run(run.run_id).return_value()
+    """
+    import json
+    import pathlib
+
+    model = ai.get_model(model_id)
+    parsed_messages = [ai.messages.Message.model_validate(m) for m in messages]
+    tools = [
+        ai.Tool(
+            kind="function",
+            name=t["name"],
+            args=ai.tools.FunctionToolArgs.model_validate(t["args"]),
+        )
+        for t in (tool_schemas or [])
+    ]
+
+    # ── Side-channel: local JSONL ────────────────────────────────────
+    # TODO(postgres): for cloud durability, replace this file open + the
+    # per-event/`done`/`start` writes below with
+    #   INSERT INTO stream_events(stream_key, seq, payload) VALUES (...)
+    # keeping the same {"type", "data"} record shape. The drainer then
+    # polls rows for stream_key ordered by seq instead of tailing a file.
+    channel_path = pathlib.Path(f"./.streams/{stream_key}.jsonl")
+    channel_path.parent.mkdir(parents=True, exist_ok=True)
+    # Truncate: a retry re-streams from scratch; "start" resets the drainer.
+    channel = channel_path.open("w")
+
+    def emit(record: dict[str, object]) -> None:
+        channel.write(json.dumps(record) + "\n")
+        channel.flush()
+
+    try:
+        emit({"type": "start"})
+        async with ai.stream(model, parsed_messages, tools=tools) as s:
+            async for event in s:
+                emit(
+                    {
+                        "type": type(event).__name__,
+                        "data": event.model_dump(mode="json"),
+                    }
+                )
+            if s.message is None:
+                raise RuntimeError("LLM stream ended without a final message")
+            emit({"type": "done"})
+            return s.message.model_dump(mode="json")
+    finally:
+        channel.close()
+
+
+class SealAgent(ai.Agent):
+    TOOLS: ClassVar[list[ai.AgentTool]] = [bash, web_fetch]
+
+    async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
+        # ``stream_key`` is threaded in via ``agent.run(..., params=...)`` so
+        # the durable LLM step can publish live tokens to its side-channel.
+        stream_key = context.params["stream_key"]
+        tool_schemas: list[dict[str, object]] = [
+            {"name": t.name, "args": t.args.model_dump(mode="json")}
+            for t in context.tools
+        ]
+
+        while context.keep_running():
+            # 1. LLM call via the durable ``stream_llm`` step. The step result
+            #    is the complete message (replayed on retry); live tokens land
+            #    in the jsonl side-channel keyed by ``stream_key``.
+            result = await stream_llm(
+                stream_key,
+                [m.model_dump(mode="json") for m in context.messages],
+                tool_schemas=tool_schemas,
+            )
+            llm_msg = ai.messages.Message.model_validate(result)
+
+            # 2. Replay the complete message into a synthetic stream so the
+            #    rest of the loop is identical to ``Agent.loop``. Each tool
+            #    call resolves to a ``@workflow.step`` and runs durably.
+            async with (
+                ai.Stream(ai.events.replay_message_events(llm_msg)) as stream,
+                ai.ToolRunner() as tr,
+            ):
+                async for event in ai.util.merge(stream, tr.events()):
+                    yield event
+
+                    if isinstance(event, ai.events.ToolEnd):
+                        tr.schedule(context.resolve(event.tool_call))
+
+                context.add(stream.message)
+                context.add(tr.get_tool_message())
+
+
+SYSTEM_PROMPT = (
+    "You are Seal, a coding assistant. Use the bash and web_fetch tools to "
+    "inspect the environment and gather information before answering."
+)
+
+
+@workflow.workflow
+async def run_agent(prompt: str, stream_key: str) -> str:
+    """Durable agent run. Returns the final assistant text.
+
+    ``stream_key`` is supplied by the caller (outside the workflow, so it is
+    stable across step retries) and selects the jsonl side-channel that
+    ``stream_llm`` writes live tokens to.
+
+    Trigger a run with the public workflow API, e.g.::
+
+        run = await vercel.workflow.start(run_agent, prompt, stream_key)
+        final = await vercel.workflow.Run(run.run_id).return_value()
+    """
+    model = ai.get_model("gateway:anthropic/claude-sonnet-4.6")
+    agent = SealAgent()
+    messages = [ai.system_message(SYSTEM_PROMPT), ai.user_message(prompt)]
+
+    async with agent.run(model, messages, params={"stream_key": stream_key}) as stream:
+        async for _event in stream:
+            pass
+        return stream.output
