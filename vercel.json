@@ -1,6 +1,11 @@
 {
   "fluid": true,
   "experimentalServices": {
+    "trigger": {
+      "framework": "fastapi",
+      "entrypoint": "backend/agent/trigger.py",
+      "routePrefix": "/api"
+    },
     "agent": {
       "type": "worker",
       "entrypoint": "backend/agent/main.py",

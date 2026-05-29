@@ -1,10 +1,22 @@
 from collections.abc import AsyncGenerator
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
-import ai
+import vercel._internal.workflow.py_sandbox
 import vercel.workflow
 
+# ai imports shutil; sandbox turns os.supports_dir_fd into a function.
+vercel._internal.workflow.py_sandbox._PASSTHROUGHS.add("ai")
+
+import ai  # noqa: E402
+
 workflow = vercel.workflow.Workflows()
+MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
+
+
+class _WorkflowModelProvider(ai.Provider[Any]):
+    def __init__(self) -> None:
+        # Real provider/httpx construction happens inside stream_llm.
+        super().__init__(name="workflow-placeholder", base_url="")
 
 
 @workflow.step
@@ -95,7 +107,7 @@ async def stream_llm(
     stream_key: str,
     messages: list[dict[str, object]],
     tool_schemas: list[dict[str, object]] | None = None,
-    model_id: str = "gateway:anthropic/claude-sonnet-4.6",
+    model_id: str = MODEL_ID,
 ) -> dict[str, object]:
     """Durable wrapper around ``ai.stream``.
 
@@ -156,12 +168,13 @@ async def stream_llm(
     import json
     import pathlib
 
+    # Provider/httpx setup belongs in the step, outside the workflow body.
     model = ai.get_model(model_id)
     parsed_messages = [ai.messages.Message.model_validate(m) for m in messages]
     tools = [
         ai.Tool(
             kind="function",
-            name=t["name"],
+            name=cast(str, t["name"]),
             args=ai.tools.FunctionToolArgs.model_validate(t["args"]),
         )
         for t in (tool_schemas or [])
@@ -207,6 +220,7 @@ class SealAgent(ai.Agent):
         # ``stream_key`` is threaded in via ``agent.run(..., params=...)`` so
         # the durable LLM step can publish live tokens to its side-channel.
         stream_key = context.params["stream_key"]
+        model_id = context.params["model_id"]
         tool_schemas: list[dict[str, object]] = [
             {"name": t.name, "args": t.args.model_dump(mode="json")}
             for t in context.tools
@@ -220,6 +234,7 @@ class SealAgent(ai.Agent):
                 stream_key,
                 [m.model_dump(mode="json") for m in context.messages],
                 tool_schemas=tool_schemas,
+                model_id=model_id,
             )
             llm_msg = ai.messages.Message.model_validate(result)
 
@@ -259,11 +274,16 @@ async def run_agent(prompt: str, stream_key: str) -> str:
         run = await vercel.workflow.start(run_agent, prompt, stream_key)
         final = await vercel.workflow.Run(run.run_id).return_value()
     """
-    model = ai.get_model("gateway:anthropic/claude-sonnet-4.6")
+    # Real provider/httpx construction happens inside stream_llm.
+    model = ai.Model("workflow-placeholder", provider=_WorkflowModelProvider())
     agent = SealAgent()
     messages = [ai.system_message(SYSTEM_PROMPT), ai.user_message(prompt)]
 
-    async with agent.run(model, messages, params={"stream_key": stream_key}) as stream:
+    async with agent.run(
+        model,
+        messages,
+        params={"stream_key": stream_key, "model_id": MODEL_ID},
+    ) as stream:
         async for _event in stream:
             pass
         return stream.output
