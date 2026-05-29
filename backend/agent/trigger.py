@@ -51,12 +51,13 @@ async def status(run_id: str) -> StatusResponse:
 
 
 async def _tail_tokens(stream_key: str) -> AsyncGenerator[str]:
-    """Tail the jsonl side-channel that ``stream_llm`` writes live tokens to.
+    """Tail the jsonl side-channel for one full agent workflow run.
 
     Emits Server-Sent Events: ``data: <text chunk>`` per token, then a final
-    ``event: done``. See ``main.stream_llm`` for the record shape.
+    ``event: done``. See ``main.start_agent_stream`` for run ownership.
     """
-    path = pathlib.Path(f"./.streams/{stream_key}.jsonl")
+    # Match the workflow side-channel path instead of rebuilding it two ways.
+    path = pathlib.Path(main._stream_path(stream_key))
     while not path.exists():
         await asyncio.sleep(0.05)
 
@@ -66,10 +67,15 @@ async def _tail_tokens(stream_key: str) -> AsyncGenerator[str]:
             if not line:
                 await asyncio.sleep(0.05)
                 continue
-            record = json.loads(line)
-            if record["type"] == "done":
+            record = json.loads(line)  # Decode one append-only side-channel record.
+            # Do not treat per-LLM markers as terminal stream events.
+            record_type = record.get("type")
+            # Scope distinguishes the whole agent run from one LLM call.
+            scope = record.get("scope")
+            if record_type == "done" and scope == main.STREAM_SCOPE_AGENT:
                 break
-            if record["type"] == "TextDelta":
+            if record_type == "TextDelta":
+                # Forward only model text to this simple SSE API.
                 chunk = record["data"]["chunk"]
                 yield f"data: {json.dumps(chunk)}\n\n"
     yield "event: done\ndata: {}\n\n"
