@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import pathlib
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -13,7 +11,7 @@ import fastapi.responses
 import pydantic
 import vercel.workflow
 
-from agent import main
+from agent import durable_stream, main
 
 app = fastapi.FastAPI(title="seal-agent-trigger")
 
@@ -56,28 +54,14 @@ async def _tail_tokens(stream_key: str) -> AsyncGenerator[str]:
     Emits Server-Sent Events: ``data: <text chunk>`` per token, then a final
     ``event: done``. See ``main.start_agent_stream`` for run ownership.
     """
-    # Match the workflow side-channel path instead of rebuilding it two ways.
-    path = pathlib.Path(main._stream_path(stream_key))
-    while not path.exists():
-        await asyncio.sleep(0.05)
-
-    with path.open() as fh:
-        while True:
-            line = fh.readline()
-            if not line:
-                await asyncio.sleep(0.05)
-                continue
-            record = json.loads(line)  # Decode one append-only side-channel record.
-            # Do not treat per-LLM markers as terminal stream events.
-            record_type = record.get("type")
-            # Scope distinguishes the whole agent run from one LLM call.
-            scope = record.get("scope")
-            if record_type == "done" and scope == main.STREAM_SCOPE_AGENT:
-                break
-            if record_type == "TextDelta":
-                # Forward only model text to this simple SSE API.
-                chunk = record["data"]["chunk"]
-                yield f"data: {json.dumps(chunk)}\n\n"
+    async for record in durable_stream.get_readable(stream_key):
+        if not isinstance(record, durable_stream.StreamEvent):
+            continue
+        if record.type != "TextDelta":
+            continue
+        chunk = record.data.get("chunk")
+        if isinstance(chunk, str):
+            yield f"data: {json.dumps(chunk)}\n\n"
     yield "event: done\ndata: {}\n\n"
 
 

@@ -9,10 +9,10 @@ vercel._internal.workflow.py_sandbox._PASSTHROUGHS.add("ai")
 
 import ai  # noqa: E402
 
+from agent import durable_stream  # noqa: E402
+
 workflow = vercel.workflow.Workflows()
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
-STREAM_SCOPE_AGENT = "agent"  # Mark records owned by the whole run, not one LLM call.
-STREAM_SCOPE_LLM = "llm"  # Mark records emitted by one durable LLM step.
 
 
 class _WorkflowModelProvider(ai.Provider[Any]):
@@ -104,50 +104,18 @@ async def web_fetch(
     return await _web_fetch(url, method, headers, body)
 
 
-def _stream_path(stream_key: str) -> str:
-    """Return the local side-channel path for a full agent run."""
-    return f"./.streams/{stream_key}.jsonl"  # Keep every step on the same run file.
-
-
-def _write_stream_record(
-    stream_key: str,
-    record: dict[str, object],
-    *,
-    mode: str = "a",
-) -> None:
-    """Write one JSONL stream record and flush it for the HTTP tailer."""
-    import json  # Keep JSON serialization local to side-channel writes.
-    import pathlib  # Keep filesystem access local to side-channel writes.
-
-    # Reuse the run stream path so every durable step writes to one file.
-    channel_path = pathlib.Path(_stream_path(stream_key))
-    # Create the directory here because `/run/stream` can be the first caller.
-    channel_path.parent.mkdir(parents=True, exist_ok=True)
-    # Use append except for the run-start step, which intentionally resets.
-    with channel_path.open(mode, encoding="utf-8") as channel:
-        channel.write(json.dumps(record) + "\n")  # Store one complete record per line.
-        channel.flush()  # Make records visible while the workflow keeps running.
-
-
 @workflow.step
 async def start_agent_stream(stream_key: str) -> None:
     """Initialize the side-channel once for the full agent workflow run."""
-    # Truncate once so later LLM calls do not erase prior records.
-    _write_stream_record(
-        stream_key,
-        {"type": "start", "scope": STREAM_SCOPE_AGENT},
-        mode="w",
-    )
+    stream = durable_stream.get_writable(stream_key, reset=True)
+    await stream.write(durable_stream.StreamStart())
 
 
 @workflow.step
 async def finish_agent_stream(stream_key: str) -> None:
     """Terminate the side-channel once the full agent workflow run is done."""
-    # Emit the only terminal marker the HTTP drainer should stop on.
-    _write_stream_record(
-        stream_key,
-        {"type": "done", "scope": STREAM_SCOPE_AGENT},
-    )
+    stream = durable_stream.get_writable(stream_key)
+    await stream.write(durable_stream.StreamDone())
 
 
 @workflow.step
@@ -157,62 +125,7 @@ async def stream_llm(
     tool_schemas: list[dict[str, object]] | None = None,
     model_id: str = MODEL_ID,
 ) -> dict[str, object]:
-    """Durable wrapper around ``ai.stream``.
-
-    Runs the model call as a workflow step (durable, retried) while
-    streaming every event to a side-channel keyed by ``stream_key`` so a
-    caller can render live tokens. Returns the final assistant message as
-    a JSON-serializable dict (the step's durable result).
-
-    ``stream_key`` must be supplied by the caller (e.g. the HTTP request
-    id) and threaded in via ``workflow.start`` -> workflow -> step. Do NOT
-    generate it randomly inside the workflow: steps retry up to 3 times and
-    the drainer must keep targeting the same channel.
-
-    How to replace a naked ``ai.stream`` *inside a workflow*::
-
-        # BEFORE (not durable, no side-channel):
-        #   async with ai.stream(model, messages, tools=tools) as s:
-        #       async for event in s:
-        #           ...
-        #       final = s.message
-        #
-        # AFTER:
-        result = await stream_llm(
-            stream_key,
-            [m.model_dump(mode="json") for m in messages],
-            tool_schemas=[
-                {"name": t.name, "args": t.args.model_dump(mode="json")}
-                for t in tools
-            ],
-        )
-        final = ai.messages.Message.model_validate(result)
-
-    The HTTP callsite drains the full run, not this one LLM step::
-
-        # stream_key = request_id  # stable id, generated OUTSIDE the workflow
-        # run = await vercel.workflow.start(run_agent, prompt, stream_key)
-        #
-        # # tail ./.streams/{stream_key}.jsonl line-by-line, e.g. for SSE:
-        # import json, asyncio, pathlib
-        # path = pathlib.Path(f"./.streams/{stream_key}.jsonl")
-        # while not path.exists():
-        #     await asyncio.sleep(0.05)
-        # with path.open() as fh:
-        #     while True:
-        #         line = fh.readline()
-        #         if not line:
-        #             await asyncio.sleep(0.05)
-        #             continue
-        #         record = json.loads(line)
-        #         if record["type"] == "done" and record["scope"] == "agent":
-        #             break
-        #         if record["type"] == "TextDelta":
-        #             yield record["data"]["chunk"]  # push to client
-        #
-        # # durable final message, after the run-level "done":
-        # final = await vercel.workflow.Run(run.run_id).return_value()
-    """
+    """Durable wrapper around ``ai.stream``."""
     # Provider/httpx setup belongs in the step, outside the workflow body.
     model = ai.get_model(model_id)
     parsed_messages = [ai.messages.Message.model_validate(m) for m in messages]
@@ -225,29 +138,20 @@ async def stream_llm(
         for t in (tool_schemas or [])
     ]
 
-    # ── Side-channel: local JSONL ────────────────────────────────────
-    # TODO(postgres): replace `_write_stream_record` with ordered inserts.
-    _write_stream_record(  # Mark an LLM turn without ending the full agent run.
-        stream_key,
-        {"type": "llm_start", "scope": STREAM_SCOPE_LLM},
-    )
+    stream = durable_stream.get_writable(stream_key)
+    await stream.write(durable_stream.LLMStart())
     async with ai.stream(model, parsed_messages, tools=tools) as s:
         async for event in s:
             # Append events so later LLM calls keep the same HTTP stream open.
-            _write_stream_record(
-                stream_key,
-                {
-                    "type": type(event).__name__,
-                    "scope": STREAM_SCOPE_LLM,
-                    "data": event.model_dump(mode="json"),
-                },
+            await stream.write(
+                durable_stream.StreamEvent(
+                    type=type(event).__name__,
+                    data=event.model_dump(mode="json"),
+                )
             )
         if s.message is None:
             raise RuntimeError("LLM stream ended without a final message")
-        _write_stream_record(  # End only this durable LLM step, not the HTTP stream.
-            stream_key,
-            {"type": "llm_end", "scope": STREAM_SCOPE_LLM},
-        )
+        await stream.write(durable_stream.LLMEnd())
         return s.message.model_dump(mode="json")
 
 
@@ -292,6 +196,9 @@ class SealAgent(ai.Agent):
                 context.add(stream.message)
                 context.add(tr.get_tool_message())
 
+
+# fix: stream is non-deterministic, so it's useless that we replay the events
+# tool dispatch needs to be wrapped into a buffer or a step also.
 
 SYSTEM_PROMPT = (
     "You are Seal, a coding assistant. Use the bash and web_fetch tools to "
