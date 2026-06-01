@@ -3,7 +3,7 @@
   "experimentalServices": {
     "trigger": {
       "framework": "fastapi",
-      "entrypoint": "backend/agent/trigger.py",
+      "entrypoint": "backend/agent/server.py",
       "routePrefix": "/api"
     },
     "agent": {

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent import durable_stream
+from agent import durable_session, durable_stream
 
 
 def test_durable_stream_replays_protocol_records(
@@ -133,3 +133,45 @@ def test_durable_stream_tails_until_done(
         return await task
 
     assert asyncio.run(run()) == ["start", "done"]
+
+
+def test_durable_session_state_is_small_snapshot_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEAL_DURABLE_SESSIONS_DIR", str(tmp_path))
+
+    async def run() -> tuple[durable_session.DurableSessionState, list[str]]:
+        state = durable_session.DurableSessionState(
+            session_id="session-1",
+            stream_key="stream-1",
+        )
+        state = await durable_session.write(
+            state,
+            durable_session.DurableSessionSnapshot(
+                messages=[{"role": "system", "parts": []}],
+            ),
+            reset=True,
+        )
+        state = await durable_session.write(
+            state,
+            durable_session.DurableSessionSnapshot(
+                messages=[
+                    {"role": "system", "parts": []},
+                    {"role": "user", "parts": []},
+                ],
+                output="ok",
+            ),
+        )
+        snapshot = await durable_session.read(state)
+        return state, [message["role"] for message in snapshot.messages]
+
+    state, roles = asyncio.run(run())
+
+    assert state.model_dump(mode="json") == {
+        "version": 1,
+        "session_id": "session-1",
+        "stream_key": "stream-1",
+        "output": "ok",
+    }
+    assert roles == ["system", "user"]

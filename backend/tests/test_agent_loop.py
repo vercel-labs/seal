@@ -8,7 +8,7 @@ from typing import Any, cast
 import ai
 import pytest
 
-from agent import durable_stream, main, trigger
+from agent import durable_stream, main, server, trigger
 
 
 def test_agent_loop_dispatches_tool_calls_from_final_message(
@@ -68,6 +68,44 @@ def test_agent_loop_dispatches_tool_calls_from_final_message(
     parts = cast(list[dict[str, object]], llm_calls[1][-1]["parts"])
     assert parts[0]["result"] == "ran pwd"
     assert any(isinstance(event, ai.events.ToolCallResult) for event in events)
+
+
+def test_session_turn_retries_until_hook_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    class FakeTurn:
+        def __init__(self, prompt: str | None = None, close: bool = False) -> None:
+            del prompt, close
+
+        async def resume(self, token: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError(f"Hook with token {token!r} not found")
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(cast(Any, server).agent_main, "SessionTurn", FakeTurn)
+    monkeypatch.setattr(cast(Any, server).asyncio, "sleep", fake_sleep)
+
+    async def run() -> server.TurnResponse:
+        return await server.session_turn(
+            "s1",
+            server.TurnRequest(
+                prompt="hello",
+                continuation_token="seal-session:s1:1",
+            ),
+        )
+
+    response = asyncio.run(run())
+
+    assert attempts == 2
+    assert sleeps == [0.05]
+    assert response.continuation_token == "seal-session:s1:2"
 
 
 def test_tail_events_streams_all_records(

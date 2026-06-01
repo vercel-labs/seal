@@ -14,7 +14,10 @@ from typing import Any, Literal
 import pydantic
 
 type StreamScope = Literal["agent", "llm"]
-type StreamRecord = StreamStart | StreamDone | LLMStart | LLMEnd | StreamEvent
+type StreamSource = Literal["root", "subagent"]
+type StreamRecord = (
+    StreamStart | StreamDone | LLMStart | LLMEnd | AgentStreamEvent | StreamEvent
+)
 
 
 class StreamStart(pydantic.BaseModel):
@@ -47,6 +50,20 @@ class LLMStart(pydantic.BaseModel):
 class LLMEnd(pydantic.BaseModel):
     type: Literal["llm_end"] = "llm_end"
     scope: StreamScope = "llm"
+    index: int | None = pydantic.Field(default=None, exclude=True)
+    created_at: str = pydantic.Field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
+    )
+
+
+class AgentStreamEvent(pydantic.BaseModel):
+    type: Literal["agent_event"] = "agent_event"
+    kind: str
+    session_id: str
+    turn_id: str | None = None
+    source: StreamSource = "root"
+    parent: dict[str, str] | None = None
+    data: dict[str, Any] = pydantic.Field(default_factory=dict)
     index: int | None = pydantic.Field(default=None, exclude=True)
     created_at: str = pydantic.Field(
         default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
@@ -137,9 +154,25 @@ async def get_readable(
                 yield record
                 if isinstance(record, StreamDone) and record.scope == "agent":
                     return
+                if isinstance(record, AgentStreamEvent) and record.kind in {
+                    "session.completed",
+                    "session.failed",
+                }:
+                    return
             continue
 
         await asyncio.sleep(poll_interval)
+
+
+async def list_records(
+    stream_id: str,
+    *,
+    namespace: str = _DEFAULT_NAMESPACE,
+    start_index: int = 0,
+) -> list[StreamRecord]:
+    store = _JsonlStreamStore()
+    records = await store.list(stream_id, namespace, start_index)
+    return [item.record.model_copy(update={"index": item.index}) for item in records]
 
 
 class _JsonlStreamStore:
