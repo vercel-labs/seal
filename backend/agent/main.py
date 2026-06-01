@@ -45,6 +45,9 @@ async def _bash(command: str, timeout: int | None = None) -> str:
     return output
 
 
+_bash.max_retries = 0
+
+
 @ai.tool
 async def bash(command: str, timeout: int | None = None) -> str:
     """Execute a bash command.
@@ -86,6 +89,9 @@ async def _web_fetch(
     return "\n".join(parts)
 
 
+_web_fetch.max_retries = 0
+
+
 @ai.tool
 async def web_fetch(
     url: str,
@@ -111,11 +117,17 @@ async def start_agent_stream(stream_key: str) -> None:
     await stream.write(durable_stream.StreamStart())
 
 
+start_agent_stream.max_retries = 0
+
+
 @workflow.step
 async def finish_agent_stream(stream_key: str) -> None:
     """Terminate the side-channel once the full agent workflow run is done."""
     stream = durable_stream.get_writable(stream_key)
     await stream.write(durable_stream.StreamDone())
+
+
+finish_agent_stream.max_retries = 0
 
 
 @workflow.step
@@ -155,6 +167,9 @@ async def stream_llm(
         return s.message.model_dump(mode="json")
 
 
+stream_llm.max_retries = 0
+
+
 class SealAgent(ai.Agent):
     TOOLS: ClassVar[list[ai.AgentTool]] = [bash, web_fetch]
 
@@ -170,8 +185,8 @@ class SealAgent(ai.Agent):
 
         while context.keep_running():
             # 1. LLM call via the durable ``stream_llm`` step. The step result
-            #    is the complete message (replayed on retry); live tokens land
-            #    in the jsonl side-channel keyed by ``stream_key``.
+            #    is the complete message; live tokens land in the jsonl
+            #    side-channel keyed by ``stream_key``.
             result = await stream_llm(
                 stream_key,
                 [m.model_dump(mode="json") for m in context.messages],
@@ -180,25 +195,19 @@ class SealAgent(ai.Agent):
             )
             llm_msg = ai.messages.Message.model_validate(result)
 
-            # 2. Replay the complete message into a synthetic stream so the
-            #    rest of the loop is identical to ``Agent.loop``. Each tool
-            #    call resolves to a ``@workflow.step`` and runs durably.
-            async with (
-                ai.Stream(ai.events.replay_message_events(llm_msg)) as stream,
-                ai.ToolRunner() as tr,
-            ):
-                async for event in ai.util.merge(stream, tr.events()):
+            context.add(llm_msg)
+
+            # 2. Dispatch tool calls directly from the final assistant message.
+            #    Tool bodies resolve to workflow steps, and their results are
+            #    folded back into context for the next LLM turn.
+            async with ai.ToolRunner() as tr:
+                for tool_call in llm_msg.tool_calls:
+                    tr.schedule(context.resolve(tool_call))
+
+                async for event in tr.events():
                     yield event
 
-                    if isinstance(event, ai.events.ToolEnd):
-                        tr.schedule(context.resolve(event.tool_call))
-
-                context.add(stream.message)
                 context.add(tr.get_tool_message())
-
-
-# fix: stream is non-deterministic, so it's useless that we replay the events
-# tool dispatch needs to be wrapped into a buffer or a step also.
 
 SYSTEM_PROMPT = (
     "You are Seal, a coding assistant. Use the bash and web_fetch tools to "

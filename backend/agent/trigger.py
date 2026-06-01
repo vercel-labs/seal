@@ -48,30 +48,26 @@ async def status(run_id: str) -> StatusResponse:
     return StatusResponse(status=state, output=output)
 
 
-async def _tail_tokens(stream_key: str) -> AsyncGenerator[str]:
+async def _tail_events(stream_key: str) -> AsyncGenerator[str]:
     """Tail the jsonl side-channel for one full agent workflow run.
 
-    Emits Server-Sent Events: ``data: <text chunk>`` per token, then a final
-    ``event: done``. See ``main.start_agent_stream`` for run ownership.
+    Emits every durable stream record as a named Server-Sent Event. See
+    ``main.start_agent_stream`` for run ownership.
     """
     async for record in durable_stream.get_readable(stream_key):
-        if not isinstance(record, durable_stream.StreamEvent):
-            continue
-        if record.type != "TextDelta":
-            continue
-        chunk = record.data.get("chunk")
-        if isinstance(chunk, str):
-            yield f"data: {json.dumps(chunk)}\n\n"
-    yield "event: done\ndata: {}\n\n"
+        payload = record.model_dump(mode="json")
+        if record.index is not None:
+            payload["index"] = record.index
+        yield f"event: {record.type}\ndata: {json.dumps(payload)}\n\n"
 
 
 @app.post("/run/stream")
 async def run_stream(request: RunRequest) -> fastapi.responses.StreamingResponse:
-    """Start a run and stream its live tokens back as SSE."""
+    """Start a run and stream its events back as SSE."""
     stream_key = uuid.uuid4().hex
     await vercel.workflow.start(main.run_agent, request.prompt, stream_key)
     return fastapi.responses.StreamingResponse(
-        _tail_tokens(stream_key),
+        _tail_events(stream_key),
         media_type="text/event-stream",
         headers={"x-stream-key": stream_key},
     )
@@ -79,8 +75,8 @@ async def run_stream(request: RunRequest) -> fastapi.responses.StreamingResponse
 
 @app.get("/stream/{stream_key}")
 async def stream(stream_key: str) -> fastapi.responses.StreamingResponse:
-    """Tail live tokens for an already-started run by its stream_key."""
+    """Tail live events for an already-started run by its stream_key."""
     return fastapi.responses.StreamingResponse(
-        _tail_tokens(stream_key),
+        _tail_events(stream_key),
         media_type="text/event-stream",
     )
