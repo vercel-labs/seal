@@ -1,15 +1,24 @@
+import os
 from collections.abc import AsyncGenerator
 from typing import Any, ClassVar, cast
 
-import vercel._internal.workflow.py_sandbox
-import vercel.workflow
+_BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
+os.environ.setdefault(
+    "SEAL_DURABLE_STREAMS_DIR",
+    os.path.join(_BACKEND_DIR, ".streams"),
+)
+os.environ.setdefault(
+    "WORKFLOW_LOCAL_DATA_DIR",
+    os.path.join(_BACKEND_DIR, ".workflow-data"),
+)
+
+import vercel._internal.workflow.py_sandbox  # noqa: E402
+import vercel.workflow  # noqa: E402
 
 # ai imports shutil; sandbox turns os.supports_dir_fd into a function.
 vercel._internal.workflow.py_sandbox._PASSTHROUGHS.add("ai")
 
 import ai  # noqa: E402
-
-from agent import durable_stream  # noqa: E402
 
 workflow = vercel.workflow.Workflows()
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
@@ -113,6 +122,8 @@ async def web_fetch(
 @workflow.step
 async def start_agent_stream(stream_key: str) -> None:
     """Initialize the side-channel once for the full agent workflow run."""
+    from agent import durable_stream
+
     stream = durable_stream.get_writable(stream_key, reset=True)
     await stream.write(durable_stream.StreamStart())
 
@@ -123,6 +134,8 @@ start_agent_stream.max_retries = 0
 @workflow.step
 async def finish_agent_stream(stream_key: str) -> None:
     """Terminate the side-channel once the full agent workflow run is done."""
+    from agent import durable_stream
+
     stream = durable_stream.get_writable(stream_key)
     await stream.write(durable_stream.StreamDone())
 
@@ -138,6 +151,8 @@ async def stream_llm(
     model_id: str = MODEL_ID,
 ) -> dict[str, object]:
     """Durable wrapper around ``ai.stream``."""
+    from agent import durable_stream
+
     # Provider/httpx setup belongs in the step, outside the workflow body.
     model = ai.get_model(model_id)
     parsed_messages = [ai.messages.Message.model_validate(m) for m in messages]

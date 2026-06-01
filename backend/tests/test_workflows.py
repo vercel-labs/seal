@@ -27,6 +27,21 @@ def test_workflow_module_imports_inside_workflow_sandbox() -> None:
     assert module.workflow_app is not None
 
 
+def test_legacy_agent_module_imports_inside_workflow_sandbox() -> None:
+    import vercel._internal.workflow.py_sandbox as py_sandbox
+
+    importlib.import_module("agent.main")
+    previous = sys.modules.pop("agent.main", None)
+    try:
+        with py_sandbox.workflow_sandbox(random_seed="legacy-agent-import"):
+            module = importlib.import_module("agent.main")
+    finally:
+        if previous is not None:
+            sys.modules["agent.main"] = previous
+
+    assert module.workflow is not None
+
+
 def test_workflow_approval_tool_names_match_agent_tools() -> None:
     approval_required = frozenset(
         tool.name for tool in durable_agent.get_tools() if tool.require_approval

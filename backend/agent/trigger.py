@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import AsyncGenerator
 
-import fastapi
-import fastapi.responses
-import pydantic
-import vercel.workflow
+_BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
+os.environ.setdefault(
+    "SEAL_DURABLE_STREAMS_DIR",
+    os.path.join(_BACKEND_DIR, ".streams"),
+)
+os.environ.setdefault(
+    "WORKFLOW_LOCAL_DATA_DIR",
+    os.path.join(_BACKEND_DIR, ".workflow-data"),
+)
 
-from agent import durable_stream, main
+import fastapi  # noqa: E402
+import fastapi.responses  # noqa: E402
+import pydantic  # noqa: E402
+import vercel.workflow  # noqa: E402
+
+from agent import durable_stream, main  # noqa: E402
 
 app = fastapi.FastAPI(title="seal-agent-trigger")
 

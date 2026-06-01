@@ -146,7 +146,8 @@ class _JsonlStreamStore:
     """Local store with the same append/list shape a PG store should expose."""
 
     def __init__(self) -> None:
-        configured_root = os.environ.get("SEAL_DURABLE_STREAMS_DIR", ".streams")
+        default_root = pathlib.Path(__file__).resolve().parents[1] / ".streams"
+        configured_root = os.environ.get("SEAL_DURABLE_STREAMS_DIR", str(default_root))
         self._root = pathlib.Path(configured_root)
 
     async def append(
