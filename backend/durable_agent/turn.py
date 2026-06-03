@@ -4,11 +4,8 @@ from collections.abc import AsyncGenerator
 from typing import Any, ClassVar, cast
 
 import ai
-import vercel.workflow
 
-from durable_agent import proto, stream
-
-workflow = vercel.workflow.Workflows()
+from durable_agent import proto, stream, workflow
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
@@ -32,6 +29,9 @@ def _workflow_model() -> ai.Model:
     return ai.Model("workflow-placeholder", provider=_WorkflowModelProvider())
 
 
+# end of hack
+
+
 @workflow.step
 async def llm_step(
     model_id: str,
@@ -43,9 +43,18 @@ async def llm_step(
     messages = [
         ai.messages.Message.model_validate(message) for message in messages_data
     ]
-    tools = [ai.Tool.model_validate(tool) for tool in tools_data]
-    writer = await stream.get_writable(session_id) if session_id else None
+    # hack: ai.Tool erases args type so we have to reconstruct them manually
+    tools: list[ai.Tool] = []
+    for tool in tools_data:
+        if tool.get("kind") == "function":
+            tool = {
+                **tool,
+                "args": ai.tools.FunctionToolArgs.model_validate(tool["args"]),
+            }
+        tools.append(ai.Tool.model_validate(tool))
+    # end of hack
 
+    writer = await stream.get_writable(session_id) if session_id else None
     message: ai.messages.Message | None = None
 
     async with ai.stream(model, messages, tools=tools) as model_stream:
@@ -183,7 +192,11 @@ class DurableAgent(ai.Agent):
             result = await llm_step(
                 model_id,
                 [message.model_dump(mode="json") for message in context.messages],
-                [tool.model_dump(mode="json") for tool in context.tools],
+                # hack: have to use serialize_as_any because ai.Tool erases args type
+                [
+                    tool.model_dump(mode="json", serialize_as_any=True)
+                    for tool in context.tools
+                ],
                 session_id,
             )
 
@@ -236,6 +249,25 @@ class DurableAgent(ai.Agent):
             yield
 
 
+@workflow.step
+async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
+    # resume() is a side effect, so it must run in a step. the driver may not
+    # have parked on the hook yet, so retry while it is missing.
+    hook = proto.TurnHook(output=proto.TurnOutput.model_validate(output_data))
+    for attempt in range(40):
+        try:
+            await hook.resume(token)
+            return
+        except RuntimeError as error:
+            message = str(error).lower()
+            if attempt == 39 or "not found" not in message:
+                raise
+            await asyncio.sleep(0.05)
+
+
+resume_turn_hook.max_retries = 0
+
+
 # runs one agent turn, maybe requests subagents
 @workflow.workflow
 async def run_turn(turn_input: dict[str, Any]) -> None:
@@ -280,5 +312,5 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         kind=output_kind, messages=messages, subagent_requests=subagent_requests
     )
 
-    # notify the driver session that parked on this turn
-    await proto.TurnHook(output=output).resume(_turn_input.turn_hook_token)
+    # notify session that the turn is complete
+    await resume_turn_hook(_turn_input.turn_hook_token, output.model_dump(mode="json"))

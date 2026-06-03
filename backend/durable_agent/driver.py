@@ -8,8 +8,7 @@ import durable_agent.proto as proto
 import durable_agent.session as session
 import durable_agent.stream as stream
 import durable_agent.turn as turn
-
-workflow = vercel.workflow.Workflows()
+from durable_agent import workflow
 
 
 @workflow.step
@@ -64,6 +63,25 @@ async def save_session(state_data: dict[str, Any]) -> None:
 
 
 save_session.max_retries = 0
+
+
+@workflow.step
+async def resume_subagent_hook(token: str, output_data: dict[str, Any]) -> None:
+    # resume() is a side effect, so it must run in a step. the parent may not
+    # have parked on the hook yet, so retry while it is missing.
+    hook = proto.SubagentHook(output=proto.SessionOutput.model_validate(output_data))
+    for attempt in range(40):
+        try:
+            await hook.resume(token)
+            return
+        except RuntimeError as error:
+            message = str(error).lower()
+            if attempt == 39 or "not found" not in message:
+                raise
+            await asyncio.sleep(0.05)
+
+
+resume_subagent_hook.max_retries = 0
 
 
 def _last_text(messages: list[ai.messages.Message]) -> str:
@@ -134,10 +152,11 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                     output=_last_text(state.messages),
                 )
 
-                # notify parent workflow session
+                # notify parent workflow session (resume() in a step)
                 if _session_input.subagent_hook_token is not None:
-                    await proto.SubagentHook(output=output).resume(
-                        _session_input.subagent_hook_token
+                    await resume_subagent_hook(
+                        _session_input.subagent_hook_token,
+                        output.model_dump(mode="json"),
                     )
                 await write_event(session_id, stream.session_completed())
                 await turn.close_stream(session_id)

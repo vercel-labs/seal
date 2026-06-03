@@ -89,9 +89,9 @@ class LifecycleEvent(pydantic.BaseModel):
     kind: Literal["lifecycle"] = "lifecycle"
     type: str
     data: dict[str, Any] = pydantic.Field(default_factory=dict)
-    at: str = pydantic.Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
-    )
+    # has to be None when the event is constructed inside a workflow body
+    # will get stamped by the write function
+    at: datetime.datetime | None = None
 
 
 type StreamEvent = ai.events.AgentEvent | LifecycleEvent

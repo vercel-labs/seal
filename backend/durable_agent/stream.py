@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import collections.abc
+import datetime
 from typing import Any, Literal
 
 import pydantic
@@ -77,6 +78,10 @@ class WritableStreamHandle(pydantic.BaseModel):
 
     async def write(self, event: proto.StreamEvent | dict[str, Any]) -> int:
         validated = proto.STREAM_EVENT_ADAPTER.validate_python(event)
+
+        # stamp the event with a timestamp
+        if isinstance(validated, proto.LifecycleEvent) and validated.at is None:
+            validated.at = datetime.datetime.now(datetime.UTC)
         return await storage.store().append(
             self.stream_id,
             self.namespace,
