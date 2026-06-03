@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from typing import Any, Literal
 
 import ai
@@ -75,19 +76,25 @@ SESSION_STARTED = "session.started"
 SESSION_WAITING = "session.waiting"
 SESSION_COMPLETED = "session.completed"
 SESSION_FAILED = "session.failed"
+TURN_STARTED = "turn.started"
+TURN_COMPLETED = "turn.completed"
 SUBAGENT_CALLED = "subagent.called"
+SUBAGENT_COMPLETED = "subagent.completed"
 DEFAULT_STREAM_NAMESPACE = "default"
 DEFAULT_STREAM_POLL_INTERVAL = 0.05
 WRITABLE_STREAM_HANDLE_TYPE = "seal.durable_agent.writable_stream"
 
 
-class ControlEvent(pydantic.BaseModel):
-    kind: Literal["control"] = "control"
+class LifecycleEvent(pydantic.BaseModel):
+    kind: Literal["lifecycle"] = "lifecycle"
     type: str
     data: dict[str, Any] = pydantic.Field(default_factory=dict)
+    at: str = pydantic.Field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
+    )
 
 
-type StreamEvent = ai.events.AgentEvent | ControlEvent
+type StreamEvent = ai.events.AgentEvent | LifecycleEvent
 
 STREAM_EVENT_ADAPTER: pydantic.TypeAdapter[StreamEvent] = pydantic.TypeAdapter(
     StreamEvent

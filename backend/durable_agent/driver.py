@@ -6,9 +6,23 @@ import vercel.workflow
 
 import durable_agent.proto as proto
 import durable_agent.session as session
+import durable_agent.stream as stream
 import durable_agent.turn as turn
 
 workflow = vercel.workflow.Workflows()
+
+
+@workflow.step
+async def write_event(
+    # writes one stream event (here, lifecycle) to the durable stream
+    session_id: str,
+    event_data: dict[str, object],
+) -> None:
+    writer = await stream.get_writable(session_id)
+    await writer.write(event_data)
+
+
+write_event.max_retries = 0
 
 
 @workflow.step
@@ -84,11 +98,13 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
             ],
         )
     await save_session(state.model_dump(mode="json"))
+    await write_event(session_id, stream.session_started(mode=state.mode))
 
     turn_index = 0
     while True:
         # park on the turn hook, then fire-and-forget the turn workflow which
         # resumes the hook with its output when the agent loop exits.
+        await write_event(session_id, stream.turn_started(turn_index=turn_index))
         turn_hook_token = f"seal-turn:{session_id}:{turn_index}"
         turn_hook = proto.TurnHook.wait(token=turn_hook_token)
         turn_input = proto.TurnInput(
@@ -105,6 +121,10 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
 
         state.messages = turn_result.messages
         await save_session(state.model_dump(mode="json"))
+        await write_event(
+            session_id,
+            stream.turn_completed(turn_index=turn_index, kind=turn_result.kind),
+        )
 
         match turn_result.kind:
             case "done":
@@ -119,17 +139,22 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                     await proto.SubagentHook(output=output).resume(
                         _session_input.subagent_hook_token
                     )
+                await write_event(session_id, stream.session_completed())
                 await turn.close_stream(session_id)
                 return output.model_dump(mode="json")
 
             case "suspend":
                 # this is the main session. wait for the next user message
+                await write_event(
+                    session_id, stream.session_waiting(turn_index=turn_index)
+                )
                 token = f"seal-session:{session_id}:{turn_index}"
                 hook = proto.SessionResumeHook.wait(token=token)
                 resolution = await hook
                 hook.dispose()
 
                 if resolution is None or resolution.close:
+                    await write_event(session_id, stream.session_completed())
                     await turn.close_stream(session_id)
                     return proto.SessionOutput(
                         session_id=session_id,
@@ -160,11 +185,26 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                     await spawn_task_session_workflow(
                         child_input.model_dump(mode="json")
                     )
+                    await write_event(
+                        session_id,
+                        stream.subagent_called(
+                            tool_call_id=request.tool_call_id,
+                            child_session_id=child_input.session_id,
+                            name=request.name,
+                        ),
+                    )
 
                     resolution = await hook
                     hook.dispose()
                     assert resolution is not None
                     outputs[request.tool_call_id] = resolution.output
+                    await write_event(
+                        session_id,
+                        stream.subagent_completed(
+                            tool_call_id=request.tool_call_id,
+                            is_error=resolution.output.is_error,
+                        ),
+                    )
 
                 async with asyncio.TaskGroup() as tg:
                     for index, request in enumerate(turn_result.subagent_requests):
@@ -202,6 +242,3 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         # next turn resumes from the latest state after a crash.
         await save_session(state.model_dump(mode="json"))
         turn_index += 1
-
-
-# - emit control events for observability

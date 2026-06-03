@@ -11,6 +11,59 @@ from durable_agent import proto, storage
 __all__ = ["get_readable", "get_writable"]
 
 
+# lifecycle event constructors
+
+
+def session_started(*, mode: str) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.SESSION_STARTED, data={"mode": mode}
+    ).model_dump(mode="json")
+
+
+def session_waiting(*, turn_index: int) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.SESSION_WAITING, data={"turn_index": turn_index}
+    ).model_dump(mode="json")
+
+
+def session_completed(*, is_error: bool = False) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.SESSION_COMPLETED, data={"is_error": is_error}
+    ).model_dump(mode="json")
+
+
+def turn_started(*, turn_index: int) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.TURN_STARTED, data={"turn_index": turn_index}
+    ).model_dump(mode="json")
+
+
+def turn_completed(*, turn_index: int, kind: str) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.TURN_COMPLETED, data={"turn_index": turn_index, "kind": kind}
+    ).model_dump(mode="json")
+
+
+def subagent_called(
+    *, tool_call_id: str, child_session_id: str, name: str
+) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.SUBAGENT_CALLED,
+        data={
+            "tool_call_id": tool_call_id,
+            "child_session_id": child_session_id,
+            "name": name,
+        },
+    ).model_dump(mode="json")
+
+
+def subagent_completed(*, tool_call_id: str, is_error: bool) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.SUBAGENT_COMPLETED,
+        data={"tool_call_id": tool_call_id, "is_error": is_error},
+    ).model_dump(mode="json")
+
+
 DEFAULT_STREAM_NAMESPACE = "default"
 DEFAULT_STREAM_POLL_INTERVAL = 0.05
 

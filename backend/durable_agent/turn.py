@@ -63,8 +63,8 @@ llm_step.max_retries = 0
 
 
 @workflow.step
-async def emit_event(
-    # writes one agent event to the durable stream
+async def write_event(
+    # writes one stream event (agent or lifecycle) to the durable stream
     session_id: str,
     event_data: dict[str, object],
 ) -> None:
@@ -72,7 +72,7 @@ async def emit_event(
     await writer.write(event_data)
 
 
-emit_event.max_retries = 0
+write_event.max_retries = 0
 
 
 # closes a durable event stream once the owning session is terminal.
@@ -211,7 +211,7 @@ class DurableAgent(ai.Agent):
 
                 async for event in runner.events():
                     if session_id is not None:
-                        await emit_event(
+                        await write_event(
                             session_id,
                             event.model_dump(mode="json"),
                         )
