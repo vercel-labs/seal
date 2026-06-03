@@ -5,6 +5,7 @@ import ai
 import vercel.workflow
 
 import durable_agent.proto as proto
+import durable_agent.session as session
 import durable_agent.turn as turn
 
 workflow = vercel.workflow.Workflows()
@@ -32,6 +33,25 @@ async def spawn_task_session_workflow(
 spawn_task_session_workflow.max_retries = 0
 
 
+@workflow.step
+async def load_session(session_id: str) -> dict[str, Any] | None:
+    # restores the latest persisted session snapshot, if any
+    state = await session.read_session(session_id)
+    return state.model_dump(mode="json") if state is not None else None
+
+
+load_session.max_retries = 0
+
+
+@workflow.step
+async def save_session(state_data: dict[str, Any]) -> None:
+    # appends the current session state as the latest snapshot
+    await session.write_session(proto.SessionState.model_validate(state_data))
+
+
+save_session.max_retries = 0
+
+
 def _last_text(messages: list[ai.messages.Message]) -> str:
     for message in reversed(messages):
         if message.role == "assistant" and message.text:
@@ -44,19 +64,26 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
     _session_input = proto.SessionInput.model_validate(session_input)
     session_id = _session_input.session_id
 
-    system = (
-        turn.SUBAGENT_SYSTEM_PROMPT
-        if _session_input.mode == "task"
-        else turn.SYSTEM_PROMPT
-    )
-    state = proto.SessionState(
-        session_id=session_id,
-        mode=_session_input.mode,
-        messages=[
-            ai.system_message(system),
-            ai.user_message(_session_input.prompt),
-        ],
-    )
+    restored = await load_session(session_id)
+    if restored is not None:
+        # resume a persisted session with the new user message appended.
+        state = proto.SessionState.model_validate(restored)
+        state.messages.append(ai.user_message(_session_input.prompt))
+    else:
+        system = (
+            turn.SUBAGENT_SYSTEM_PROMPT
+            if _session_input.mode == "task"
+            else turn.SYSTEM_PROMPT
+        )
+        state = proto.SessionState(
+            session_id=session_id,
+            mode=_session_input.mode,
+            messages=[
+                ai.system_message(system),
+                ai.user_message(_session_input.prompt),
+            ],
+        )
+    await save_session(state.model_dump(mode="json"))
 
     turn_index = 0
     while True:
@@ -77,6 +104,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         turn_result = turn_resolution.output
 
         state.messages = turn_result.messages
+        await save_session(state.model_dump(mode="json"))
 
         match turn_result.kind:
             case "done":
@@ -170,9 +198,10 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                     f"incomplete tool history: unsatisfied={tool_calls - tool_results}"
                 )
 
+        # persist post-turn mutations (resume prompt / subagent results) so the
+        # next turn resumes from the latest state after a crash.
+        await save_session(state.model_dump(mode="json"))
         turn_index += 1
 
 
-# - implement stream storage backend (jsonl, pg)
-# - implement session state storage (jsonl, pg)
 # - emit control events for observability

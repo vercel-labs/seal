@@ -1,15 +1,19 @@
+"""Append-only durable storage for streams and session snapshots.
+
+One backend seam (``_Store``) with two implementations (jsonl, postgres),
+selected by ``DATABASE_URL``. Both durable streams (``stream.py``) and session
+snapshots (``session.py``) ride this single primitive, keyed by
+``(stream_id, namespace)``.
+"""
+
 from __future__ import annotations
 
 import asyncio
-import collections.abc
-import datetime
 import json
 import os
 import pathlib
 import typing
 import urllib.parse
-
-import asyncpg  # type: ignore[import-untyped]
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS seal_durable_streams (
@@ -35,262 +39,232 @@ CREATE TABLE IF NOT EXISTS seal_durable_stream_events (
 );
 """
 
-_schema_ready = False
-_schema_lock = asyncio.Lock()
-_pool: typing.Any = None
+
+class _Store(typing.Protocol):
+    """The only backend seam: an append-only log keyed by (stream_id, namespace)."""
+
+    async def ensure_ready(self) -> None: ...
+
+    async def append(
+        self,
+        stream_id: str,
+        namespace: str,
+        data: dict[str, typing.Any],
+    ) -> int:
+        """Append ``data`` and return its 0-based index."""
+        ...
+
+    async def read(
+        self,
+        stream_id: str,
+        namespace: str,
+        start_index: int,
+    ) -> list[tuple[int, dict[str, typing.Any]]]:
+        """Return ``(index, data)`` pairs with ``index >= start_index``."""
+        ...
+
+    async def info(self, stream_id: str, namespace: str) -> tuple[int, bool]:
+        """Return ``(tail_index, closed)``; ``tail_index`` is -1 when empty."""
+        ...
+
+    async def close(self, stream_id: str, namespace: str) -> None: ...
+
+
+def store() -> _Store:
+    """Return the configured store (postgres when ``DATABASE_URL`` is set)."""
+    return _PgStore() if os.environ.get("DATABASE_URL") else _JsonlStore()
+
+
+# --- jsonl --------------------------------------------------------------------
+
 _locks: dict[str, asyncio.Lock] = {}
 
 
-async def ensure_ready() -> None:
-    if not _use_postgres():
-        _root().mkdir(parents=True, exist_ok=True)
-        return
+class _JsonlStore:
+    def _paths(
+        self, stream_id: str, namespace: str
+    ) -> tuple[pathlib.Path, pathlib.Path]:
+        configured = os.environ.get("SEAL_DURABLE_AGENT_STREAMS_DIR")
+        root = (
+            pathlib.Path(configured)
+            if configured
+            else pathlib.Path(__file__).resolve().parents[1] / ".durable_agent_streams"
+        )
+        directory = root / urllib.parse.quote(stream_id, safe="")
+        name = urllib.parse.quote(namespace, safe="")
+        return directory / f"{name}.jsonl", directory / f"{name}.closed"
 
-    global _schema_ready
-    if _schema_ready:
-        return
+    def _lock(self, stream_id: str, namespace: str) -> asyncio.Lock:
+        key = f"{stream_id}\x00{namespace}"
+        if key not in _locks:
+            _locks[key] = asyncio.Lock()
+        return _locks[key]
 
-    async with _schema_lock:
+    async def ensure_ready(self) -> None:
+        pass
+
+    async def append(
+        self,
+        stream_id: str,
+        namespace: str,
+        data: dict[str, typing.Any],
+    ) -> int:
+        events, closed = self._paths(stream_id, namespace)
+        async with self._lock(stream_id, namespace):
+            if closed.exists():
+                raise RuntimeError("cannot write to a closed stream")
+            index = (
+                sum(1 for line in events.read_text().splitlines() if line)
+                if events.exists()
+                else 0
+            )
+            events.parent.mkdir(parents=True, exist_ok=True)
+            with events.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(data, separators=(",", ":")))
+                fh.write("\n")
+                fh.flush()
+            return index
+
+    async def read(
+        self,
+        stream_id: str,
+        namespace: str,
+        start_index: int,
+    ) -> list[tuple[int, dict[str, typing.Any]]]:
+        events, _ = self._paths(stream_id, namespace)
+        async with self._lock(stream_id, namespace):
+            if not events.exists():
+                return []
+            records: list[tuple[int, dict[str, typing.Any]]] = []
+            for index, line in enumerate(events.read_text().splitlines()):
+                if line and index >= start_index:
+                    records.append((index, json.loads(line)))
+            return records
+
+    async def info(self, stream_id: str, namespace: str) -> tuple[int, bool]:
+        events, closed = self._paths(stream_id, namespace)
+        async with self._lock(stream_id, namespace):
+            count = (
+                sum(1 for line in events.read_text().splitlines() if line)
+                if events.exists()
+                else 0
+            )
+            return count - 1, closed.exists()
+
+    async def close(self, stream_id: str, namespace: str) -> None:
+        _, closed = self._paths(stream_id, namespace)
+        async with self._lock(stream_id, namespace):
+            closed.parent.mkdir(parents=True, exist_ok=True)
+            closed.touch()
+
+
+# --- postgres -----------------------------------------------------------------
+
+_schema_ready = False
+_schema_lock = asyncio.Lock()
+
+
+class _PgStore:
+    async def _pool(self) -> typing.Any:
+        from core import db
+
+        return await db.get_pool()
+
+    async def ensure_ready(self) -> None:
+        global _schema_ready
         if _schema_ready:
             return
-        pool = await _get_pool()
-        await pool.execute(_SCHEMA)
-        _schema_ready = True
+        async with _schema_lock:
+            if _schema_ready:
+                return
+            await (await self._pool()).execute(_SCHEMA)
+            _schema_ready = True
 
+    async def append(
+        self,
+        stream_id: str,
+        namespace: str,
+        data: dict[str, typing.Any],
+    ) -> int:
+        pool = await self._pool()
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO seal_durable_streams (stream_id, namespace) "
+                "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                stream_id,
+                namespace,
+            )
+            row = await conn.fetchrow(
+                "UPDATE seal_durable_streams "
+                "SET tail_index = tail_index + 1, updated_at = now() "
+                "WHERE stream_id = $1 AND namespace = $2 AND closed_at IS NULL "
+                "RETURNING tail_index - 1 AS idx",
+                stream_id,
+                namespace,
+            )
+            if row is None:
+                raise RuntimeError("cannot write to a closed stream")
+            index = int(row["idx"])
+            await conn.execute(
+                "INSERT INTO seal_durable_stream_events "
+                "(stream_id, namespace, idx, data) VALUES ($1, $2, $3, $4::jsonb)",
+                stream_id,
+                namespace,
+                index,
+                json.dumps(data, separators=(",", ":")),
+            )
+            return index
 
-async def append_event(
-    stream_id: str,
-    namespace: str,
-    data: dict[str, typing.Any],
-) -> int:
-    await ensure_ready()
-    if _use_postgres():
-        return await _append_postgres(stream_id, namespace, data)
-    return await _append_jsonl(stream_id, namespace, data)
-
-
-async def close_stream(stream_id: str, namespace: str) -> None:
-    await ensure_ready()
-    if _use_postgres():
-        await _close_postgres(stream_id, namespace)
-        return
-    await _close_jsonl(stream_id, namespace)
-
-
-async def list_events(
-    stream_id: str,
-    namespace: str,
-    start_index: int,
-) -> collections.abc.AsyncIterator[tuple[int, dict[str, typing.Any]]]:
-    await ensure_ready()
-    if _use_postgres():
-        async for row in _list_postgres(stream_id, namespace, start_index):
-            yield row
-        return
-
-    async for row in _list_jsonl(stream_id, namespace, start_index):
-        yield row
-
-
-async def count_events(stream_id: str, namespace: str) -> int:
-    await ensure_ready()
-    if _use_postgres():
-        pool = await _get_pool()
-        value = await pool.fetchval(
-            "SELECT tail_index FROM seal_durable_streams "
-            "WHERE stream_id = $1 AND namespace = $2",
+    async def read(
+        self,
+        stream_id: str,
+        namespace: str,
+        start_index: int,
+    ) -> list[tuple[int, dict[str, typing.Any]]]:
+        pool = await self._pool()
+        rows = await pool.fetch(
+            "SELECT idx, data FROM seal_durable_stream_events "
+            "WHERE stream_id = $1 AND namespace = $2 AND idx >= $3 "
+            "ORDER BY idx ASC",
             stream_id,
             namespace,
+            start_index,
         )
-        return int(value or 0)
+        return [
+            (
+                int(row["idx"]),
+                json.loads(row["data"])
+                if isinstance(row["data"], str)
+                else row["data"],
+            )
+            for row in rows
+        ]
 
-    return await _count_jsonl_events(_event_path(stream_id, namespace))
-
-
-async def is_closed(stream_id: str, namespace: str) -> bool:
-    await ensure_ready()
-    if _use_postgres():
-        pool = await _get_pool()
-        value = await pool.fetchval(
-            "SELECT closed_at IS NOT NULL FROM seal_durable_streams "
-            "WHERE stream_id = $1 AND namespace = $2",
-            stream_id,
-            namespace,
-        )
-        return bool(value)
-
-    return _closed_path(stream_id, namespace).exists()
-
-
-async def _append_postgres(
-    stream_id: str,
-    namespace: str,
-    data: dict[str, typing.Any],
-) -> int:
-    pool = await _get_pool()
-    async with pool.acquire() as connection, connection.transaction():
-        await connection.execute(
-            "INSERT INTO seal_durable_streams (stream_id, namespace) "
-            "VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            stream_id,
-            namespace,
-        )
-        row = await connection.fetchrow(
-            "UPDATE seal_durable_streams "
-            "SET tail_index = tail_index + 1, updated_at = now() "
-            "WHERE stream_id = $1 AND namespace = $2 AND closed_at IS NULL "
-            "RETURNING tail_index - 1 AS idx",
+    async def info(self, stream_id: str, namespace: str) -> tuple[int, bool]:
+        pool = await self._pool()
+        row = await pool.fetchrow(
+            "SELECT tail_index, closed_at IS NOT NULL AS closed "
+            "FROM seal_durable_streams WHERE stream_id = $1 AND namespace = $2",
             stream_id,
             namespace,
         )
         if row is None:
-            raise RuntimeError("cannot write to a closed stream")
-        index = int(row["idx"])
-        await connection.execute(
-            "INSERT INTO seal_durable_stream_events "
-            "(stream_id, namespace, idx, data) VALUES ($1, $2, $3, $4)",
+            return -1, False
+        return int(row["tail_index"]) - 1, bool(row["closed"])
+
+    async def close(self, stream_id: str, namespace: str) -> None:
+        pool = await self._pool()
+        await pool.execute(
+            "INSERT INTO seal_durable_streams (stream_id, namespace, closed_at) "
+            "VALUES ($1, $2, now()) "
+            "ON CONFLICT (stream_id, namespace) DO UPDATE "
+            "SET closed_at = COALESCE(seal_durable_streams.closed_at, now()), "
+            "updated_at = now()",
             stream_id,
             namespace,
-            index,
-            json.dumps(data),
-        )
-        return index
-
-
-async def _close_postgres(stream_id: str, namespace: str) -> None:
-    pool = await _get_pool()
-    await pool.execute(
-        "INSERT INTO seal_durable_streams (stream_id, namespace, closed_at) "
-        "VALUES ($1, $2, now()) "
-        "ON CONFLICT (stream_id, namespace) DO UPDATE "
-        "SET closed_at = COALESCE(seal_durable_streams.closed_at, now()), "
-        "updated_at = now()",
-        stream_id,
-        namespace,
-    )
-
-
-async def _list_postgres(
-    stream_id: str,
-    namespace: str,
-    start_index: int,
-) -> collections.abc.AsyncIterator[tuple[int, dict[str, typing.Any]]]:
-    pool = await _get_pool()
-    rows = await pool.fetch(
-        "SELECT idx, data FROM seal_durable_stream_events "
-        "WHERE stream_id = $1 AND namespace = $2 AND idx >= $3 "
-        "ORDER BY idx ASC",
-        stream_id,
-        namespace,
-        start_index,
-    )
-    for row in rows:
-        yield int(row["idx"]), _dict_from_json(row["data"])
-
-
-async def _append_jsonl(
-    stream_id: str,
-    namespace: str,
-    data: dict[str, typing.Any],
-) -> int:
-    path = _event_path(stream_id, namespace)
-    async with _lock_for(str(path)):
-        if _closed_path(stream_id, namespace).exists():
-            raise RuntimeError("cannot write to a closed stream")
-
-        index = _count_jsonl_events_unlocked(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(data, separators=(",", ":")))
-            stream.write("\n")
-            stream.flush()
-        return index
-
-
-async def _close_jsonl(stream_id: str, namespace: str) -> None:
-    path = _event_path(stream_id, namespace)
-    async with _lock_for(str(path)):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _closed_path(stream_id, namespace).write_text(
-            datetime.datetime.now(datetime.UTC).isoformat(),
-            encoding="utf-8",
         )
 
 
-async def _list_jsonl(
-    stream_id: str,
-    namespace: str,
-    start_index: int,
-) -> collections.abc.AsyncIterator[tuple[int, dict[str, typing.Any]]]:
-    path = _event_path(stream_id, namespace)
-    records: list[tuple[int, dict[str, typing.Any]]] = []
-    async with _lock_for(str(path)):
-        if not path.exists():
-            return
-
-        index = 0
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line:
-                continue
-            if index >= start_index:
-                records.append((index, _dict_from_json(json.loads(line))))
-            index += 1
-
-    for record in records:
-        yield record
-
-
-async def _count_jsonl_events(path: pathlib.Path) -> int:
-    async with _lock_for(str(path)):
-        return _count_jsonl_events_unlocked(path)
-
-
-def _count_jsonl_events_unlocked(path: pathlib.Path) -> int:
-    if not path.exists():
-        return 0
-    return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line)
-
-
-async def _get_pool() -> typing.Any:
-    global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(dsn=os.environ["DATABASE_URL"])
-    return _pool
-
-
-def _use_postgres() -> bool:
-    return bool(os.environ.get("DATABASE_URL"))
-
-
-def _dict_from_json(value: typing.Any) -> dict[str, typing.Any]:
-    data = json.loads(value) if isinstance(value, str) else value
-    if not isinstance(data, dict):
-        raise ValueError("stored stream event is not a JSON object")
-    return data
-
-
-def _root() -> pathlib.Path:
-    configured = os.environ.get("SEAL_DURABLE_AGENT_STREAMS_DIR")
-    if configured:
-        return pathlib.Path(configured)
-    return pathlib.Path(__file__).resolve().parents[1] / ".durable_agent_streams"
-
-
-def _event_path(stream_id: str, namespace: str) -> pathlib.Path:
-    return _root() / _quote(stream_id) / f"{_quote(namespace)}.jsonl"
-
-
-def _closed_path(stream_id: str, namespace: str) -> pathlib.Path:
-    return _root() / _quote(stream_id) / f"{_quote(namespace)}.closed"
-
-
-def _quote(value: str) -> str:
-    return urllib.parse.quote(value, safe="")
-
-
-def _lock_for(key: str) -> asyncio.Lock:
-    lock = _locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _locks[key] = lock
-    return lock
+async def ensure_ready() -> None:
+    """Prepare the configured store (call once at startup)."""
+    await store().ensure_ready()
