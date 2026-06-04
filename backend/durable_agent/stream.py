@@ -65,6 +65,32 @@ def subagent_completed(*, tool_call_id: str, is_error: bool) -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
+def approval_requested(
+    *, turn_index: int, requests: list[proto.ToolApprovalRequest]
+) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.TOOL_APPROVAL_REQUESTED,
+        data={
+            "turn_index": turn_index,
+            "requests": [request.model_dump(mode="json") for request in requests],
+        },
+    ).model_dump(mode="json")
+
+
+def approval_resolved(
+    *, turn_index: int, decisions: list[proto.ToolApprovalResponse]
+) -> dict[str, Any]:
+    return proto.LifecycleEvent(
+        type=proto.TOOL_APPROVAL_RESOLVED,
+        data={
+            "turn_index": turn_index,
+            "decisions": [
+                decision.model_dump(mode="json") for decision in decisions
+            ],
+        },
+    ).model_dump(mode="json")
+
+
 DEFAULT_STREAM_NAMESPACE = "default"
 DEFAULT_STREAM_POLL_INTERVAL = 0.05
 

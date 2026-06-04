@@ -130,6 +130,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
             messages=state.messages,
             mode=state.mode,
             turn_hook_token=turn_hook_token,
+            approvals=state.approvals,
         )
         await spawn_turn_workflow(turn_input.model_dump(mode="json"))
         turn_resolution = await turn_hook
@@ -138,6 +139,9 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         turn_result = turn_resolution.output
 
         state.messages = turn_result.messages
+        # decisions are consumed by the turn we just ran; clear so they are not
+        # replayed again.
+        state.approvals = []
         await save_session(state.model_dump(mode="json"))
         await write_event(
             session_id,
@@ -182,9 +186,34 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
 
                 state.messages.append(ai.user_message(resolution.prompt or ""))
 
-            case "subagents":
-                # this is the main session, agent has requested subagents
+            case "pending_requests":
+                # this is the main session. the agent requested subagents
+                # and/or gated tool calls awaiting a human decision. both must
+                # be non-blocking for each other, so they share one task group:
+                # subagents do work and await their own hooks, while approvals
+                # park once on the same resume channel a user message uses
+                # (matches ash, where approvals and messages share the channel).
+                subagent_requests = [
+                    request
+                    for request in turn_result.pending_requests
+                    if isinstance(request, proto.SubagentRequest)
+                ]
+                approval_requests = [
+                    request
+                    for request in turn_result.pending_requests
+                    if isinstance(request, proto.ToolApprovalRequest)
+                ]
+
                 outputs: dict[str, proto.SessionOutput] = {}
+                # one shared, single-shot resume hook for all approvals.
+                resume_hook = (
+                    proto.SessionResumeHook.wait(
+                        token=f"seal-session:{session_id}:{turn_index}"
+                    )
+                    if approval_requests
+                    else None
+                )
+                resume: proto.SessionResumeHook | None = None
 
                 async def dispatch_subagent(
                     index: int,
@@ -225,24 +254,47 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                         ),
                     )
 
+                async def await_approvals(
+                    hook: vercel.workflow.HookEvent[proto.SessionResumeHook],
+                    requests: list[proto.ToolApprovalRequest] = approval_requests,
+                    turn_index: int = turn_index,
+                ) -> None:
+                    # surface the gated calls, then park on the shared hook.
+                    nonlocal resume
+                    await write_event(
+                        session_id,
+                        stream.approval_requested(
+                            turn_index=turn_index, requests=requests
+                        ),
+                    )
+                    resume = await hook
+
                 async with asyncio.TaskGroup() as tg:
-                    for index, request in enumerate(turn_result.subagent_requests):
+                    for index, request in enumerate(subagent_requests):
                         tg.create_task(dispatch_subagent(index, request))
+                    if resume_hook is not None:
+                        tg.create_task(await_approvals(resume_hook))
+
+                if resume_hook is not None:
+                    resume_hook.dispose()
 
                 # the turn always leaves a trailing tool message; extend it with
-                # the subagent results and verify that tool calls are all satisfied.
-                tool_message = state.messages[-1]
-                assert tool_message.role == "tool"
-                tool_message.parts.extend(
-                    ai.tool_result_part(
-                        request.tool_call_id,
-                        tool_name=request.name,
-                        result=outputs[request.tool_call_id].output,
-                        is_error=outputs[request.tool_call_id].is_error,
+                # the subagent results (gated calls keep their is_hook_pending
+                # placeholder result, replaced when the next turn replays them).
+                if subagent_requests:
+                    tool_message = state.messages[-1]
+                    assert tool_message.role == "tool"
+                    tool_message.parts.extend(
+                        ai.tool_result_part(
+                            request.tool_call_id,
+                            tool_name=request.name,
+                            result=outputs[request.tool_call_id].output,
+                            is_error=outputs[request.tool_call_id].is_error,
+                        )
+                        for request in subagent_requests
                     )
-                    for request in turn_result.subagent_requests
-                )
 
+                # every tool call must now be balanced by a result.
                 tool_calls = {
                     part.tool_call_id
                     for message in state.messages
@@ -256,6 +308,24 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                 assert tool_calls == tool_results, (
                     f"incomplete tool history: unsatisfied={tool_calls - tool_results}"
                 )
+
+                # apply the human decision (turn-level, after the group joins).
+                if approval_requests:
+                    if resume is None or resume.close:
+                        await write_event(session_id, stream.session_completed())
+                        await turn.close_stream(session_id)
+                        return proto.SessionOutput(
+                            session_id=session_id,
+                            output=_last_text(state.messages),
+                        ).model_dump(mode="json")
+
+                    state.approvals = resume.approvals
+                    await write_event(
+                        session_id,
+                        stream.approval_resolved(
+                            turn_index=turn_index, decisions=resume.approvals
+                        ),
+                    )
 
         # persist post-turn mutations (resume prompt / subagent results) so the
         # next turn resumes from the latest state after a crash.

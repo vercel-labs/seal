@@ -18,6 +18,23 @@ class SubagentRequest(pydantic.BaseModel):
     prompt: str
 
 
+class ToolApprovalRequest(pydantic.BaseModel):
+    tool_call_id: str
+    tool_name: str = ""
+    args: dict[str, Any] = pydantic.Field(default_factory=dict)
+
+
+# external decision for a single gated tool call.
+class ToolApprovalResponse(pydantic.BaseModel):
+    tool_call_id: str
+    granted: bool
+    reason: str | None = None
+
+
+# ai SDK gates a tool behind a hook labelled ``approve_{tool_call_id}``.
+APPROVAL_HOOK_PREFIX = "approve_"
+
+
 class SubagentHook(pydantic.BaseModel, vercel.workflow.BaseHook):
     output: SessionOutput
 
@@ -36,15 +53,19 @@ class SessionOutput(pydantic.BaseModel):
     is_error: bool = False
 
 
+# external -> session ingress, shared by user messages and approval decisions.
 class SessionResumeHook(pydantic.BaseModel, vercel.workflow.BaseHook):
     prompt: str | None = None
     close: bool = False
+    approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
 
 
 class SessionState(pydantic.BaseModel):
     session_id: str
     mode: SessionMode
     messages: list[ai.messages.Message]
+    # decisions to pre-register on the next turn replay.
+    approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
 
 
 # Turn inputs / outputs
@@ -55,13 +76,17 @@ class TurnInput(pydantic.BaseModel):
     messages: list[ai.messages.Message]
     mode: SessionMode = "infinite"
     turn_hook_token: str
-    # for the turn to resolve the hook in the driver session
+    # decisions to pre-register before the interrupted turn replays.
+    approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
 
 
 class TurnOutput(pydantic.BaseModel):
-    kind: Literal["done", "suspend", "subagents"]
+    kind: Literal["done", "suspend", "pending_requests"]
     messages: list[ai.messages.Message]
-    subagent_requests: list[SubagentRequest] = pydantic.Field(default_factory=list)
+    # subagents to dispatch and/or gated tool calls awaiting a human decision.
+    pending_requests: list[SubagentRequest | ToolApprovalRequest] = pydantic.Field(
+        default_factory=list
+    )
 
 
 class TurnHook(pydantic.BaseModel, vercel.workflow.BaseHook):
@@ -80,6 +105,8 @@ TURN_STARTED = "turn.started"
 TURN_COMPLETED = "turn.completed"
 SUBAGENT_CALLED = "subagent.called"
 SUBAGENT_COMPLETED = "subagent.completed"
+TOOL_APPROVAL_REQUESTED = "tool_approval.requested"
+TOOL_APPROVAL_RESOLVED = "tool_approval.resolved"
 DEFAULT_STREAM_NAMESPACE = "default"
 DEFAULT_STREAM_POLL_INTERVAL = 0.05
 WRITABLE_STREAM_HANDLE_TYPE = "seal.durable_agent.writable_stream"

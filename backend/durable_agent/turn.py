@@ -119,7 +119,7 @@ async def _bash(command: str, timeout: int | None = None) -> str:
 _bash.max_retries = 0
 
 
-@ai.tool
+@ai.tool(require_approval=True)
 async def bash(command: str, timeout: int | None = None) -> str:
     """Execute a bash command. Use timeout in seconds to limit long-running commands."""
     return await _bash(command, timeout)
@@ -284,6 +284,20 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         "pending_subagents": [],
     }
 
+    # pre-register approvals; the loop replays up to each gated tool and the
+    # hook returns immediately instead of suspending, so the tool runs (or is
+    # rejected) for real and overwrites the prior pending placeholder.
+    for approval in _turn_input.approvals:
+        ai.resolve_hook(
+            f"{proto.APPROVAL_HOOK_PREFIX}{approval.tool_call_id}",
+            {"granted": approval.granted, "reason": approval.reason},
+        )
+
+    # gated tool calls the loop suspended on; collected from the run's hook
+    # events (the SDK carries tool name + args in the hook metadata) so we do
+    # not need the control side-channel the subagent path uses.
+    approval_requests: list[proto.ToolApprovalRequest] = []
+
     async with agent.run(
         _workflow_model(),
         _turn_input.messages,
@@ -293,8 +307,28 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             "control": control,
         },
     ) as run:
-        async for _event in run:
-            pass
+        async for event in run:
+            # monitor the stream for hook events and interrupt on them
+            # by now the event has been processed by durable stream,
+            # so nothing else to do with it
+            if (
+                isinstance(event, ai.events.HookEvent)
+                and event.hook.status == "pending"
+            ):
+                hook = event.hook
+                if hook.hook_id.startswith(proto.APPROVAL_HOOK_PREFIX):
+                    approval_requests.append(
+                        proto.ToolApprovalRequest(
+                            tool_call_id=hook.hook_id[
+                                len(proto.APPROVAL_HOOK_PREFIX) :
+                            ],
+                            tool_name=str(hook.metadata.get("tool", "")),
+                            args=cast(
+                                dict[str, Any], hook.metadata.get("kwargs", {})
+                            ),
+                        )
+                    )
+                ai.abort_pending_hook(hook)
 
         messages = run.messages
 
@@ -303,13 +337,17 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         for item in cast(list[dict[str, object]], control["pending_subagents"])
     ]
 
+    has_pending = bool(subagent_requests or approval_requests)
     if _turn_input.mode == "infinite":
-        output_kind = "subagents" if subagent_requests else "suspend"
+        output_kind = "pending_requests" if has_pending else "suspend"
     else:
+        # task (subagent) sessions never gate; pending requests would deadlock.
         output_kind = "done"
 
     output = proto.TurnOutput(
-        kind=output_kind, messages=messages, subagent_requests=subagent_requests
+        kind=output_kind,
+        messages=messages,
+        pending_requests=[*subagent_requests, *approval_requests],
     )
 
     # notify session that the turn is complete
