@@ -375,15 +375,22 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             },
         ) as run:
             async for event in run:
-                # monitor the stream for hook events and interrupt on them
-                # by now the event has been processed by durable stream,
-                # so nothing else to do with it
+                # monitor the stream for hook events and interrupt on them.
                 if (
                     isinstance(event, ai.events.HookEvent)
                     and event.hook.status == "pending"
                 ):
                     hook = event.hook
                     if hook.hook_id.startswith(proto.TOOL_APPROVAL_HOOK_PREFIX):
+                        # HookEvents ride the runtime queue, not runner.events(),
+                        # so the loop never wrote this to the durable stream. write
+                        # it here so the AI SDK UI adapter emits the approval
+                        # request part (it skips the is_hook_pending tool result
+                        # and waits for the pending HookEvent to drive the UI).
+                        await write_event(
+                            _turn_input.session_id,
+                            event.model_dump(mode="json"),
+                        )
                         tool_approval_requests.append(
                             proto.ToolApprovalRequest(
                                 tool_call_id=hook.hook_id[

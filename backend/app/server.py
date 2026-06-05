@@ -45,6 +45,7 @@ import fastapi.responses  # noqa: E402
 import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
+from agent import proto, stream  # noqa: E402
 from app import attachments, chat, sessions  # noqa: E402
 
 
@@ -79,15 +80,39 @@ class ChatRequest(pydantic.BaseModel):
 
 @app.post("/chat")
 async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
-    messages, _approvals = ai_sdk.to_messages(request.messages)
-    prompt = next(
-        (m.text for m in reversed(messages) if m.role == "user" and m.text), None
-    )
-    if prompt is None:
-        raise fastapi.HTTPException(status_code=400, detail="No user message to run")
-
+    messages, approvals = ai_sdk.to_messages(request.messages)
     await sessions.touch(request.session_id)
-    start_index = await chat.start_or_resume(request.session_id, prompt)
+
+    # ``sendAutomaticallyWhen`` resubmits the full history after the user responds
+    # to an approval, so the trailing message is the assistant turn that holds the
+    # answered tool part — not a new user message. That case resumes the parked
+    # turn with the decisions; a trailing user message starts a fresh turn.
+    is_approval_resume = bool(approvals) and not (
+        messages and messages[-1].role == "user"
+    )
+
+    if is_approval_resume:
+        await chat.submit_approvals(
+            request.session_id,
+            [
+                proto.ToolApprovalResponse(
+                    tool_call_id=approval.tool_call_id,
+                    granted=approval.granted,
+                    reason=approval.reason,
+                )
+                for approval in approvals
+            ],
+        )
+        start_index = await stream.tail_index(request.session_id) + 1
+    else:
+        prompt = next(
+            (m.text for m in reversed(messages) if m.role == "user" and m.text), None
+        )
+        if prompt is None:
+            raise fastapi.HTTPException(
+                status_code=400, detail="No user message to run"
+            )
+        start_index = await chat.start_or_resume(request.session_id, prompt)
 
     return fastapi.responses.StreamingResponse(
         chat.to_sse(request.session_id, start_index),

@@ -5,8 +5,16 @@ import {
   isToolUIPart,
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from "ai";
-import type { FileUIPart, UIMessage } from "ai";
+import type {
+  ChatAddToolApproveResponseFunction,
+  UIDataTypes,
+  UIMessage,
+  UIMessagePart,
+  UITools,
+} from "ai";
+import type { FileUIPart } from "ai";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 
 import {
   Attachment,
@@ -113,6 +121,146 @@ function InputAttachments() {
 }
 
 // ---------------------------------------------------------------------------
+// renderPart -- one message part. Recurses into subagent tool output, whose
+// `output` is a nested UIMessage streamed live by the durable backend.
+// ---------------------------------------------------------------------------
+
+function renderPart({
+  part,
+  key,
+  role,
+  addToolApprovalResponse,
+}: {
+  part: UIMessagePart<UIDataTypes, UITools>;
+  key: string;
+  role: UIMessage["role"];
+  addToolApprovalResponse: ChatAddToolApproveResponseFunction;
+}): ReactNode {
+  if (isToolUIPart(part)) {
+    // a subagent runs its own agent; its output is a nested UIMessage we render
+    // recursively rather than dumping as JSON.
+    if (getToolName(part) === "subagent") {
+      // live: a nested UIMessage streamed via preliminary output. final/reload:
+      // a plain text summary -- fall back to the normal tool output renderer.
+      const output = part.output;
+      const nested =
+        output && typeof output === "object" && "parts" in output
+          ? (output as UIMessage)
+          : undefined;
+      return (
+        <Tool key={key} defaultOpen>
+          <ToolHeader
+            type="dynamic-tool"
+            state={part.state}
+            toolName="subagent"
+          />
+          <ToolContent>
+            <ToolInput input={part.input} />
+            {nested ? (
+              nested.parts.map((nestedPart, nestedIndex) =>
+                renderPart({
+                  part: nestedPart,
+                  key: `${key}-sub-${nestedIndex}`,
+                  role: nested.role,
+                  addToolApprovalResponse,
+                }),
+              )
+            ) : (
+              <ToolOutput output={output} errorText={part.errorText} />
+            )}
+          </ToolContent>
+        </Tool>
+      );
+    }
+
+    const hasApproval = !!part.approval;
+    const isComplete = part.state === "output-available";
+    const needsApproval = part.state === "approval-requested";
+
+    return (
+      <Tool key={key} defaultOpen={isComplete || needsApproval}>
+        {part.type === "dynamic-tool" ? (
+          <ToolHeader
+            type={part.type}
+            state={part.state}
+            toolName={getToolName(part)}
+          />
+        ) : (
+          <ToolHeader type={part.type} state={part.state} />
+        )}
+        <ToolContent>
+          <ToolInput input={part.input} />
+          {hasApproval && (
+            <Confirmation approval={part.approval} state={part.state}>
+              <ConfirmationRequest>
+                This tool requires your approval to run.
+              </ConfirmationRequest>
+              <ConfirmationAccepted>
+                You approved this tool execution.
+              </ConfirmationAccepted>
+              <ConfirmationRejected>
+                You rejected this tool execution.
+              </ConfirmationRejected>
+              <ConfirmationActions>
+                <ConfirmationAction
+                  variant="outline"
+                  onClick={() =>
+                    addToolApprovalResponse({
+                      id: part.approval!.id,
+                      approved: false,
+                    })
+                  }
+                >
+                  Reject
+                </ConfirmationAction>
+                <ConfirmationAction
+                  variant="default"
+                  onClick={() =>
+                    addToolApprovalResponse({
+                      id: part.approval!.id,
+                      approved: true,
+                    })
+                  }
+                >
+                  Approve
+                </ConfirmationAction>
+              </ConfirmationActions>
+            </Confirmation>
+          )}
+          <ToolOutput output={part.output} errorText={part.errorText} />
+        </ToolContent>
+      </Tool>
+    );
+  }
+
+  if (part.type === "text") {
+    return (
+      <Message key={key} from={role}>
+        <MessageContent>
+          <MessageResponse>{part.text}</MessageResponse>
+        </MessageContent>
+      </Message>
+    );
+  }
+
+  if (part.type === "file") {
+    return (
+      <Message key={key} from={role}>
+        <MessageContent>
+          <Attachments variant="grid">
+            <Attachment data={{ ...part, id: key }}>
+              <AttachmentPreview />
+            </Attachment>
+          </Attachments>
+        </MessageContent>
+      </Message>
+    );
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // ChatView -- keyed by sessionId so it fully remounts on session switch
 // ---------------------------------------------------------------------------
 
@@ -191,114 +339,14 @@ function ChatView({
             ) : (
               messages.map((message) => (
                 <Fragment key={message.id}>
-                  {message.parts.map((part, partIndex) => {
-                    if (isToolUIPart(part)) {
-                      const hasApproval = !!part.approval;
-                      const isComplete = part.state === "output-available";
-                      const needsApproval = part.state === "approval-requested";
-
-                      return (
-                        <Tool
-                          key={`${message.id}-${partIndex}`}
-                          defaultOpen={isComplete || needsApproval}
-                        >
-                          {part.type === "dynamic-tool" ? (
-                            <ToolHeader
-                              type={part.type}
-                              state={part.state}
-                              toolName={getToolName(part)}
-                            />
-                          ) : (
-                            <ToolHeader type={part.type} state={part.state} />
-                          )}
-                          <ToolContent>
-                            <ToolInput input={part.input} />
-                            {hasApproval && (
-                              <Confirmation
-                                approval={part.approval}
-                                state={part.state}
-                              >
-                                <ConfirmationRequest>
-                                  This tool requires your approval to run.
-                                </ConfirmationRequest>
-                                <ConfirmationAccepted>
-                                  You approved this tool execution.
-                                </ConfirmationAccepted>
-                                <ConfirmationRejected>
-                                  You rejected this tool execution.
-                                </ConfirmationRejected>
-                                <ConfirmationActions>
-                                  <ConfirmationAction
-                                    variant="outline"
-                                    onClick={() =>
-                                      addToolApprovalResponse({
-                                        id: part.approval!.id,
-                                        approved: false,
-                                      })
-                                    }
-                                  >
-                                    Reject
-                                  </ConfirmationAction>
-                                  <ConfirmationAction
-                                    variant="default"
-                                    onClick={() =>
-                                      addToolApprovalResponse({
-                                        id: part.approval!.id,
-                                        approved: true,
-                                      })
-                                    }
-                                  >
-                                    Approve
-                                  </ConfirmationAction>
-                                </ConfirmationActions>
-                              </Confirmation>
-                            )}
-                            <ToolOutput
-                              output={part.output}
-                              errorText={part.errorText}
-                            />
-                          </ToolContent>
-                        </Tool>
-                      );
-                    }
-
-                    if (part.type === "text") {
-                      return (
-                        <Message
-                          key={`${message.id}-${partIndex}`}
-                          from={message.role}
-                        >
-                          <MessageContent>
-                            <MessageResponse>{part.text}</MessageResponse>
-                          </MessageContent>
-                        </Message>
-                      );
-                    }
-
-                    if (part.type === "file") {
-                      return (
-                        <Message
-                          key={`${message.id}-${partIndex}`}
-                          from={message.role}
-                        >
-                          <MessageContent>
-                            <Attachments variant="grid">
-                              <Attachment
-                                data={{
-                                  ...part,
-                                  id: `${message.id}-${partIndex}`,
-                                }}
-                              >
-                                <AttachmentPreview />
-                              </Attachment>
-                            </Attachments>
-                          </MessageContent>
-                        </Message>
-                      );
-                    }
-
-                    return null;
-                  })}
+                  {message.parts.map((part, partIndex) =>
+                    renderPart({
+                      part,
+                      key: `${message.id}-${partIndex}`,
+                      role: message.role,
+                      addToolApprovalResponse,
+                    }),
+                  )}
                 </Fragment>
               ))
             )}
