@@ -19,7 +19,7 @@ import ai
 import ai.agents.ui.ai_sdk as ai_sdk
 import vercel.workflow
 
-from durable_agent import driver, proto, session, stream
+from agent import driver, proto, session, stream
 
 _TERMINAL = {proto.SESSION_WAITING, proto.SESSION_COMPLETED, proto.SESSION_FAILED}
 

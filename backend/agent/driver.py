@@ -4,11 +4,11 @@ from typing import Any
 import ai
 import vercel.workflow
 
-import durable_agent.proto as proto
-import durable_agent.session as session
-import durable_agent.stream as stream
-import durable_agent.turn as turn
-from durable_agent import workflow
+import agent.proto as proto
+import agent.session as session
+import agent.stream as stream
+import agent.turn as turn
+from agent import workflow
 
 
 @workflow.step
@@ -250,7 +250,9 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                 hook = proto.SessionHook.wait(token=token)
                 while pending.subagent_outputs.keys() != {
                     request.tool_call_id for request in pending.subagents
-                } or (pending.tool_approval_requests and pending.tool_approvals is None):
+                } or (
+                    pending.tool_approval_requests and pending.tool_approvals is None
+                ):
                     resolution = await hook
                     payload = resolution.payload if resolution is not None else None
 

@@ -26,10 +26,10 @@ import vercel._internal.workflow.py_sandbox  # noqa: E402
 
 # The workflow sandbox rewrites `os` in a way that breaks dependents at import
 # time; serve these from the host unchanged. `ai` needs `shutil`/`os`; the
-# durable_agent modules import `pathlib` (via storage) at the top level.
+# agent modules import `pathlib` (via storage) at the top level.
 vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
 
 # Importing the driver pulls in turn/session/stream; constructing each module's
 # `Workflows()` registers its queue handlers.
-import durable_agent.driver  # noqa: E402, F401
-import durable_agent.turn  # noqa: E402, F401
+import agent.driver  # noqa: E402, F401
+import agent.turn  # noqa: E402, F401

@@ -18,7 +18,8 @@ from typing import Any
 import ai
 import pydantic
 
-from durable_agent import db, session
+import db
+from agent import session
 
 _TITLE_PROMPT = (
     "Generate a concise 3-6 word title for a conversation that starts with "

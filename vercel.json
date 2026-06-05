@@ -6,14 +6,14 @@
       "entrypoint": "frontend",
       "routePrefix": "/"
     },
-    "trigger": {
+    "backend": {
       "framework": "fastapi",
-      "entrypoint": "backend/durable_agent/_server.py",
+      "entrypoint": "backend/app/server.py",
       "routePrefix": "/api"
     },
     "agent": {
       "type": "worker",
-      "entrypoint": "backend/durable_agent/_worker.py",
+      "entrypoint": "backend/app/worker.py",
       "topics": ["__wkf_*"]
     }
   }

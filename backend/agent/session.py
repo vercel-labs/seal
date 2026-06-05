@@ -8,7 +8,7 @@ tail reads safe.
 
 from __future__ import annotations
 
-from durable_agent import proto, storage
+from agent import proto, storage
 
 __all__ = ["read_session", "write_session"]
 

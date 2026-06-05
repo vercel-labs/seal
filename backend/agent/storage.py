@@ -166,7 +166,7 @@ _schema_lock = asyncio.Lock()
 
 class _PgStore:
     async def _pool(self) -> typing.Any:
-        from durable_agent import db
+        import db
 
         return await db.get_pool()
 

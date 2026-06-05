@@ -6,7 +6,7 @@ from typing import Any, ClassVar, cast
 
 import ai
 
-from durable_agent import proto, stream, workflow
+from agent import proto, stream, workflow
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
@@ -260,6 +260,7 @@ class DurableAgent(ai.Agent):
 
             pending_subagents: list[proto.SubagentRequest] = []
             cached_results: list[ai.messages.ToolResultPart] = []
+            tool_message: ai.messages.Message | None = None
 
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:

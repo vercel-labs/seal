@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import pydantic
 
-from durable_agent import proto, storage
+from agent import proto, storage
 
 __all__ = ["get_readable", "get_writable"]
 

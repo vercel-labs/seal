@@ -11,9 +11,9 @@ Endpoints (mounted under ``/api`` by ``vercel.json``):
   DELETE /sessions/{id}          delete a session
   POST /upload, GET /files/{p}   private blob upload + proxy
 
-`vercel dev` serves this app; the workflow worker (`_worker.py`) drives the run.
+`vercel dev` serves this app; the workflow worker (`worker.py`) drives the run.
 This process also calls ``vercel.workflow.start``, which imports and replays the
-workflow modules, so the preamble mirrors ``_worker.py``.
+workflow modules, so the preamble mirrors ``worker.py``.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ os.environ.setdefault(
 
 import vercel._internal.workflow.py_sandbox  # noqa: E402
 
-# See `_worker.py` for why these are served from the host inside the sandbox.
+# See `worker.py` for why these are served from the host inside the sandbox.
 vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
 
 import contextlib  # noqa: E402
@@ -45,7 +45,7 @@ import fastapi.responses  # noqa: E402
 import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
-from durable_agent import attachments, chat, sessions  # noqa: E402
+from app import attachments, chat, sessions  # noqa: E402
 
 
 @contextlib.asynccontextmanager
