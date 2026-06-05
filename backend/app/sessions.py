@@ -56,7 +56,11 @@ def _use_postgres() -> bool:
 
 def _root() -> pathlib.Path:
     configured = os.environ.get("SEAL_SESSIONS_DIR")
-    return pathlib.Path(configured) if configured else pathlib.Path("data/sessions")
+    return (
+        pathlib.Path(configured)
+        if configured
+        else pathlib.Path(__file__).resolve().parents[1] / ".seal" / "sessions"
+    )
 
 
 def _path(session_id: str) -> pathlib.Path:
