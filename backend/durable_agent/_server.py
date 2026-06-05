@@ -86,6 +86,20 @@ async def session_events(
     )
 
 
+class ApproveRequest(pydantic.BaseModel):
+    approvals: list[proto.ToolApprovalResponse]
+
+
+@app.post("/session/{session_id}/approve")
+async def approve_session(
+    session_id: str, request: ApproveRequest, turn_index: int = 0
+) -> dict[str, bool]:
+    """Resolve the waiting session hook with tool-approval decisions."""
+    token = f"seal-session:{session_id}:{turn_index}"
+    await proto.SessionResumeHook(approvals=request.approvals).resume(token)
+    return {"ok": True}
+
+
 @app.post("/session/{session_id}/close")
 async def close_session(session_id: str, turn_index: int = 0) -> dict[str, bool]:
     """Resolve the waiting session hook with close, so the run finishes."""

@@ -79,6 +79,26 @@ async def _follow(
                             )
                         )
 
+                # gated tool calls; auto-approve everything and log what we
+                # let through so the policy is visible.
+                elif event_type == "tool_approval.requested" and prefix == "":
+                    requests = data.get("requests") or []
+                    for request in requests:
+                        print(
+                            f"{prefix}! auto-approving "
+                            f"{request.get('tool_name')} {request.get('args')}"
+                        )
+                    await client.post(
+                        f"/session/{session_id}/approve",
+                        params={"turn_index": data.get("turn_index", 0)},
+                        json={
+                            "approvals": [
+                                {"tool_call_id": request["tool_call_id"], "granted": True}
+                                for request in requests
+                            ]
+                        },
+                    )
+
                 # the root session parks after the one-shot turn; close it so
                 # the run finishes and this stream ends.
                 elif event_type == "session.waiting" and prefix == "":

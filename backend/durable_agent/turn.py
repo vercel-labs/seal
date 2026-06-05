@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 from collections.abc import AsyncGenerator
 from typing import Any, ClassVar, cast
@@ -125,6 +126,13 @@ async def bash(command: str, timeout: int | None = None) -> str:
     return await _bash(command, timeout)
 
 
+# subagent (task) sessions cannot surface approvals to a human and would
+# deadlock on a gated tool, so they run an ungated copy of the same tool.
+bash_ungated = dataclasses.replace(
+    bash, tool=bash.tool.model_copy(update={"require_approval": False})
+)
+
+
 @workflow.step
 async def _web_fetch(
     url: str,
@@ -179,7 +187,8 @@ async def subagent(prompt: str, name: str | None = None) -> str:
 
 
 class DurableAgent(ai.Agent):
-    TOOLS: ClassVar[list[ai.AgentTool]] = [bash, web_fetch]
+    # bash is gated/ungated per mode, so it is supplied via tools=, not here.
+    TOOLS: ClassVar[list[ai.AgentTool]] = [web_fetch]
 
     async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
         params = context.params if isinstance(context.params, dict) else {}
@@ -276,7 +285,9 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     # messages should already contain either the user message
     # or the tool result message, so no need to do anything
 
-    extra_tools = [] if _turn_input.mode == "task" else [subagent]
+    # task sessions get the ungated bash and no subagent tool; the main
+    # session gets the gated bash and may delegate.
+    extra_tools = [bash_ungated] if _turn_input.mode == "task" else [bash, subagent]
     agent = DurableAgent(tools=extra_tools)
 
     # side-channel for exfiltrating subagent requests out of the loop
@@ -323,9 +334,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
                                 len(proto.APPROVAL_HOOK_PREFIX) :
                             ],
                             tool_name=str(hook.metadata.get("tool", "")),
-                            args=cast(
-                                dict[str, Any], hook.metadata.get("kwargs", {})
-                            ),
+                            args=cast(dict[str, Any], hook.metadata.get("kwargs", {})),
                         )
                     )
                 ai.abort_pending_hook(hook)
