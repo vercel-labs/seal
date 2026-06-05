@@ -94,7 +94,6 @@ def _last_text(messages: list[ai.messages.Message]) -> str:
 
 @workflow.workflow
 async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
-
     # prepare the session
     _session_input = proto.SessionInput.model_validate(session_input)
     session_id = _session_input.session_id
@@ -151,11 +150,12 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
 
         match turn_result.kind:
             case "done":
-                # we're currently in a subagent session; return output and quit
+                # we're currently in a subagent session; return output and quit.
+                # we're returning full transcript as a MessageBundle.
                 output = proto.SessionOutput(
                     tool_call_id=_session_input.tool_call_id,
                     session_id=session_id,
-                    output=_last_text(state.messages),
+                    output=ai.agents.MessageBundle(messages=tuple(state.messages)),
                 )
 
                 # notify the parent session. output carries the tool_call_id
@@ -294,19 +294,17 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                 if pending.subagents:
                     tool_message = state.messages[-1]
                     assert tool_message.role == "tool"
-                    tool_message.parts.extend(
-                        ai.tool_result_part(
-                            request.tool_call_id,
-                            tool_name=request.name,
-                            result=pending.subagent_outputs[
-                                request.tool_call_id
-                            ].output,
-                            is_error=pending.subagent_outputs[
-                                request.tool_call_id
-                            ].is_error,
+                    for request in pending.subagents:
+                        completed = pending.subagent_outputs[request.tool_call_id]
+                        # the result is the child's MessageBundle
+                        tool_message.parts.append(
+                            ai.tool_result_part(
+                                request.tool_call_id,
+                                tool_name=request.name,
+                                result=completed.output,
+                                is_error=completed.is_error,
+                            )
                         )
-                        for request in pending.subagents
-                    )
 
                 # every tool call must now have a result.
                 tool_calls = {

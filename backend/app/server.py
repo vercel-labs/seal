@@ -38,6 +38,7 @@ vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
 
 import contextlib  # noqa: E402
 
+import ai  # noqa: E402
 import ai.agents.ui.ai_sdk as ai_sdk  # noqa: E402
 import fastapi  # noqa: E402
 import fastapi.middleware.cors  # noqa: E402
@@ -150,12 +151,32 @@ async def get_session(session_id: str) -> dict[str, object]:
     if meta is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
     ui_messages = ai_sdk.to_ui_messages(await sessions.history(session_id))
-    return {
-        **meta.model_dump(),
-        "messages": [
-            message.model_dump(mode="json", by_alias=True) for message in ui_messages
-        ],
-    }
+    serialized = [
+        message.model_dump(mode="json", by_alias=True) for message in ui_messages
+    ]
+    # the driver stores each subagent result as a MessageBundle so the model sees
+    # the summary while the UI gets the full transcript. to_ui_messages passes that
+    # bundle through verbatim ({messages: [...]}); rebuild it into the same nested
+    # UIMessage the live stream emits so reload and live render identically.
+    for message in serialized:
+        for part in message["parts"]:
+            is_subagent = part.get("type") == "tool-subagent" or (
+                part.get("type") == "dynamic-tool"
+                and part.get("toolName") == "subagent"
+            )
+            output = part.get("output")
+            if (
+                is_subagent
+                and isinstance(output, dict)
+                and "messages" in output
+                and "parts" not in output
+            ):
+                transcript = [
+                    ai.messages.Message.model_validate(raw)
+                    for raw in output["messages"]
+                ]
+                part["output"] = chat.bundle_to_wire(transcript)
+    return {**meta.model_dump(), "messages": serialized}
 
 
 @app.post("/sessions/{session_id}/title")

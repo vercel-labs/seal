@@ -232,6 +232,14 @@ async def subagent(prompt: str, name: str | None = None) -> str:
     raise RuntimeError("subagent is dispatched by the durable driver")
 
 
+# the driver stores the child's full transcript (a MessageBundle) as this tool's
+# result for rich UI rendering. declaring MessageAggregator lets Agent.run reduce
+# that bundle to the summary string the model sees: _populate_model_inputs looks
+# up this aggregator by tool name and calls to_model_input(result) each turn,
+# since the model-facing value is not serialized across the durable boundary.
+subagent = dataclasses.replace(subagent, aggregator=ai.agents.MessageAggregator)
+
+
 class DurableAgent(ai.Agent):
     # bash is gated/ungated per mode, so it is supplied via tools=, not here.
     TOOLS: ClassVar[list[ai.AgentTool]] = [web_fetch]

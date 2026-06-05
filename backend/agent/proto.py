@@ -47,7 +47,10 @@ class SessionInput(pydantic.BaseModel):
 class SessionOutput(pydantic.BaseModel):
     tool_call_id: str = ""  # subagent-specific
     session_id: str
-    output: str
+    # a subagent session returns its full transcript (MessageBundle) so reload and
+    # live render the same nested UIMessage; the model still sees the summary via
+    # the subagent tool's MessageAggregator 
+    output: str | ai.agents.MessageBundle
     is_error: bool = False
 
 

@@ -15,8 +15,10 @@ Two lifecycle features surface to the UI:
   * subagents — a delegated child agent runs as its own durable workflow writing
     to its own stream. We tail that child stream concurrently and republish it as
     *preliminary* nested-``UIMessage`` output on the parent's ``subagent`` tool
-    call, so the user watches the subagent work live. The SDK supersedes the
-    preliminary output with the final text summary tool result.
+    call, so the user watches the subagent work live. The driver then stores the
+    child's full transcript (a ``MessageBundle``) as the final tool result; both
+    the live preliminary output and :func:`bundle_to_wire` (used on reload) reduce
+    that transcript to the identical nested ``UIMessage`` shape the UI expects.
 """
 
 from __future__ import annotations
@@ -132,6 +134,36 @@ async def _turn_events(
             return
 
 
+def bundle_to_wire(
+    messages: collections.abc.Sequence[ai.messages.Message],
+) -> dict[str, object] | None:
+    """Flatten a subagent transcript into one nested wire ``UIMessage``.
+
+    The child may take several turns; we fold all of its assistant bubbles into a
+    single ``UIMessage`` (anchored on the first) so the whole trajectory renders
+    under the parent's ``subagent`` tool call. Returns ``None`` when the child has
+    produced no assistant message yet.
+
+    This is the single source of truth for the subagent's nested shape: the live
+    path (:func:`_pump_subagent`) and the reload path (``server`` history) both
+    call it, so they emit identical output.
+    """
+    bubbles = [
+        bubble
+        for bubble in ai_sdk.to_ui_messages(list(messages))
+        if bubble.role == "assistant"
+    ]
+    if not bubbles:
+        return None
+    nested = bubbles[0].model_dump(mode="json", by_alias=True)
+    nested["parts"] = [
+        part
+        for bubble in bubbles
+        for part in bubble.model_dump(mode="json", by_alias=True)["parts"]
+    ]
+    return nested
+
+
 async def _pump_subagent(
     event: proto.LifecycleEvent, queue: asyncio.Queue[str | None]
 ) -> None:
@@ -140,7 +172,8 @@ async def _pump_subagent(
     Each child ``AgentEvent`` carrying a message is folded into a growing nested
     ``UIMessage`` and pushed as a preliminary ``tool-output-available`` SSE line
     on the parent's ``subagent`` tool call. The final, non-preliminary output is
-    the subagent's text summary, written by the driver as a normal tool result.
+    the same nested ``UIMessage``, rebuilt on reload from the driver-stored
+    ``MessageBundle`` via :func:`bundle_to_wire`.
     """
     tool_call_id = str(event.data.get("tool_call_id"))
     child_session_id = str(event.data.get("child_session_id"))
@@ -153,21 +186,9 @@ async def _pump_subagent(
         if not isinstance(message, ai.messages.Message):
             continue
         _upsert(child_messages, message)
-        # flatten the child's bubbles (it may take several turns) into one nested
-        # UIMessage so the whole subagent trajectory renders under the tool call.
-        bundle = [
-            bubble
-            for bubble in ai_sdk.to_ui_messages(child_messages)
-            if bubble.role == "assistant"
-        ]
-        if not bundle:
+        nested = bundle_to_wire(child_messages)
+        if nested is None:
             continue
-        nested = bundle[0].model_dump(mode="json", by_alias=True)
-        nested["parts"] = [
-            part
-            for bubble in bundle
-            for part in bubble.model_dump(mode="json", by_alias=True)["parts"]
-        ]
         line = outbound_stream.format_sse(
             ui_events.UIToolOutputAvailableEvent(
                 tool_call_id=tool_call_id,
