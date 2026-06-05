@@ -36,32 +36,43 @@ from agent import driver, proto, session, stream
 
 _TERMINAL = {proto.SESSION_WAITING, proto.SESSION_COMPLETED, proto.SESSION_FAILED}
 
-# events at which a turn stops reaching the client (see ``_turn_events``): the
+# events at which a run stops reaching the client (see ``_turn_events``): the
 # session parks on a human decision or reaches a terminal state.
-_TURN_BOUNDARY = _TERMINAL | {proto.TOOL_APPROVAL_REQUESTED}
+_RUN_BOUNDARY = _TERMINAL | {proto.TOOL_APPROVAL_REQUESTED}
 
 
-async def active_turn_start_index(session_id: str) -> int | None:
-    """Return the stream index to resume an in-flight turn from, else ``None``.
+async def active_run_start_index(session_id: str) -> int | None:
+    """Return the stream index to resume the in-flight run from, else ``None``.
 
-    A turn is in flight when the latest ``turn.started`` has no turn-boundary
-    event after it. Resuming :func:`to_sse` from that index replays the turn and
-    self-terminates at the same boundary the live stream did, so reload and live
-    render identically.
+    A *run* is everything one ``POST /chat`` streams: it spans the driver's
+    internal turns (subagents, tool loops) and ends only at a run boundary
+    (``session.waiting`` / terminal / a parked approval). The SDK adapter folds
+    a whole run into a *single* UI message (one ``UIStartEvent``), so resume has
+    to start where the live POST did — the run start, not an inner turn.
+
+    Matching that boundary is what keeps reload from duplicating: ``useChat``
+    seeds its streaming message from the last persisted assistant message
+    (history is saved at run boundaries, so that is this run's message); when we
+    resume from the run start the replayed stream carries the same message id, so
+    the SDK reconciles in place instead of pushing a second copy.
+
+    The run is in flight (resumable) when its opening event has no run-boundary
+    event after it. ``start.index`` is the event index of that opener.
     """
-    turn_start: int | None = None
+    run_start: int | None = None
     seen_boundary = True
     index = -1
     async for event in stream.replay(session_id):
         index += 1
         if not isinstance(event, proto.LifecycleEvent):
             continue
-        if event.type == proto.TURN_STARTED:
-            turn_start = index
+        if event.type in (proto.SESSION_STARTED, proto.TURN_STARTED) and seen_boundary:
+            # first opener after a boundary marks where the next run begins.
+            run_start = index
             seen_boundary = False
-        elif event.type in _TURN_BOUNDARY:
+        elif event.type in _RUN_BOUNDARY:
             seen_boundary = True
-    return None if seen_boundary else turn_start
+    return None if seen_boundary else run_start
 
 
 async def start_or_resume(session_id: str, prompt: str) -> int:

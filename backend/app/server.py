@@ -124,8 +124,8 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
 @app.get("/chat/{session_id}/stream")
 async def resume_chat(session_id: str) -> fastapi.responses.Response:
     # ``useChat({ resume: true })`` GETs this on mount. Re-tail the durable
-    # stream from the in-flight turn's start; 204 when nothing is running.
-    start_index = await chat.active_turn_start_index(session_id)
+    # stream from the in-flight run's start; 204 when nothing is running.
+    start_index = await chat.active_run_start_index(session_id)
     if start_index is None:
         return fastapi.responses.Response(status_code=204)
     return fastapi.responses.StreamingResponse(
