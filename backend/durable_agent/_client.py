@@ -92,7 +92,7 @@ async def _follow(
                         f"/session/{session_id}/approve",
                         params={"turn_index": data.get("turn_index", 0)},
                         json={
-                            "approvals": [
+                            "tool_approvals": [
                                 {"tool_call_id": request["tool_call_id"], "granted": True}
                                 for request in requests
                             ]

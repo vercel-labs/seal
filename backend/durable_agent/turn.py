@@ -33,6 +33,49 @@ def _workflow_model() -> ai.Model:
 # end of hack
 
 
+# hack: smuggle hidden Message.replay and ToolCallPart.cached_result
+# through llm_step json boundary. they are stamped by agent.run before the loop.
+# without this replay doesn't work.
+def _dump_message(message: ai.messages.Message) -> dict[str, object]:
+    data = message.model_dump(mode="json")
+    data["_replay"] = message.replay
+    cached: dict[str, object] = {}
+    for part in message.tool_calls:
+        if part.cached_result is not None:
+            cached[part.tool_call_id] = part.cached_result.model_dump(mode="json")
+    if cached:
+        data["_cached_results"] = cached
+    return data
+
+
+def _load_message(data: dict[str, object]) -> ai.messages.Message:
+    replay = bool(data.pop("_replay", False))
+    cached_raw = cast(dict[str, object], data.pop("_cached_results", {}) or {})
+    cached = {
+        tool_call_id: ai.messages.ToolResultPart.model_validate(result)
+        for tool_call_id, result in cached_raw.items()
+    }
+    message = ai.messages.Message.model_validate(data)
+    if cached:
+        new_parts: list[ai.messages.Part] = []
+        for part in message.parts:
+            if (
+                isinstance(part, ai.messages.ToolCallPart)
+                and part.tool_call_id in cached
+            ):
+                part = part.model_copy(
+                    update={"cached_result": cached[part.tool_call_id]}
+                )
+            new_parts.append(part)
+        message = message.model_copy(update={"parts": new_parts})
+    if replay:
+        message = message.model_copy(update={"replay": True})
+    return message
+
+
+# end of hack
+
+
 @workflow.step
 async def llm_step(
     model_id: str,
@@ -41,9 +84,7 @@ async def llm_step(
     session_id: str | None,
 ) -> dict[str, object]:
     model = ai.get_model(model_id)
-    messages = [
-        ai.messages.Message.model_validate(message) for message in messages_data
-    ]
+    messages = [_load_message(message) for message in messages_data]
     # hack: ai.Tool erases args type so we have to reconstruct them manually
     tools: list[ai.Tool] = []
     for tool in tools_data:
@@ -60,13 +101,18 @@ async def llm_step(
 
     async with ai.stream(model, messages, tools=tools) as model_stream:
         async for e in model_stream:
-            if writer is not None:
+            if writer is not None and not getattr(e, "replay", False):
                 await writer.write(e)
             if isinstance(e, ai.events.StreamEnd):
                 message = e.message
 
+        if message is None:
+            message = model_stream.message
+
     assert message is not None
-    return message.model_dump(mode="json")
+    # hack: special dump to preserve replay so the loop's context.add
+    # skips the replayed turn
+    return _dump_message(message)
 
 
 llm_step.max_retries = 0
@@ -126,7 +172,7 @@ async def bash(command: str, timeout: int | None = None) -> str:
     return await _bash(command, timeout)
 
 
-# subagent (task) sessions cannot surface approvals to a human and would
+# subagent (task) sessions cannot surface tool approvals to a human and would
 # deadlock on a gated tool, so they run an ungated copy of the same tool.
 bash_ungated = dataclasses.replace(
     bash, tool=bash.tool.model_copy(update={"require_approval": False})
@@ -200,7 +246,7 @@ class DurableAgent(ai.Agent):
         while context.keep_running():
             result = await llm_step(
                 model_id,
-                [message.model_dump(mode="json") for message in context.messages],
+                [_dump_message(message) for message in context.messages],
                 # hack: have to use serialize_as_any because ai.Tool erases args type
                 [
                     tool.model_dump(mode="json", serialize_as_any=True)
@@ -209,14 +255,18 @@ class DurableAgent(ai.Agent):
                 session_id,
             )
 
-            assistant_message = ai.messages.Message.model_validate(result)
+            assistant_message = _load_message(result)
             context.add(assistant_message)
 
             pending_subagents: list[proto.SubagentRequest] = []
+            cached_results: list[ai.messages.ToolResultPart] = []
 
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
-                    if tool_call.tool_name == "subagent":
+                    if tool_call.cached_result is not None:
+                        # hack: special treatment of replayed results
+                        cached_results.append(tool_call.cached_result)
+                    elif tool_call.tool_name == "subagent":
                         # we're not processing this inside the loop
                         # we'll return that and have session driver dispatch
                         # a separate agent session for this
@@ -233,11 +283,20 @@ class DurableAgent(ai.Agent):
 
                 async for event in runner.events():
                     if session_id is not None:
-                        await write_event(
-                            session_id,
-                            event.model_dump(mode="json"),
-                        )
+                        await write_event(session_id, event.model_dump(mode="json"))
                     yield event
+
+                # hack: special treatment of replayed results
+                for cached_result in cached_results:
+                    tool_message = ai.tool_message(cached_result)
+                    event = ai.events.ToolCallResult(
+                        message=tool_message,
+                        results=tool_message.tool_results,
+                    )
+                    if session_id is not None:
+                        await write_event(session_id, event.model_dump(mode="json"))
+                    yield event
+                    runner.add_result(event)
 
                 tool_message = runner.get_tool_message()
 
@@ -281,12 +340,11 @@ resume_turn_hook.max_retries = 0
 @workflow.workflow
 async def run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
+    messages = _turn_input.messages
 
     # messages should already contain either the user message
     # or the tool result message, so no need to do anything
 
-    # task sessions get the ungated bash and no subagent tool; the main
-    # session gets the gated bash and may delegate.
     extra_tools = [bash_ungated] if _turn_input.mode == "task" else [bash, subagent]
     agent = DurableAgent(tools=extra_tools)
 
@@ -295,69 +353,75 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         "pending_subagents": [],
     }
 
-    # pre-register approvals; the loop replays up to each gated tool and the
-    # hook returns immediately instead of suspending, so the tool runs (or is
-    # rejected) for real and overwrites the prior pending placeholder.
-    for approval in _turn_input.approvals:
+    # pre-register tool approvals
+    for tool_approval in _turn_input.tool_approvals:
         ai.resolve_hook(
-            f"{proto.APPROVAL_HOOK_PREFIX}{approval.tool_call_id}",
-            {"granted": approval.granted, "reason": approval.reason},
+            f"{proto.TOOL_APPROVAL_HOOK_PREFIX}{tool_approval.tool_call_id}",
+            {"granted": tool_approval.granted, "reason": tool_approval.reason},
         )
 
-    # gated tool calls the loop suspended on; collected from the run's hook
-    # events (the SDK carries tool name + args in the hook metadata) so we do
-    # not need the control side-channel the subagent path uses.
-    approval_requests: list[proto.ToolApprovalRequest] = []
+    # new tool approval requests to send to session
+    tool_approval_requests: list[proto.ToolApprovalRequest] = []
 
-    async with agent.run(
-        _workflow_model(),
-        _turn_input.messages,
-        params={
-            "model_id": MODEL_ID,
-            "session_id": _turn_input.session_id,
-            "control": control,
-        },
-    ) as run:
-        async for event in run:
-            # monitor the stream for hook events and interrupt on them
-            # by now the event has been processed by durable stream,
-            # so nothing else to do with it
-            if (
-                isinstance(event, ai.events.HookEvent)
-                and event.hook.status == "pending"
-            ):
-                hook = event.hook
-                if hook.hook_id.startswith(proto.APPROVAL_HOOK_PREFIX):
-                    approval_requests.append(
-                        proto.ToolApprovalRequest(
-                            tool_call_id=hook.hook_id[
-                                len(proto.APPROVAL_HOOK_PREFIX) :
-                            ],
-                            tool_name=str(hook.metadata.get("tool", "")),
-                            args=cast(dict[str, Any], hook.metadata.get("kwargs", {})),
+    try:
+        async with agent.run(
+            _workflow_model(),
+            messages,
+            params={
+                "model_id": MODEL_ID,
+                "session_id": _turn_input.session_id,
+                "control": control,
+            },
+        ) as run:
+            async for event in run:
+                # monitor the stream for hook events and interrupt on them
+                # by now the event has been processed by durable stream,
+                # so nothing else to do with it
+                if (
+                    isinstance(event, ai.events.HookEvent)
+                    and event.hook.status == "pending"
+                ):
+                    hook = event.hook
+                    if hook.hook_id.startswith(proto.TOOL_APPROVAL_HOOK_PREFIX):
+                        tool_approval_requests.append(
+                            proto.ToolApprovalRequest(
+                                tool_call_id=hook.hook_id[
+                                    len(proto.TOOL_APPROVAL_HOOK_PREFIX) :
+                                ],
+                                tool_name=str(hook.metadata.get("tool", "")),
+                                args=cast(
+                                    dict[str, Any], hook.metadata.get("kwargs", {})
+                                ),
+                            )
                         )
-                    )
-                ai.abort_pending_hook(hook)
+                    ai.abort_pending_hook(hook)
 
-        messages = run.messages
-
-    subagent_requests = [
-        proto.SubagentRequest.model_validate(item)
-        for item in cast(list[dict[str, object]], control["pending_subagents"])
-    ]
-
-    has_pending = bool(subagent_requests or approval_requests)
-    if _turn_input.mode == "infinite":
-        output_kind = "pending_requests" if has_pending else "suspend"
+            messages = run.messages
+    except Exception as error:
+        output = proto.TurnOutput(
+            kind="error",
+            messages=messages,
+            error=f"{type(error).__name__}: {error}",
+        )
     else:
-        # task (subagent) sessions never gate; pending requests would deadlock.
-        output_kind = "done"
+        # create normal output if the run has completed successfully
+        subagent_requests = [
+            proto.SubagentRequest.model_validate(item)
+            for item in cast(list[dict[str, object]], control["pending_subagents"])
+        ]
 
-    output = proto.TurnOutput(
-        kind=output_kind,
-        messages=messages,
-        pending_requests=[*subagent_requests, *approval_requests],
-    )
+        has_pending = bool(subagent_requests or tool_approval_requests)
+        if _turn_input.mode == "infinite":
+            output_kind = "pending_requests" if has_pending else "suspend"
+        else:
+            # task (subagent) sessions never gate; pending requests would deadlock.
+            output_kind = "done"
+
+        output = proto.TurnOutput(
+            kind=output_kind,
+            messages=messages,
+            pending_requests=[*subagent_requests, *tool_approval_requests],
+        )
 
     # notify session that the turn is complete
     await resume_turn_hook(_turn_input.turn_hook_token, output.model_dump(mode="json"))

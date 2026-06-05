@@ -13,6 +13,7 @@ actual run. The preamble mirrors `_worker.py` because this process also calls
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -87,7 +88,21 @@ async def session_events(
 
 
 class ApproveRequest(pydantic.BaseModel):
-    approvals: list[proto.ToolApprovalResponse]
+    tool_approvals: list[proto.ToolApprovalResponse]
+
+
+async def _resume_session(token: str, payload: proto.ResumePayload) -> None:
+    # the driver writes the request event just before parking on the hook, so a
+    # fast client can resume before the hook is registered; retry while missing.
+    hook = proto.SessionHook(payload=payload)
+    for attempt in range(40):
+        try:
+            await hook.resume(token)
+            return
+        except RuntimeError as error:
+            if attempt == 39 or "not found" not in str(error).lower():
+                raise
+            await asyncio.sleep(0.05)
 
 
 @app.post("/session/{session_id}/approve")
@@ -96,7 +111,9 @@ async def approve_session(
 ) -> dict[str, bool]:
     """Resolve the waiting session hook with tool-approval decisions."""
     token = f"seal-session:{session_id}:{turn_index}"
-    await proto.SessionResumeHook(approvals=request.approvals).resume(token)
+    await _resume_session(
+        token, proto.ToolApprovals(tool_approvals=request.tool_approvals)
+    )
     return {"ok": True}
 
 
@@ -104,5 +121,5 @@ async def approve_session(
 async def close_session(session_id: str, turn_index: int = 0) -> dict[str, bool]:
     """Resolve the waiting session hook with close, so the run finishes."""
     token = f"seal-session:{session_id}:{turn_index}"
-    await proto.SessionResumeHook(close=True).resume(token)
+    await _resume_session(token, proto.NewUserMessage(close=True))
     return {"ok": True}

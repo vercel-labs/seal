@@ -65,7 +65,7 @@ def subagent_completed(*, tool_call_id: str, is_error: bool) -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
-def approval_requested(
+def tool_approval_requested(
     *, turn_index: int, requests: list[proto.ToolApprovalRequest]
 ) -> dict[str, Any]:
     return proto.LifecycleEvent(
@@ -77,15 +77,16 @@ def approval_requested(
     ).model_dump(mode="json")
 
 
-def approval_resolved(
-    *, turn_index: int, decisions: list[proto.ToolApprovalResponse]
+def tool_approval_resolved(
+    *, turn_index: int, tool_approvals: list[proto.ToolApprovalResponse]
 ) -> dict[str, Any]:
     return proto.LifecycleEvent(
         type=proto.TOOL_APPROVAL_RESOLVED,
         data={
             "turn_index": turn_index,
-            "decisions": [
-                decision.model_dump(mode="json") for decision in decisions
+            "tool_approvals": [
+                tool_approval.model_dump(mode="json")
+                for tool_approval in tool_approvals
             ],
         },
     ).model_dump(mode="json")
@@ -107,7 +108,7 @@ class WritableStreamHandle(pydantic.BaseModel):
 
         # stamp the event with a timestamp
         if isinstance(validated, proto.LifecycleEvent) and validated.at is None:
-            validated.at = datetime.datetime.now(datetime.UTC)
+            validated.at = datetime.datetime.now(datetime.UTC).isoformat()
         return await storage.store().append(
             self.stream_id,
             self.namespace,
