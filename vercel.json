@@ -8,12 +8,12 @@
     },
     "backend": {
       "framework": "fastapi",
-      "entrypoint": "backend/main.py",
+      "entrypoint": "backend/app/server.py",
       "routePrefix": "/api"
     },
-    "workflow": {
+    "agent": {
       "type": "worker",
-      "entrypoint": "backend/workflows.py",
+      "entrypoint": "backend/app/worker.py",
       "topics": ["__wkf_*"]
     }
   }
