@@ -1,6 +1,11 @@
 {
   "fluid": true,
   "experimentalServices": {
+    "frontend": {
+      "framework": "vite",
+      "entrypoint": "frontend",
+      "routePrefix": "/"
+    },
     "trigger": {
       "framework": "fastapi",
       "entrypoint": "backend/durable_agent/_server.py",

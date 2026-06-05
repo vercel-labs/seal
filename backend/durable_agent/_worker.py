@@ -18,8 +18,8 @@ os.environ.setdefault(
     os.path.join(_BACKEND_DIR, ".workflow-data"),
 )
 os.environ.setdefault(
-    "SEAL_DURABLE_AGENT_STREAMS_DIR",
-    os.path.join(_BACKEND_DIR, ".durable_agent_streams"),
+    "SEAL_STREAMS_DIR",
+    os.path.join(_BACKEND_DIR, ".seal"),
 )
 
 import vercel._internal.workflow.py_sandbox  # noqa: E402

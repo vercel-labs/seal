@@ -12,7 +12,7 @@ venv/
 .env
 
 # Data
-data/
+.seal/
 
 # Vercel
 .vercel/

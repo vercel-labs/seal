@@ -171,6 +171,29 @@ async def get_readable(
         await asyncio.sleep(poll_interval)
 
 
+async def tail_index(
+    stream_id: str,
+    *,
+    namespace: str = DEFAULT_STREAM_NAMESPACE,
+) -> int:
+    """Return the last written index (``-1`` when the stream is empty)."""
+    await storage.ensure_ready()
+    index, _ = await storage.store().info(stream_id, namespace)
+    return index
+
+
+async def replay(
+    stream_id: str,
+    *,
+    namespace: str = DEFAULT_STREAM_NAMESPACE,
+    start_index: int = 0,
+) -> collections.abc.AsyncIterator[proto.StreamEvent]:
+    """Yield already-written events once, without tailing for new ones."""
+    await storage.ensure_ready()
+    for _, data in await storage.store().read(stream_id, namespace, start_index):
+        yield proto.STREAM_EVENT_ADAPTER.validate_python(data)
+
+
 # current design implies that get_writable gets called inside a step with session_id
 # if there's encryption involved, writable handle will have to be passed all the way
 # down session -> step -> turn -> step, in order for the turn step (e.g. llm call) to

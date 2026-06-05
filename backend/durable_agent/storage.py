@@ -84,11 +84,11 @@ class _JsonlStore:
     def _paths(
         self, stream_id: str, namespace: str
     ) -> tuple[pathlib.Path, pathlib.Path]:
-        configured = os.environ.get("SEAL_DURABLE_AGENT_STREAMS_DIR")
+        configured = os.environ.get("SEAL_STREAMS_DIR")
         root = (
             pathlib.Path(configured)
             if configured
-            else pathlib.Path(__file__).resolve().parents[1] / ".durable_agent_streams"
+            else pathlib.Path(__file__).resolve().parents[1] / ".seal"
         )
         directory = root / urllib.parse.quote(stream_id, safe="")
         name = urllib.parse.quote(namespace, safe="")
@@ -166,7 +166,7 @@ _schema_lock = asyncio.Lock()
 
 class _PgStore:
     async def _pool(self) -> typing.Any:
-        from core import db
+        from durable_agent import db
 
         return await db.get_pool()
 
