@@ -36,6 +36,33 @@ from agent import driver, proto, session, stream
 
 _TERMINAL = {proto.SESSION_WAITING, proto.SESSION_COMPLETED, proto.SESSION_FAILED}
 
+# events at which a turn stops reaching the client (see ``_turn_events``): the
+# session parks on a human decision or reaches a terminal state.
+_TURN_BOUNDARY = _TERMINAL | {proto.TOOL_APPROVAL_REQUESTED}
+
+
+async def active_turn_start_index(session_id: str) -> int | None:
+    """Return the stream index to resume an in-flight turn from, else ``None``.
+
+    A turn is in flight when the latest ``turn.started`` has no turn-boundary
+    event after it. Resuming :func:`to_sse` from that index replays the turn and
+    self-terminates at the same boundary the live stream did, so reload and live
+    render identically.
+    """
+    turn_start: int | None = None
+    seen_boundary = True
+    index = -1
+    async for event in stream.replay(session_id):
+        index += 1
+        if not isinstance(event, proto.LifecycleEvent):
+            continue
+        if event.type == proto.TURN_STARTED:
+            turn_start = index
+            seen_boundary = False
+        elif event.type in _TURN_BOUNDARY:
+            seen_boundary = True
+    return None if seen_boundary else turn_start
+
 
 async def start_or_resume(session_id: str, prompt: str) -> int:
     """Start a new session or resume a parked one.

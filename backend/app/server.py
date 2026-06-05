@@ -3,7 +3,7 @@
 Endpoints (mounted under ``/api`` by ``vercel.json``):
 
   POST /chat                     run a turn, stream the AI SDK UI message stream
-  GET  /chat/{id}/stream         resume an in-flight stream (not yet supported)
+  GET  /chat/{id}/stream         resume an in-flight stream
   GET  /sessions                 list sessions
   POST /sessions                 create a session
   GET  /sessions/{id}            session metadata + UI message history
@@ -123,8 +123,15 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
 
 @app.get("/chat/{session_id}/stream")
 async def resume_chat(session_id: str) -> fastapi.responses.Response:
-    # Stream resume after reconnect is not wired up yet.
-    return fastapi.responses.Response(status_code=204)
+    # ``useChat({ resume: true })`` GETs this on mount. Re-tail the durable
+    # stream from the in-flight turn's start; 204 when nothing is running.
+    start_index = await chat.active_turn_start_index(session_id)
+    if start_index is None:
+        return fastapi.responses.Response(status_code=204)
+    return fastapi.responses.StreamingResponse(
+        chat.to_sse(session_id, start_index),
+        headers=ai_sdk.UI_MESSAGE_STREAM_HEADERS,
+    )
 
 
 # --- sessions -----------------------------------------------------------------
