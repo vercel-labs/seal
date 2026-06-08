@@ -1,10 +1,5 @@
 import { useChat } from "@ai-sdk/react";
-import {
-  DefaultChatTransport,
-  getToolName,
-  isToolUIPart,
-  lastAssistantMessageIsCompleteWithApprovalResponses,
-} from "ai";
+import { DefaultChatTransport, getToolName, isToolUIPart } from "ai";
 import type {
   ChatAddToolApproveResponseFunction,
   UIDataTypes,
@@ -264,6 +259,38 @@ function renderPart({
 // ChatView -- keyed by sessionId so it fully remounts on session switch
 // ---------------------------------------------------------------------------
 
+function lastAssistantMessageIsCompleteWithSealApprovals({
+  messages,
+}: {
+  messages: UIMessage[];
+}): boolean {
+  const message = messages[messages.length - 1];
+
+  if (!message || message.role !== "assistant") {
+    return false;
+  }
+
+  const lastStepStartIndex = message.parts.reduce((lastIndex, part, index) => {
+    return part.type === "step-start" ? index : lastIndex;
+  }, -1);
+
+  const toolParts = message.parts
+    .slice(lastStepStartIndex + 1)
+    .filter(isToolUIPart);
+  const approvalParts = toolParts.filter((part) => part.approval);
+
+  return (
+    approvalParts.length > 0 &&
+    approvalParts.every((part) => part.state === "approval-responded") &&
+    toolParts.every((part) => {
+      if (part.approval || getToolName(part) === "subagent") {
+        return true;
+      }
+      return part.state === "output-available" || part.state === "output-error";
+    })
+  );
+}
+
 function ChatView({
   sessionId,
   initialMessages,
@@ -298,8 +325,7 @@ function ChatView({
       messages: initialMessages,
       resume: true,
       onFinish: onFinishReply,
-      sendAutomaticallyWhen:
-        lastAssistantMessageIsCompleteWithApprovalResponses,
+      sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithSealApprovals,
     });
 
   const isStreaming = status === "submitted" || status === "streaming";
