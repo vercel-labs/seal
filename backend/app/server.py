@@ -3,7 +3,7 @@
 Endpoints (mounted under ``/api`` by ``vercel.json``):
 
   POST /chat                     run a turn, stream the AI SDK UI message stream
-  GET  /chat/{id}/stream         resume an in-flight stream (not yet supported)
+  GET  /chat/{id}/stream         resume an in-flight stream
   GET  /sessions                 list sessions
   POST /sessions                 create a session
   GET  /sessions/{id}            session metadata + UI message history
@@ -38,6 +38,7 @@ vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
 
 import contextlib  # noqa: E402
 
+import ai  # noqa: E402
 import ai.agents.ui.ai_sdk as ai_sdk  # noqa: E402
 import fastapi  # noqa: E402
 import fastapi.middleware.cors  # noqa: E402
@@ -45,6 +46,7 @@ import fastapi.responses  # noqa: E402
 import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
+from agent import proto, stream  # noqa: E402
 from app import attachments, chat, sessions  # noqa: E402
 
 
@@ -79,15 +81,39 @@ class ChatRequest(pydantic.BaseModel):
 
 @app.post("/chat")
 async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
-    messages, _approvals = ai_sdk.to_messages(request.messages)
-    prompt = next(
-        (m.text for m in reversed(messages) if m.role == "user" and m.text), None
-    )
-    if prompt is None:
-        raise fastapi.HTTPException(status_code=400, detail="No user message to run")
-
+    messages, approvals = ai_sdk.to_messages(request.messages)
     await sessions.touch(request.session_id)
-    start_index = await chat.start_or_resume(request.session_id, prompt)
+
+    # ``sendAutomaticallyWhen`` resubmits the full history after the user responds
+    # to an approval, so the trailing message is the assistant turn that holds the
+    # answered tool part — not a new user message. That case resumes the parked
+    # turn with the decisions; a trailing user message starts a fresh turn.
+    is_approval_resume = bool(approvals) and not (
+        messages and messages[-1].role == "user"
+    )
+
+    if is_approval_resume:
+        await chat.submit_approvals(
+            request.session_id,
+            [
+                proto.ToolApprovalResponse(
+                    tool_call_id=approval.tool_call_id,
+                    granted=approval.granted,
+                    reason=approval.reason,
+                )
+                for approval in approvals
+            ],
+        )
+        start_index = await stream.tail_index(request.session_id) + 1
+    else:
+        prompt = next(
+            (m.text for m in reversed(messages) if m.role == "user" and m.text), None
+        )
+        if prompt is None:
+            raise fastapi.HTTPException(
+                status_code=400, detail="No user message to run"
+            )
+        start_index = await chat.start_or_resume(request.session_id, prompt)
 
     return fastapi.responses.StreamingResponse(
         chat.to_sse(request.session_id, start_index),
@@ -97,8 +123,15 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
 
 @app.get("/chat/{session_id}/stream")
 async def resume_chat(session_id: str) -> fastapi.responses.Response:
-    # Stream resume after reconnect is not wired up yet.
-    return fastapi.responses.Response(status_code=204)
+    # ``useChat({ resume: true })`` GETs this on mount. Re-tail the durable
+    # stream from the in-flight run's start; 204 when nothing is running.
+    start_index = await chat.active_run_start_index(session_id)
+    if start_index is None:
+        return fastapi.responses.Response(status_code=204)
+    return fastapi.responses.StreamingResponse(
+        chat.to_sse(session_id, start_index),
+        headers=ai_sdk.UI_MESSAGE_STREAM_HEADERS,
+    )
 
 
 # --- sessions -----------------------------------------------------------------
@@ -125,12 +158,32 @@ async def get_session(session_id: str) -> dict[str, object]:
     if meta is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
     ui_messages = ai_sdk.to_ui_messages(await sessions.history(session_id))
-    return {
-        **meta.model_dump(),
-        "messages": [
-            message.model_dump(mode="json", by_alias=True) for message in ui_messages
-        ],
-    }
+    serialized = [
+        message.model_dump(mode="json", by_alias=True) for message in ui_messages
+    ]
+    # the driver stores each subagent result as a MessageBundle so the model sees
+    # the summary while the UI gets the full transcript. to_ui_messages passes that
+    # bundle through verbatim ({messages: [...]}); rebuild it into the same nested
+    # UIMessage the live stream emits so reload and live render identically.
+    for message in serialized:
+        for part in message["parts"]:
+            is_subagent = part.get("type") == "tool-subagent" or (
+                part.get("type") == "dynamic-tool"
+                and part.get("toolName") == "subagent"
+            )
+            output = part.get("output")
+            if (
+                is_subagent
+                and isinstance(output, dict)
+                and "messages" in output
+                and "parts" not in output
+            ):
+                transcript = [
+                    ai.messages.Message.model_validate(raw)
+                    for raw in output["messages"]
+                ]
+                part["output"] = chat.bundle_to_wire(transcript)
+    return {**meta.model_dump(), "messages": serialized}
 
 
 @app.post("/sessions/{session_id}/title")
