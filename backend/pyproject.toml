@@ -30,6 +30,12 @@ src = ["."]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 30
+
 [tool.uv]
 exclude-newer = "2 days"
 
@@ -43,5 +49,7 @@ dev = [
     "pydantic>=2.12.5",
     "pyright>=1.1.400",
     "pytest>=9.0.2",
+    "pytest-asyncio>=1.4.0",
+    "pytest-timeout>=2.4.0",
     "ruff>=0.15.5",
 ]
