@@ -17,11 +17,9 @@ python_version = "3.13"
 strict = true
 plugins = ["pydantic.mypy"]
 
-[tool.pyright]
-pythonVersion = "3.13"
-typeCheckingMode = "standard"
-reportMissingTypeStubs = false
-reportUnusedCallResult = false
+[tool.ty.environment]
+python-version = "3.13"
+root = ["./"]
 
 [tool.ruff]
 target-version = "py313"
@@ -47,9 +45,9 @@ vercel = { git = "https://github.com/vercel/vercel-py", rev = "47d881242e35b18dc
 dev = [
     "mypy>=1.19.1",
     "pydantic>=2.12.5",
-    "pyright>=1.1.400",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.4.0",
     "pytest-timeout>=2.4.0",
     "ruff>=0.15.5",
+    "ty~=0.0.37",
 ]
