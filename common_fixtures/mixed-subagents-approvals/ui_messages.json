@@ -1,0 +1,127 @@
+[
+ {
+  "id": "msg_35ddc75ee810",
+  "role": "system",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_35ddc75ee810",
+      "role": "system",
+      "turnId": null,
+      "partIds": [
+       "part_0fc9bf8ce3c1"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work.",
+    "state": null,
+    "providerMetadata": null
+   }
+  ]
+ },
+ {
+  "id": "msg_4dc0f6ae1b30",
+  "role": "user",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_4dc0f6ae1b30",
+      "role": "user",
+      "turnId": null,
+      "partIds": [
+       "part_21d8b14c0d5a"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "delegate and run",
+    "state": null,
+    "providerMetadata": null
+   }
+  ]
+ },
+ {
+  "id": "msg_d0eb546182af",
+  "role": "assistant",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_d0eb546182af",
+      "role": "assistant",
+      "turnId": null,
+      "partIds": [
+       "text-0",
+       "tc-sub",
+       "tc-cmd"
+      ]
+     },
+     {
+      "id": "msg_c8e4fc06dbd4",
+      "role": "tool",
+      "turnId": null,
+      "partIds": [
+       "part_ab99c8fc7ce3"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "delegating and running",
+    "state": null,
+    "providerMetadata": null
+   },
+   {
+    "type": "tool-subagent",
+    "toolCallId": "tc-sub",
+    "state": "input-available",
+    "input": {
+     "prompt": "task-gamma",
+     "name": "gamma"
+    },
+    "output": null,
+    "rawInput": null,
+    "errorText": null,
+    "approval": null,
+    "providerExecuted": null,
+    "callProviderMetadata": null,
+    "resultProviderMetadata": null,
+    "toolMetadata": null,
+    "preliminary": null,
+    "title": null
+   },
+   {
+    "type": "tool-bash",
+    "toolCallId": "tc-cmd",
+    "state": "input-available",
+    "input": {
+     "command": "echo gamma-out"
+    },
+    "output": null,
+    "rawInput": null,
+    "errorText": null,
+    "approval": null,
+    "providerExecuted": null,
+    "callProviderMetadata": null,
+    "resultProviderMetadata": null,
+    "toolMetadata": null,
+    "preliminary": null,
+    "title": null
+   }
+  ]
+ }
+]

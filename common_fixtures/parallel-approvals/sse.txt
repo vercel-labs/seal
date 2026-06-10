@@ -1,0 +1,28 @@
+data: {"type": "start", "messageId": "msg_497bc949fe42"}
+
+data: {"type": "start-step"}
+
+data: {"id": "text-0", "type": "text-start"}
+
+data: {"id": "text-0", "delta": "running both", "type": "text-delta"}
+
+data: {"id": "text-0", "type": "text-end"}
+
+data: {"toolCallId": "tc-a", "toolName": "bash", "type": "tool-input-start"}
+
+data: {"toolCallId": "tc-a", "inputTextDelta": "{\"command\": \"echo alpha-out\"}", "type": "tool-input-delta"}
+
+data: {"toolCallId": "tc-b", "toolName": "bash", "type": "tool-input-start"}
+
+data: {"toolCallId": "tc-b", "inputTextDelta": "{\"command\": \"echo beta-out\"}", "type": "tool-input-delta"}
+
+data: {"approvalId": "approve_tc-a", "toolCallId": "tc-a", "type": "tool-approval-request"}
+
+data: {"approvalId": "approve_tc-b", "toolCallId": "tc-b", "type": "tool-approval-request"}
+
+data: {"type": "finish-step"}
+
+data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_497bc949fe42", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-a", "tc-b"]}, {"id": "msg_965addc2b93a", "role": "internal", "turnId": null, "partIds": ["part_21d55b085284"]}, {"id": "msg_56d42f190b67", "role": "internal", "turnId": null, "partIds": ["part_e48b44b55805"]}, {"id": "msg_1d30a21c1da3", "role": "tool", "turnId": null, "partIds": ["part_77c061c92ee4"]}, {"id": "msg_bfaf865e944c", "role": "tool", "turnId": null, "partIds": ["part_35db2d09bac3"]}]}}}
+
+data: [DONE]
+

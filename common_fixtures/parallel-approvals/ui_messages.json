@@ -1,0 +1,127 @@
+[
+ {
+  "id": "msg_90a1f0ce726b",
+  "role": "system",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_90a1f0ce726b",
+      "role": "system",
+      "turnId": null,
+      "partIds": [
+       "part_80e058b72168"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work.",
+    "state": null,
+    "providerMetadata": null
+   }
+  ]
+ },
+ {
+  "id": "msg_901604d0eb9c",
+  "role": "user",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_901604d0eb9c",
+      "role": "user",
+      "turnId": null,
+      "partIds": [
+       "part_50ed658708a5"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "run both commands",
+    "state": null,
+    "providerMetadata": null
+   }
+  ]
+ },
+ {
+  "id": "msg_497bc949fe42",
+  "role": "assistant",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_497bc949fe42",
+      "role": "assistant",
+      "turnId": null,
+      "partIds": [
+       "text-0",
+       "tc-a",
+       "tc-b"
+      ]
+     },
+     {
+      "id": "msg_0f1413141abc",
+      "role": "tool",
+      "turnId": null,
+      "partIds": [
+       "part_fdaa9d844bc9",
+       "part_9e43622e2e54"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "running both",
+    "state": null,
+    "providerMetadata": null
+   },
+   {
+    "type": "tool-bash",
+    "toolCallId": "tc-a",
+    "state": "input-available",
+    "input": {
+     "command": "echo alpha-out"
+    },
+    "output": null,
+    "rawInput": null,
+    "errorText": null,
+    "approval": null,
+    "providerExecuted": null,
+    "callProviderMetadata": null,
+    "resultProviderMetadata": null,
+    "toolMetadata": null,
+    "preliminary": null,
+    "title": null
+   },
+   {
+    "type": "tool-bash",
+    "toolCallId": "tc-b",
+    "state": "input-available",
+    "input": {
+     "command": "echo beta-out"
+    },
+    "output": null,
+    "rawInput": null,
+    "errorText": null,
+    "approval": null,
+    "providerExecuted": null,
+    "callProviderMetadata": null,
+    "resultProviderMetadata": null,
+    "toolMetadata": null,
+    "preliminary": null,
+    "title": null
+   }
+  ]
+ }
+]

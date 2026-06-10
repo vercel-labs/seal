@@ -1,0 +1,26 @@
+data: {"type": "start", "messageId": "msg_d0eb546182af"}
+
+data: {"type": "start-step"}
+
+data: {"id": "text-0", "type": "text-start"}
+
+data: {"id": "text-0", "delta": "delegating and running", "type": "text-delta"}
+
+data: {"id": "text-0", "type": "text-end"}
+
+data: {"toolCallId": "tc-sub", "toolName": "subagent", "type": "tool-input-start"}
+
+data: {"toolCallId": "tc-sub", "inputTextDelta": "{\"prompt\": \"task-gamma\", \"name\": \"gamma\"}", "type": "tool-input-delta"}
+
+data: {"toolCallId": "tc-cmd", "toolName": "bash", "type": "tool-input-start"}
+
+data: {"toolCallId": "tc-cmd", "inputTextDelta": "{\"command\": \"echo gamma-out\"}", "type": "tool-input-delta"}
+
+data: {"approvalId": "approve_tc-cmd", "toolCallId": "tc-cmd", "type": "tool-approval-request"}
+
+data: {"type": "finish-step"}
+
+data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_d0eb546182af", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sub", "tc-cmd"]}, {"id": "msg_782630bc3744", "role": "internal", "turnId": null, "partIds": ["part_05954010e668"]}, {"id": "msg_bbb7f97d3478", "role": "tool", "turnId": null, "partIds": ["part_8e5740f688f6"]}]}}}
+
+data: [DONE]
+

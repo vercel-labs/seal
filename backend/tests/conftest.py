@@ -23,12 +23,16 @@ import pydantic
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for `import harness`
 
 import ai  # noqa: E402
 import ai.models as models  # noqa: E402
 import ai.types.events as events_  # noqa: E402
 import ai.types.messages as messages_  # noqa: E402
+import harness  # noqa: E402
+import vercel._internal.workflow.world as wf_world  # noqa: E402
 
+import agent  # noqa: E402
 from agent import storage  # noqa: E402
 
 
@@ -47,11 +51,21 @@ def _isolate_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
 
 
 class MockProvider(models.Provider):
-    """Provider whose ``stream`` replays scripted responses (no network)."""
+    """Provider whose ``stream`` replays scripted responses (no network).
+
+    ``responses`` is a FIFO of turns. ``keyed_responses`` maps a substring of
+    the conversation's last user message to a response; it wins over the FIFO
+    and is not consumed. Concurrent sessions (parallel subagents) hit the
+    model in nondeterministic order, so their responses must be keyed by the
+    child's prompt — both to keep regeneration stable and to keep each child's
+    content distinct, which is what lets a test catch a transcript attached to
+    the wrong tool call.
+    """
 
     def __init__(self) -> None:
         super().__init__(name="mock", base_url="http://mock.test", api_key_env=None)
         self.responses: list[list[messages_.Message]] = []
+        self.keyed_responses: dict[str, list[messages_.Message]] = {}
         self.call_count = 0
 
     async def list_models(self) -> list[str]:
@@ -67,9 +81,13 @@ class MockProvider(models.Provider):
         params: Any = None,
         protocol: Any = None,
     ) -> AsyncGenerator[events_.Event]:
+        self.call_count += 1
+        last_user = next((m.text for m in reversed(messages) if m.role == "user"), "")
+        for key, response in self.keyed_responses.items():
+            if key in last_user:
+                return _emit_events(response)
         if not self.responses:
             raise RuntimeError("MockProvider: no more responses configured")
-        self.call_count += 1
         return _emit_events(self.responses.pop(0))
 
     async def generate(
@@ -116,9 +134,34 @@ async def _emit_events(
 def mock_llm() -> Iterator[MockProvider]:
     """Reset the scripted provider; tests append to ``responses``."""
     MOCK_PROVIDER.responses = []
+    MOCK_PROVIDER.keyed_responses = {}
     MOCK_PROVIDER.call_count = 0
     yield MOCK_PROVIDER
     MOCK_PROVIDER.responses = []
+    MOCK_PROVIDER.keyed_responses = {}
+
+
+# --- in-process engine fixtures ---------------------------------------------------
+
+
+@pytest.fixture
+async def world() -> AsyncGenerator[harness.InProcessWorld]:
+    bridged = harness.InProcessWorld(agent.workflow)
+    wf_world.set_world(bridged)
+    yield bridged
+    for task in list(bridged._tasks):
+        task.cancel()
+    wf_world.set_world(None)
+    assert bridged.errors == [], f"workflow delivery errors: {bridged.errors}"
+
+
+@pytest.fixture
+def scripted_model(
+    monkeypatch: pytest.MonkeyPatch, mock_llm: MockProvider
+) -> MockProvider:
+    model = models.Model(id="mock-model", provider=mock_llm)
+    monkeypatch.setattr(ai, "get_model", lambda model_id=None, **kwargs: model)
+    return mock_llm
 
 
 # --- message builders -----------------------------------------------------------

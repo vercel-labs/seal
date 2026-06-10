@@ -11,6 +11,8 @@ import type { FileUIPart } from "ai";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
+import { lastAssistantMessageIsCompleteWithSealApprovals } from "@/lib/approvals";
+
 import {
   Attachment,
   AttachmentPreview,
@@ -258,38 +260,6 @@ function renderPart({
 // ---------------------------------------------------------------------------
 // ChatView -- keyed by sessionId so it fully remounts on session switch
 // ---------------------------------------------------------------------------
-
-function lastAssistantMessageIsCompleteWithSealApprovals({
-  messages,
-}: {
-  messages: UIMessage[];
-}): boolean {
-  const message = messages[messages.length - 1];
-
-  if (!message || message.role !== "assistant") {
-    return false;
-  }
-
-  const lastStepStartIndex = message.parts.reduce((lastIndex, part, index) => {
-    return part.type === "step-start" ? index : lastIndex;
-  }, -1);
-
-  const toolParts = message.parts
-    .slice(lastStepStartIndex + 1)
-    .filter(isToolUIPart);
-  const approvalParts = toolParts.filter((part) => part.approval);
-
-  return (
-    approvalParts.length > 0 &&
-    approvalParts.every((part) => part.state === "approval-responded") &&
-    toolParts.every((part) => {
-      if (part.approval || getToolName(part) === "subagent") {
-        return true;
-      }
-      return part.state === "output-available" || part.state === "output-error";
-    })
-  );
-}
 
 function ChatView({
   sessionId,

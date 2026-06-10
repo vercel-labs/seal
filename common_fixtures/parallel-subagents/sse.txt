@@ -1,0 +1,50 @@
+data: {"type": "start", "messageId": "msg_f14485edde4b"}
+
+data: {"type": "start-step"}
+
+data: {"id": "text-0", "type": "text-start"}
+
+data: {"id": "text-0", "delta": "delegating to both", "type": "text-delta"}
+
+data: {"id": "text-0", "type": "text-end"}
+
+data: {"toolCallId": "tc-sa", "toolName": "subagent", "type": "tool-input-start"}
+
+data: {"toolCallId": "tc-sa", "inputTextDelta": "{\"prompt\": \"task-alpha\", \"name\": \"alpha\"}", "type": "tool-input-delta"}
+
+data: {"toolCallId": "tc-sb", "toolName": "subagent", "type": "tool-input-start"}
+
+data: {"toolCallId": "tc-sb", "inputTextDelta": "{\"prompt\": \"task-beta\", \"name\": \"beta\"}", "type": "tool-input-delta"}
+
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_372a95176dfa", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_372a95176dfa", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_372a95176dfa", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_372a95176dfa", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_372a95176dfa", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_372a95176dfa", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_372a95176dfa", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_372a95176dfa", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_372a95176dfa", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_372a95176dfa", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_3a670b41c658", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_3a670b41c658", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_3a670b41c658", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_3a670b41c658", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_3a670b41c658", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_3a670b41c658", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_3a670b41c658", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_3a670b41c658", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_3a670b41c658", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_3a670b41c658", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"id": "text-0", "type": "text-start"}
+
+data: {"id": "text-0", "delta": "combined findings", "type": "text-delta"}
+
+data: {"id": "text-0", "type": "text-end"}
+
+data: {"type": "finish-step"}
+
+data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_f14485edde4b", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sa", "tc-sb"]}, {"id": "msg_302792e15b60", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}}
+
+data: [DONE]
+

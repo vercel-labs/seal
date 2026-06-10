@@ -1,0 +1,193 @@
+[
+ {
+  "id": "msg_c1f0af65d7a6",
+  "role": "system",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_c1f0af65d7a6",
+      "role": "system",
+      "turnId": null,
+      "partIds": [
+       "part_eaf318fb2a36"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work.",
+    "state": null,
+    "providerMetadata": null
+   }
+  ]
+ },
+ {
+  "id": "msg_e2a2ad9495c9",
+  "role": "user",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_e2a2ad9495c9",
+      "role": "user",
+      "turnId": null,
+      "partIds": [
+       "part_b17adb595322"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "delegate to two helpers",
+    "state": null,
+    "providerMetadata": null
+   }
+  ]
+ },
+ {
+  "id": "msg_f14485edde4b",
+  "role": "assistant",
+  "metadata": {
+   "aiPython": {
+    "sourceMessages": [
+     {
+      "id": "msg_f14485edde4b",
+      "role": "assistant",
+      "turnId": null,
+      "partIds": [
+       "text-0",
+       "tc-sa",
+       "tc-sb"
+      ]
+     },
+     {
+      "id": "msg_41cc1c9b53b2",
+      "role": "tool",
+      "turnId": null,
+      "partIds": [
+       "part_00b567e2511d",
+       "part_9faafc7fc63a"
+      ]
+     },
+     {
+      "id": "msg_302792e15b60",
+      "role": "assistant",
+      "turnId": null,
+      "partIds": [
+       "text-0"
+      ]
+     }
+    ]
+   }
+  },
+  "parts": [
+   {
+    "type": "text",
+    "text": "delegating to both",
+    "state": null,
+    "providerMetadata": null
+   },
+   {
+    "type": "tool-subagent",
+    "toolCallId": "tc-sa",
+    "state": "output-available",
+    "input": {
+     "prompt": "task-alpha",
+     "name": "alpha"
+    },
+    "output": {
+     "id": "msg_372a95176dfa",
+     "role": "assistant",
+     "metadata": {
+      "aiPython": {
+       "sourceMessages": [
+        {
+         "id": "msg_372a95176dfa",
+         "role": "assistant",
+         "turnId": null,
+         "partIds": [
+          "text-0"
+         ]
+        }
+       ]
+      }
+     },
+     "parts": [
+      {
+       "type": "text",
+       "text": "alpha report",
+       "state": null,
+       "providerMetadata": null
+      }
+     ]
+    },
+    "rawInput": null,
+    "errorText": null,
+    "approval": null,
+    "providerExecuted": null,
+    "callProviderMetadata": null,
+    "resultProviderMetadata": null,
+    "toolMetadata": null,
+    "preliminary": null,
+    "title": null
+   },
+   {
+    "type": "tool-subagent",
+    "toolCallId": "tc-sb",
+    "state": "output-available",
+    "input": {
+     "prompt": "task-beta",
+     "name": "beta"
+    },
+    "output": {
+     "id": "msg_3a670b41c658",
+     "role": "assistant",
+     "metadata": {
+      "aiPython": {
+       "sourceMessages": [
+        {
+         "id": "msg_3a670b41c658",
+         "role": "assistant",
+         "turnId": null,
+         "partIds": [
+          "text-0"
+         ]
+        }
+       ]
+      }
+     },
+     "parts": [
+      {
+       "type": "text",
+       "text": "beta report",
+       "state": null,
+       "providerMetadata": null
+      }
+     ]
+    },
+    "rawInput": null,
+    "errorText": null,
+    "approval": null,
+    "providerExecuted": null,
+    "callProviderMetadata": null,
+    "resultProviderMetadata": null,
+    "toolMetadata": null,
+    "preliminary": null,
+    "title": null
+   },
+   {
+    "type": "text",
+    "text": "combined findings",
+    "state": null,
+    "providerMetadata": null
+   }
+  ]
+ }
+]
