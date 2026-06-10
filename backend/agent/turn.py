@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+import traceback
 from collections.abc import AsyncGenerator
 from typing import Any, ClassVar, cast
 
@@ -348,6 +349,18 @@ resume_turn_hook.max_retries = 0
 # runs one agent turn, maybe requests subagents
 @workflow.workflow
 async def run_turn(turn_input: dict[str, Any]) -> None:
+    try:
+        return await _run_turn(turn_input)
+    except Exception:
+        print(
+            f"[seal] run_turn failed:\n{traceback.format_exc()}",
+            flush=True,
+        )
+        # XXX: some sort of cleanup?
+        raise
+
+
+async def _run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
     messages = _turn_input.messages
 
@@ -418,6 +431,10 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             kind="error",
             messages=messages,
             error=f"{type(error).__name__}: {error}",
+        )
+        print(
+            f"[seal] error in run_turn:\n{traceback.format_exc()}",
+            flush=True,
         )
     else:
         # create normal output if the run has completed successfully

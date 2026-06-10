@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 from typing import Any
 
 import ai
@@ -94,6 +95,18 @@ def _last_text(messages: list[ai.messages.Message]) -> str:
 
 @workflow.workflow
 async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return await _run_session(session_input)
+    except Exception:
+        print(
+            f"[seal] run_session failed:\n{traceback.format_exc()}",
+            flush=True,
+        )
+        # XXX: do something about subagent sessions?
+        raise
+
+
+async def _run_session(session_input: dict[str, Any]) -> dict[str, Any]:
     # prepare the session
     _session_input = proto.SessionInput.model_validate(session_input)
     session_id = _session_input.session_id
