@@ -24,7 +24,7 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy .
-      - run: uv run pyright .
+      - run: uv run ty check
 
       - run: uv run pytest || test $? -eq 5  # allow "no tests collected"
 
@@ -51,4 +51,5 @@ jobs:
       - run: pnpm run format:check
       - run: pnpm run lint
       - run: pnpm run typecheck
+      - run: pnpm run test
       - run: pnpm run build

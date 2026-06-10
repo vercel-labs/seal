@@ -1,0 +1,102 @@
+{
+ "session_id": "s1",
+ "messages": [
+  {
+   "parts": [
+    {
+     "type": "text",
+     "text": "run both commands"
+    }
+   ],
+   "id": "msg_000000000000",
+   "role": "user"
+  },
+  {
+   "id": "msg_497bc949fe42",
+   "metadata": {
+    "aiPython": {
+     "sourceMessages": [
+      {
+       "id": "msg_497bc949fe42",
+       "role": "assistant",
+       "turnId": null,
+       "partIds": [
+        "text-0",
+        "tc-a",
+        "tc-b"
+       ]
+      },
+      {
+       "id": "msg_965addc2b93a",
+       "role": "internal",
+       "turnId": null,
+       "partIds": [
+        "part_21d55b085284"
+       ]
+      },
+      {
+       "id": "msg_56d42f190b67",
+       "role": "internal",
+       "turnId": null,
+       "partIds": [
+        "part_e48b44b55805"
+       ]
+      },
+      {
+       "id": "msg_1d30a21c1da3",
+       "role": "tool",
+       "turnId": null,
+       "partIds": [
+        "part_77c061c92ee4"
+       ]
+      },
+      {
+       "id": "msg_bfaf865e944c",
+       "role": "tool",
+       "turnId": null,
+       "partIds": [
+        "part_35db2d09bac3"
+       ]
+      }
+     ]
+    }
+   },
+   "role": "assistant",
+   "parts": [
+    {
+     "type": "step-start"
+    },
+    {
+     "type": "text",
+     "text": "running both",
+     "state": "done"
+    },
+    {
+     "type": "tool-bash",
+     "toolCallId": "tc-a",
+     "state": "approval-responded",
+     "input": {
+      "command": "echo alpha-out"
+     },
+     "approval": {
+      "id": "approve_tc-a",
+      "approved": true
+     }
+    },
+    {
+     "type": "tool-bash",
+     "toolCallId": "tc-b",
+     "state": "approval-responded",
+     "input": {
+      "command": "echo beta-out"
+     },
+     "approval": {
+      "id": "approve_tc-b",
+      "approved": false,
+      "reason": "not today"
+     }
+    }
+   ]
+  }
+ ]
+}
