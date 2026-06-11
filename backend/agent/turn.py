@@ -30,9 +30,10 @@ class WorkflowModelProvider(ai.Provider[Any]):
 # end of hack
 
 
-# hack: smuggle hidden Message.replay and ToolCallPart.cached_result
-# through llm_step json boundary. they are stamped by agent.run before the loop.
-# without this replay doesn't work.
+# hack: smuggle hidden Message.replay, ToolCallPart.cached_result, and
+# ToolResultPart._model_input through llm_step json boundary. they are stamped
+# by agent.run before the loop. without this replay and aggregator-backed tool
+# results (MessageBundle) don't survive the step serialization round-trip.
 def _dump_message(message: ai.messages.Message) -> dict[str, object]:
     data = message.model_dump(mode="json")
     data["_replay"] = message.replay
@@ -42,18 +43,25 @@ def _dump_message(message: ai.messages.Message) -> dict[str, object]:
             cached[part.tool_call_id] = part.cached_result.model_dump(mode="json")
     if cached:
         data["_cached_results"] = cached
+    model_inputs: dict[str, object] = {}
+    for result_part in message.tool_results:
+        if result_part.has_model_input:
+            model_inputs[result_part.tool_call_id] = result_part.get_model_input()
+    if model_inputs:
+        data["_model_inputs"] = model_inputs
     return data
 
 
 def _load_message(data: dict[str, object]) -> ai.messages.Message:
     replay = bool(data.pop("_replay", False))
     cached_raw = cast(dict[str, object], data.pop("_cached_results", {}) or {})
+    model_inputs_raw = cast(dict[str, object], data.pop("_model_inputs", {}) or {})
     cached = {
         tool_call_id: ai.messages.ToolResultPart.model_validate(result)
         for tool_call_id, result in cached_raw.items()
     }
     message = ai.messages.Message.model_validate(data)
-    if cached:
+    if cached or model_inputs_raw:
         new_parts: list[ai.messages.Part] = []
         for part in message.parts:
             if (
@@ -63,6 +71,11 @@ def _load_message(data: dict[str, object]) -> ai.messages.Message:
                 part = part.model_copy(
                     update={"cached_result": cached[part.tool_call_id]}
                 )
+            if (
+                isinstance(part, ai.messages.ToolResultPart)
+                and part.tool_call_id in model_inputs_raw
+            ):
+                part.set_model_input(model_inputs_raw[part.tool_call_id])
             new_parts.append(part)
         message = message.model_copy(update={"parts": new_parts})
     if replay:

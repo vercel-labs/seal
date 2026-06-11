@@ -1,16 +1,16 @@
 [
  {
-  "id": "msg_c1f0af65d7a6",
+  "id": "msg_7853c46cb626",
   "role": "system",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_c1f0af65d7a6",
+      "id": "msg_7853c46cb626",
       "role": "system",
       "turnId": null,
       "partIds": [
-       "part_eaf318fb2a36"
+       "part_05327932e5fe"
       ]
      }
     ]
@@ -26,17 +26,17 @@
   ]
  },
  {
-  "id": "msg_e2a2ad9495c9",
+  "id": "msg_3f41403e4875",
   "role": "user",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_e2a2ad9495c9",
+      "id": "msg_3f41403e4875",
       "role": "user",
       "turnId": null,
       "partIds": [
-       "part_b17adb595322"
+       "part_3d7501ff82e6"
       ]
      }
     ]
@@ -52,13 +52,13 @@
   ]
  },
  {
-  "id": "msg_f14485edde4b",
+  "id": "msg_c2cac00d0d1e",
   "role": "assistant",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_f14485edde4b",
+      "id": "msg_c2cac00d0d1e",
       "role": "assistant",
       "turnId": null,
       "partIds": [
@@ -68,23 +68,27 @@
       ]
      },
      {
-      "id": "msg_41cc1c9b53b2",
+      "id": "msg_4aa1329e75b2",
       "role": "tool",
       "turnId": null,
       "partIds": [
-       "part_00b567e2511d",
-       "part_9faafc7fc63a"
+       "part_d2de73892855",
+       "part_42b4de89fcf1"
       ]
      },
      {
-      "id": "msg_302792e15b60",
+      "id": "msg_293295b028d5",
       "role": "assistant",
       "turnId": null,
       "partIds": [
        "text-0"
       ]
      }
-    ]
+    ],
+    "toolResultKinds": {
+     "tc-sa": "messages",
+     "tc-sb": "messages"
+    }
    }
   },
   "parts": [
@@ -103,13 +107,13 @@
      "name": "alpha"
     },
     "output": {
-     "id": "msg_372a95176dfa",
+     "id": "msg_fda0e95c6410",
      "role": "assistant",
      "metadata": {
       "aiPython": {
        "sourceMessages": [
         {
-         "id": "msg_372a95176dfa",
+         "id": "msg_fda0e95c6410",
          "role": "assistant",
          "turnId": null,
          "partIds": [
@@ -124,7 +128,7 @@
        "type": "text",
        "text": "alpha report",
        "state": null,
-       "providerMetadata": null
+       "provider_metadata": null
       }
      ]
     },
@@ -147,13 +151,13 @@
      "name": "beta"
     },
     "output": {
-     "id": "msg_3a670b41c658",
+     "id": "msg_0829ca2c9d15",
      "role": "assistant",
      "metadata": {
       "aiPython": {
        "sourceMessages": [
         {
-         "id": "msg_3a670b41c658",
+         "id": "msg_0829ca2c9d15",
          "role": "assistant",
          "turnId": null,
          "partIds": [
@@ -168,7 +172,7 @@
        "type": "text",
        "text": "beta report",
        "state": null,
-       "providerMetadata": null
+       "provider_metadata": null
       }
      ]
     },
