@@ -392,6 +392,8 @@ async def test_bash_scheduled_before_subagent(
     bundle = ai.agents.MessageBundle.model_validate(results["tc-sub"].result)
     assert bundle.messages[-1].text == "delta report"
     await assert_stream_invariants("s1", state.messages)
+    await world.drain()
+    await world.check_step_serialization()
 
 
 async def test_subagent_scheduled_before_bash(
@@ -429,6 +431,8 @@ async def test_subagent_scheduled_before_bash(
     bundle = ai.agents.MessageBundle.model_validate(results["tc-sub"].result)
     assert bundle.messages[-1].text == "edge report"
     await assert_stream_invariants("s1", state.messages)
+    await world.drain()
+    await world.check_step_serialization()
 
 
 async def test_web_fetch_scheduled_before_gated_bash(
