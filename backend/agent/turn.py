@@ -2,7 +2,7 @@ import asyncio
 import dataclasses
 import json
 import traceback
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any, ClassVar, cast
 
 import ai
@@ -22,21 +22,18 @@ SUBAGENT_SYSTEM_PROMPT = (
 
 # hack: agent.run requires model, but can't actually pass it to ai.stream
 # that's wrapped in a step
-class _WorkflowModelProvider(ai.Provider[Any]):
+class WorkflowModelProvider(ai.Provider[Any]):
     def __init__(self) -> None:
         super().__init__(name="workflow-placeholder", base_url="")
-
-
-def _workflow_model() -> ai.Model:
-    return ai.Model("workflow-placeholder", provider=_WorkflowModelProvider())
 
 
 # end of hack
 
 
-# hack: smuggle hidden Message.replay and ToolCallPart.cached_result
-# through llm_step json boundary. they are stamped by agent.run before the loop.
-# without this replay doesn't work.
+# hack: smuggle hidden Message.replay, ToolCallPart.cached_result, and
+# ToolResultPart._model_input through llm_step json boundary. they are stamped
+# by agent.run before the loop. without this replay and aggregator-backed tool
+# results (MessageBundle) don't survive the step serialization round-trip.
 def _dump_message(message: ai.messages.Message) -> dict[str, object]:
     data = message.model_dump(mode="json")
     data["_replay"] = message.replay
@@ -46,18 +43,25 @@ def _dump_message(message: ai.messages.Message) -> dict[str, object]:
             cached[part.tool_call_id] = part.cached_result.model_dump(mode="json")
     if cached:
         data["_cached_results"] = cached
+    model_inputs: dict[str, object] = {}
+    for result_part in message.tool_results:
+        if result_part.has_model_input:
+            model_inputs[result_part.tool_call_id] = result_part.get_model_input()
+    if model_inputs:
+        data["_model_inputs"] = model_inputs
     return data
 
 
 def _load_message(data: dict[str, object]) -> ai.messages.Message:
     replay = bool(data.pop("_replay", False))
     cached_raw = cast(dict[str, object], data.pop("_cached_results", {}) or {})
+    model_inputs_raw = cast(dict[str, object], data.pop("_model_inputs", {}) or {})
     cached = {
         tool_call_id: ai.messages.ToolResultPart.model_validate(result)
         for tool_call_id, result in cached_raw.items()
     }
     message = ai.messages.Message.model_validate(data)
-    if cached:
+    if cached or model_inputs_raw:
         new_parts: list[ai.messages.Part] = []
         for part in message.parts:
             if (
@@ -67,6 +71,11 @@ def _load_message(data: dict[str, object]) -> ai.messages.Message:
                 part = part.model_copy(
                     update={"cached_result": cached[part.tool_call_id]}
                 )
+            if (
+                isinstance(part, ai.messages.ToolResultPart)
+                and part.tool_call_id in model_inputs_raw
+            ):
+                part.set_model_input(model_inputs_raw[part.tool_call_id])
             new_parts.append(part)
         message = message.model_copy(update={"parts": new_parts})
     if replay:
@@ -245,12 +254,22 @@ class DurableAgent(ai.Agent):
     # bash is gated/ungated per mode, so it is supplied via tools=, not here.
     TOOLS: ClassVar[list[ai.AgentTool]] = [web_fetch]
 
-    async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
-        params = context.params if isinstance(context.params, dict) else {}
-        model_id = str(params.get("model_id") or MODEL_ID)
+    # ``run(params=...)`` is typed inference params now, so the durable plumbing
+    # (model id, stream target, subagent side-channel) lives on the instance.
+    def __init__(
+        self,
+        *,
+        tools: Sequence[ai.AgentTool | ai.Tool] | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        super().__init__(tools=tools)
+        self.session_id = session_id
+        # side-channel for exfiltrating subagent requests out of the loop
+        self.pending_subagents: list[dict[str, object]] = []
 
-        control = cast(dict[str, object], params["control"])
-        session_id = cast(str | None, params.get("session_id"))
+    async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
+        model_id = context.model.id
+        session_id = self.session_id
 
         while context.keep_running():
             result = await llm_step(
@@ -317,7 +336,7 @@ class DurableAgent(ai.Agent):
                 context.add(ai.messages.Message(role="tool", parts=[]))
 
             if pending_subagents:
-                control["pending_subagents"] = [
+                self.pending_subagents = [
                     request.model_dump(mode="json") for request in pending_subagents
                 ]
                 break
@@ -368,12 +387,10 @@ async def _run_turn(turn_input: dict[str, Any]) -> None:
     # or the tool result message, so no need to do anything
 
     extra_tools = [bash_ungated] if _turn_input.mode == "task" else [bash, subagent]
-    agent = DurableAgent(tools=extra_tools)
-
-    # side-channel for exfiltrating subagent requests out of the loop
-    control: dict[str, object] = {
-        "pending_subagents": [],
-    }
+    agent = DurableAgent(
+        tools=extra_tools,
+        session_id=_turn_input.session_id,
+    )
 
     # pre-register tool approvals
     for tool_approval in _turn_input.tool_approvals:
@@ -386,15 +403,8 @@ async def _run_turn(turn_input: dict[str, Any]) -> None:
     tool_approval_requests: list[proto.ToolApprovalRequest] = []
 
     try:
-        async with agent.run(
-            _workflow_model(),
-            messages,
-            params={
-                "model_id": MODEL_ID,
-                "session_id": _turn_input.session_id,
-                "control": control,
-            },
-        ) as run:
+        model = ai.Model(MODEL_ID, provider=WorkflowModelProvider())
+        async with agent.run(model, messages) as run:
             async for event in run:
                 # monitor the stream for hook events and interrupt on them.
                 if (
@@ -440,7 +450,7 @@ async def _run_turn(turn_input: dict[str, Any]) -> None:
         # create normal output if the run has completed successfully
         subagent_requests = [
             proto.SubagentRequest.model_validate(item)
-            for item in cast(list[dict[str, object]], control["pending_subagents"])
+            for item in agent.pending_subagents
         ]
 
         has_pending = bool(subagent_requests or tool_approval_requests)

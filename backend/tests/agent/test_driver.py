@@ -198,7 +198,7 @@ async def test_subagent_result_lands_on_the_trailing_tool_message(
     [result] = tool_message.tool_results
     assert result.tool_call_id == "tc-sub"
     bundle = ai.agents.MessageBundle.model_validate(result.result)
-    assert [m.role for m in bundle.messages] == ["system", "user", "assistant"]
+    assert [m.role for m in bundle.messages] == ["assistant"]
     assert bundle.messages[-1].text == "child answer"
 
     assert await _lifecycle("s1") == [

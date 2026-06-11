@@ -38,7 +38,7 @@ timeout = 30
 exclude-newer = "2 days"
 
 [tool.uv.sources]
-ai = { git = "https://github.com/vercel-labs/ai-python", rev = "refactor-ui-adapter" }
+ai = { git = "https://github.com/vercel-labs/ai-python", rev = "main" }
 vercel = { git = "https://github.com/vercel/vercel-py", rev = "47d881242e35b18dcbc7d58b7018e1188894f332" }
 
 [dependency-groups]

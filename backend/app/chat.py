@@ -181,11 +181,10 @@ def bundle_to_wire(
     single ``UIMessage`` (anchored on the first) so the whole trajectory renders
     under the parent's ``subagent`` tool call. Returns ``None`` when the child has
     produced no assistant message yet.
-
-    This is the single source of truth for the subagent's nested shape: the live
-    path (:func:`_pump_subagent`) and the reload path (``server`` history) both
-    call it, so they emit identical output.
     """
+    # TODO: Do we really need all this? It is very similar to stuff we
+    # do in `ai`...
+
     bubbles = [
         bubble
         for bubble in ai_sdk.to_ui_messages(list(messages))

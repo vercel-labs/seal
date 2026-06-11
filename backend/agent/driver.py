@@ -164,11 +164,17 @@ async def _run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         match turn_result.kind:
             case "done":
                 # we're currently in a subagent session; return output and quit.
-                # we're returning full transcript as a MessageBundle.
+                # we're returning all assistant and tool messages in the bundle
                 output = proto.SessionOutput(
                     tool_call_id=_session_input.tool_call_id,
                     session_id=session_id,
-                    output=ai.agents.MessageBundle(messages=tuple(state.messages)),
+                    output=ai.agents.MessageBundle(
+                        messages=tuple(
+                            msg
+                            for msg in state.messages
+                            if msg.role in ("assistant", "tool")
+                        )
+                    ),
                 )
 
                 # notify the parent session. output carries the tool_call_id
