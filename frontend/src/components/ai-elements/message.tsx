@@ -51,12 +51,11 @@ export const MessageContent = ({
 }: MessageContentProps) => (
   <div
     className={cn(
-      "flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-sm",
-      // terminal-style user prompt: a `>` in the padding gutter, so every
-      // line of a multiline message stays indented past the arrow
-      "group-[.is-user]:relative group-[.is-user]:pl-6 group-[.is-user]:text-foreground",
-      "group-[.is-user]:before:absolute group-[.is-user]:before:left-0 group-[.is-user]:before:select-none group-[.is-user]:before:font-mono group-[.is-user]:before:text-muted-foreground group-[.is-user]:before:content-['>']",
-      "group-[.is-assistant]:text-foreground",
+      "flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-sm text-foreground",
+      // terminal-style gutter: a symbol in the left padding (`>` user, `*`
+      // agent), so every line of a multiline message stays indented past it
+      "relative pl-6 before:absolute before:left-0 before:select-none before:font-mono before:text-muted-foreground",
+      "group-[.is-user]:before:content-['>'] group-[.is-assistant]:before:content-['*']",
       className,
     )}
     {...props}

@@ -93,7 +93,9 @@ export const ToolHeader = ({
         {...props}
       >
         <span
-          className={cn("w-3 shrink-0 text-center text-xs", status.className)}
+          // w-4 + gap-2 = 24px, so the glyph sits in the same gutter as the
+          // message symbols and the tool name starts at the shared text column
+          className={cn("w-4 shrink-0 text-left text-xs", status.className)}
           title={statusLabels[state]}
         >
           {status.glyph}
@@ -135,9 +137,9 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
   <CollapsibleContent
     className={cn(
-      // the left rule hangs from the status glyph (w-3 = 12px column, center
-      // at 6px; ml-[5px] + 1px border lines up underneath it)
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 ml-[5px] space-y-3 border-l py-1 pl-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+      // the left rule hangs from the status glyph (left-aligned text-xs char,
+      // center ~3px; ml-[3px] + 1px border lines up underneath it)
+      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 ml-[3px] space-y-3 border-l py-1 pl-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
       className,
     )}
     {...props}
