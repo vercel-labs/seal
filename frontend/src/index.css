@@ -102,6 +102,137 @@
   }
 }
 
+/* Terminal-style markdown for assistant responses: show the markdown markup
+   (dimmed, via pseudo-elements so it never pollutes copied text) with subtle
+   rendering cues. These rules are deliberately unlayered so they win over
+   streamdown's utility classes, which live in Tailwind's cascade layers. */
+.terminal-markdown [data-streamdown] {
+  border-radius: 0;
+}
+
+/* Markers are dimmed and never bold/italic, whatever they wrap */
+.terminal-markdown [data-streamdown^="heading"]::before,
+.terminal-markdown [data-streamdown="strong"]::before,
+.terminal-markdown [data-streamdown="strong"]::after,
+.terminal-markdown em::before,
+.terminal-markdown em::after,
+.terminal-markdown del::before,
+.terminal-markdown del::after,
+.terminal-markdown [data-streamdown="inline-code"]::before,
+.terminal-markdown [data-streamdown="inline-code"]::after,
+.terminal-markdown [data-streamdown="link"]::before,
+.terminal-markdown [data-streamdown="link"]::after,
+.terminal-markdown [data-streamdown="list-item"]::before {
+  color: var(--muted-foreground);
+  font-weight: 400;
+  font-style: normal;
+}
+
+/* Headings: body-sized bold text, hierarchy carried by the # markers */
+.terminal-markdown [data-streamdown^="heading"] {
+  font-size: inherit;
+  line-height: inherit;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+}
+.terminal-markdown [data-streamdown^="heading"]::before {
+  white-space: pre;
+}
+.terminal-markdown [data-streamdown="heading-1"]::before {
+  content: "# ";
+}
+.terminal-markdown [data-streamdown="heading-2"]::before {
+  content: "## ";
+}
+.terminal-markdown [data-streamdown="heading-3"]::before {
+  content: "### ";
+}
+.terminal-markdown [data-streamdown="heading-4"]::before {
+  content: "#### ";
+}
+.terminal-markdown [data-streamdown="heading-5"]::before {
+  content: "##### ";
+}
+.terminal-markdown [data-streamdown="heading-6"]::before {
+  content: "###### ";
+}
+
+/* Inline emphasis: keep the real styling, surround with its markup */
+.terminal-markdown [data-streamdown="strong"]::before,
+.terminal-markdown [data-streamdown="strong"]::after {
+  content: "**";
+}
+.terminal-markdown em::before,
+.terminal-markdown em::after {
+  content: "*";
+}
+.terminal-markdown del::before,
+.terminal-markdown del::after {
+  content: "~~";
+  /* inline-block keeps the line-through from propagating onto the markers */
+  display: inline-block;
+}
+
+/* Inline code: backticks instead of the pill background */
+.terminal-markdown [data-streamdown="inline-code"] {
+  background: transparent;
+  padding: 0;
+}
+.terminal-markdown [data-streamdown="inline-code"]::before,
+.terminal-markdown [data-streamdown="inline-code"]::after {
+  content: "`";
+}
+
+/* Links: [text](url) with dimmed markup, only the text underlined */
+.terminal-markdown [data-streamdown="link"]::before,
+.terminal-markdown [data-streamdown="link"]::after {
+  /* inline-block keeps the underline from propagating onto the markers */
+  display: inline-block;
+}
+.terminal-markdown [data-streamdown="link"]::before {
+  content: "[";
+}
+.terminal-markdown [data-streamdown="link"]::after {
+  content: "](" attr(href) ")";
+}
+
+/* Lists: plain - and 1. markers */
+.terminal-markdown [data-streamdown="unordered-list"],
+.terminal-markdown [data-streamdown="ordered-list"] {
+  list-style: none;
+}
+.terminal-markdown [data-streamdown="list-item"]::before {
+  white-space: pre;
+}
+.terminal-markdown
+  [data-streamdown="unordered-list"]
+  > [data-streamdown="list-item"]::before {
+  content: "- ";
+}
+.terminal-markdown [data-streamdown="ordered-list"] {
+  counter-reset: item;
+}
+.terminal-markdown
+  [data-streamdown="ordered-list"]
+  > [data-streamdown="list-item"] {
+  counter-increment: item;
+}
+.terminal-markdown
+  [data-streamdown="ordered-list"]
+  > [data-streamdown="list-item"]::before {
+  content: counter(item) ". ";
+}
+
+/* Blockquote: thin rule instead of the chunky default */
+.terminal-markdown [data-streamdown="blockquote"] {
+  border-left-width: 1px;
+}
+
+/* Horizontal rule: dashed, like --- */
+.terminal-markdown [data-streamdown="horizontal-rule"] {
+  border-style: dashed;
+}
+
 @theme inline {
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);

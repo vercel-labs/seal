@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { cjk } from "@streamdown/cjk";
-import { code } from "@streamdown/code";
+import { createCodePlugin } from "@streamdown/code";
 import { math } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
@@ -314,13 +314,19 @@ export const MessageBranchPage = ({
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
+const code = createCodePlugin({ themes: ["vesper", "vesper"] });
+
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn(
-        "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        "terminal-markdown size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         className,
       )}
+      // disabled so links render as real <a href>, which the terminal-markdown
+      // CSS needs to show the [text](url) markup — the visible url replaces
+      // the safety modal as the "where does this go" cue
+      linkSafety={{ enabled: false }}
       plugins={{ cjk, code, math, mermaid }}
       {...props}
     />
