@@ -3,21 +3,13 @@
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import type { ComponentProps, ReactNode } from "react";
 
-import { Badge } from "@/components/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import {
-  CheckCircleIcon,
-  ChevronDownIcon,
-  CircleIcon,
-  ClockIcon,
-  WrenchIcon,
-  XCircleIcon,
-} from "lucide-react";
+import { CheckIcon, XIcon } from "lucide-react";
 import { isValidElement } from "react";
 
 import { CodeBlock } from "./code-block";
@@ -26,7 +18,7 @@ export type ToolProps = ComponentProps<typeof Collapsible>;
 
 export const Tool = ({ className, ...props }: ToolProps) => (
   <Collapsible
-    className={cn("group not-prose mb-4 w-full rounded-md border", className)}
+    className={cn("group not-prose mb-4 w-full", className)}
     {...props}
   />
 );
@@ -36,6 +28,8 @@ export type ToolPart = ToolUIPart | DynamicToolUIPart;
 export type ToolHeaderProps = {
   title?: string;
   className?: string;
+  input?: ToolPart["input"];
+  onApprovalResponse?: (approved: boolean) => void;
 } & (
   | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
   | {
@@ -55,22 +49,28 @@ const statusLabels: Record<ToolPart["state"], string> = {
   "output-error": "Error",
 };
 
-const statusIcons: Record<ToolPart["state"], ReactNode> = {
-  "approval-requested": <ClockIcon className="size-4 text-yellow-600" />,
-  "approval-responded": <CheckCircleIcon className="size-4 text-blue-600" />,
-  "input-available": <ClockIcon className="size-4 animate-pulse" />,
-  "input-streaming": <CircleIcon className="size-4" />,
-  "output-available": <CheckCircleIcon className="size-4 text-green-600" />,
-  "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
-  "output-error": <XCircleIcon className="size-4 text-red-600" />,
+// monochrome glyphs: ● done, ○ in flight (pulsing while active), ! attention
+const statusGlyphs: Record<
+  ToolPart["state"],
+  { glyph: string; className: string }
+> = {
+  "approval-requested": {
+    glyph: "!",
+    className: "animate-pulse text-foreground",
+  },
+  "approval-responded": {
+    glyph: "○",
+    className: "animate-pulse text-muted-foreground",
+  },
+  "input-available": {
+    glyph: "○",
+    className: "animate-pulse text-muted-foreground",
+  },
+  "input-streaming": { glyph: "○", className: "text-muted-foreground/50" },
+  "output-available": { glyph: "●", className: "text-muted-foreground" },
+  "output-denied": { glyph: "○", className: "text-muted-foreground/50" },
+  "output-error": { glyph: "!", className: "text-destructive" },
 };
-
-export const getStatusBadge = (status: ToolPart["state"]) => (
-  <Badge className="gap-1.5 rounded-full text-xs" variant="secondary">
-    {statusIcons[status]}
-    {statusLabels[status]}
-  </Badge>
-);
 
 export const ToolHeader = ({
   className,
@@ -78,26 +78,55 @@ export const ToolHeader = ({
   type,
   state,
   toolName,
+  input,
+  onApprovalResponse,
   ...props
 }: ToolHeaderProps) => {
   const derivedName =
     type === "dynamic-tool" ? toolName : type.split("-").slice(1).join("-");
+  const status = statusGlyphs[state];
 
   return (
-    <CollapsibleTrigger
-      className={cn(
-        "flex w-full items-center justify-between gap-4 p-3",
-        className,
+    <div className={cn("flex w-full items-center gap-2", className)}>
+      <CollapsibleTrigger
+        className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left"
+        {...props}
+      >
+        <span
+          className={cn("w-3 shrink-0 text-center text-xs", status.className)}
+          title={statusLabels[state]}
+        >
+          {status.glyph}
+        </span>
+        <span className="shrink-0 text-sm">{title ?? derivedName}</span>
+        {input != null && (
+          <span className="min-w-0 truncate text-muted-foreground/60 text-xs group-data-[state=open]:hidden">
+            {JSON.stringify(input)}
+          </span>
+        )}
+        <span className="sr-only">{statusLabels[state]}</span>
+      </CollapsibleTrigger>
+      {state === "approval-requested" && onApprovalResponse && (
+        <span className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            aria-label="Reject"
+            className="p-1 text-muted-foreground hover:text-foreground"
+            onClick={() => onApprovalResponse(false)}
+          >
+            <XIcon className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label="Approve"
+            className="p-1 text-muted-foreground hover:text-foreground"
+            onClick={() => onApprovalResponse(true)}
+          >
+            <CheckIcon className="size-3.5" />
+          </button>
+        </span>
       )}
-      {...props}
-    >
-      <div className="flex items-center gap-2">
-        <WrenchIcon className="size-4 text-muted-foreground" />
-        <span className="font-medium text-sm">{title ?? derivedName}</span>
-        {getStatusBadge(state)}
-      </div>
-      <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-    </CollapsibleTrigger>
+    </div>
   );
 };
 
@@ -106,7 +135,9 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
   <CollapsibleContent
     className={cn(
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 space-y-4 p-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+      // the left rule hangs from the status glyph (w-3 = 12px column, center
+      // at 6px; ml-[5px] + 1px border lines up underneath it)
+      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 ml-[5px] space-y-3 border-l py-1 pl-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
       className,
     )}
     {...props}
@@ -121,13 +152,15 @@ export const ToolInput = ({ className, input, ...props }: ToolInputProps) => {
   if (input == null) return null;
 
   return (
-    <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
-      <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+    <div className={cn("space-y-1 overflow-hidden", className)} {...props}>
+      <h4 className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">
         Parameters
       </h4>
-      <div className="rounded-md bg-muted/50">
-        <CodeBlock code={JSON.stringify(input, null, 2)} language="json" />
-      </div>
+      <CodeBlock
+        className="rounded-none border-none bg-transparent"
+        code={JSON.stringify(input, null, 2)}
+        language="json"
+      />
     </div>
   );
 };
@@ -151,23 +184,31 @@ export const ToolOutput = ({
 
   if (typeof output === "object" && !isValidElement(output)) {
     Output = (
-      <CodeBlock code={JSON.stringify(output, null, 2)} language="json" />
+      <CodeBlock
+        className="rounded-none border-none bg-transparent"
+        code={JSON.stringify(output, null, 2)}
+        language="json"
+      />
     );
   } else if (typeof output === "string") {
-    Output = <CodeBlock code={output} language="json" />;
+    Output = (
+      <CodeBlock
+        className="rounded-none border-none bg-transparent"
+        code={output}
+        language="json"
+      />
+    );
   }
 
   return (
-    <div className={cn("space-y-2", className)} {...props}>
-      <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+    <div className={cn("space-y-1", className)} {...props}>
+      <h4 className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">
         {errorText ? "Error" : "Result"}
       </h4>
       <div
         className={cn(
-          "overflow-x-auto rounded-md text-xs [&_table]:w-full",
-          errorText
-            ? "bg-destructive/10 text-destructive"
-            : "bg-muted/50 text-foreground",
+          "overflow-x-auto text-xs [&_table]:w-full",
+          errorText ? "text-destructive" : "text-foreground",
         )}
       >
         {errorText && <div>{errorText}</div>}

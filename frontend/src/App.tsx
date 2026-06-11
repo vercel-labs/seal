@@ -43,14 +43,6 @@ import {
   usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input";
 import {
-  Confirmation,
-  ConfirmationAccepted,
-  ConfirmationAction,
-  ConfirmationActions,
-  ConfirmationRejected,
-  ConfirmationRequest,
-} from "@/components/ai-elements/confirmation";
-import {
   Tool,
   ToolContent,
   ToolHeader,
@@ -145,11 +137,12 @@ function renderPart({
           ? (output as UIMessage)
           : undefined;
       return (
-        <Tool key={key} defaultOpen>
+        <Tool key={key}>
           <ToolHeader
             type="dynamic-tool"
             state={part.state}
             toolName="subagent"
+            input={part.input}
           />
           <ToolContent>
             <ToolInput input={part.input} />
@@ -170,60 +163,33 @@ function renderPart({
       );
     }
 
-    const hasApproval = !!part.approval;
-    const isComplete = part.state === "output-available";
-    const needsApproval = part.state === "approval-requested";
+    // approval is answered inline in the header (tick / cross), so the tool
+    // never needs to unfold for it.
+    const onApprovalResponse = part.approval
+      ? (approved: boolean) =>
+          addToolApprovalResponse({ id: part.approval!.id, approved })
+      : undefined;
 
     return (
-      <Tool key={key} defaultOpen={isComplete || needsApproval}>
+      <Tool key={key}>
         {part.type === "dynamic-tool" ? (
           <ToolHeader
             type={part.type}
             state={part.state}
             toolName={getToolName(part)}
+            input={part.input}
+            onApprovalResponse={onApprovalResponse}
           />
         ) : (
-          <ToolHeader type={part.type} state={part.state} />
+          <ToolHeader
+            type={part.type}
+            state={part.state}
+            input={part.input}
+            onApprovalResponse={onApprovalResponse}
+          />
         )}
         <ToolContent>
           <ToolInput input={part.input} />
-          {hasApproval && (
-            <Confirmation approval={part.approval} state={part.state}>
-              <ConfirmationRequest>
-                This tool requires your approval to run.
-              </ConfirmationRequest>
-              <ConfirmationAccepted>
-                You approved this tool execution.
-              </ConfirmationAccepted>
-              <ConfirmationRejected>
-                You rejected this tool execution.
-              </ConfirmationRejected>
-              <ConfirmationActions>
-                <ConfirmationAction
-                  variant="outline"
-                  onClick={() =>
-                    addToolApprovalResponse({
-                      id: part.approval!.id,
-                      approved: false,
-                    })
-                  }
-                >
-                  Reject
-                </ConfirmationAction>
-                <ConfirmationAction
-                  variant="default"
-                  onClick={() =>
-                    addToolApprovalResponse({
-                      id: part.approval!.id,
-                      approved: true,
-                    })
-                  }
-                >
-                  Approve
-                </ConfirmationAction>
-              </ConfirmationActions>
-            </Confirmation>
-          )}
           <ToolOutput output={part.output} errorText={part.errorText} />
         </ToolContent>
       </Tool>
