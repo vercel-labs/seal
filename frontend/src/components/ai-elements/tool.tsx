@@ -12,7 +12,28 @@ import { cn } from "@/lib/utils";
 import { CheckIcon, XIcon } from "lucide-react";
 import { isValidElement } from "react";
 
-import { CodeBlock } from "./code-block";
+// tool payloads are shown one object-level deep: dimmed `key:` labels with the
+// raw value (no JSON quoting/escaping), nested values as compact JSON
+const formatValue = (value: unknown): string =>
+  typeof value === "string" ? value : JSON.stringify(value);
+
+const asEntries = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const ObjectEntries = ({ data }: { data: Record<string, unknown> }) => (
+  <div className="space-y-1">
+    {Object.entries(data).map(([key, value]) => (
+      <div key={key} className="flex min-w-0 gap-2">
+        <span className="shrink-0 text-muted-foreground">{key}:</span>
+        <span className="min-w-0 whitespace-pre-wrap break-words">
+          {formatValue(value)}
+        </span>
+      </div>
+    ))}
+  </div>
+);
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
@@ -103,7 +124,11 @@ export const ToolHeader = ({
         <span className="shrink-0 text-sm">{title ?? derivedName}</span>
         {input != null && (
           <span className="min-w-0 truncate text-muted-foreground/60 text-xs group-data-[state=open]:hidden">
-            {JSON.stringify(input)}
+            {asEntries(input)
+              ? Object.entries(asEntries(input)!)
+                  .map(([key, value]) => `${key}: ${formatValue(value)}`)
+                  .join("  ")
+              : formatValue(input)}
           </span>
         )}
         <span className="sr-only">{statusLabels[state]}</span>
@@ -153,16 +178,23 @@ export type ToolInputProps = ComponentProps<"div"> & {
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => {
   if (input == null) return null;
 
+  const entries = asEntries(input);
+
   return (
-    <div className={cn("space-y-1 overflow-hidden", className)} {...props}>
+    <div
+      className={cn("space-y-1 overflow-hidden text-xs", className)}
+      {...props}
+    >
       <h4 className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">
         Parameters
       </h4>
-      <CodeBlock
-        className="rounded-none border-none bg-transparent"
-        code={JSON.stringify(input, null, 2)}
-        language="json"
-      />
+      {entries ? (
+        <ObjectEntries data={entries} />
+      ) : (
+        <div className="whitespace-pre-wrap break-words">
+          {formatValue(input)}
+        </div>
+      )}
     </div>
   );
 };
@@ -185,21 +217,16 @@ export const ToolOutput = ({
   let Output = <div>{output as ReactNode}</div>;
 
   if (typeof output === "object" && !isValidElement(output)) {
-    Output = (
-      <CodeBlock
-        className="rounded-none border-none bg-transparent"
-        code={JSON.stringify(output, null, 2)}
-        language="json"
-      />
+    const entries = asEntries(output);
+    Output = entries ? (
+      <ObjectEntries data={entries} />
+    ) : (
+      <div className="whitespace-pre-wrap break-words">
+        {JSON.stringify(output, null, 2)}
+      </div>
     );
   } else if (typeof output === "string") {
-    Output = (
-      <CodeBlock
-        className="rounded-none border-none bg-transparent"
-        code={output}
-        language="json"
-      />
-    );
+    Output = <div className="whitespace-pre-wrap break-words">{output}</div>;
   }
 
   return (
