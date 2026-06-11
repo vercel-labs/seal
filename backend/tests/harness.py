@@ -4,13 +4,42 @@
 ``world.queue`` dispatches to the workflow/step handlers as asyncio tasks
 instead of going through the queue service. Everything else is real — replay,
 suspensions, workflow hooks, the jsonl store, the bash subprocess.
+
+Workflow invocations of one run stay serialized (each invocation replays the
+whole body, and the previous invocation's abandoned generators must be
+finalized first). Step invocations are deliberately NOT serialized:
+production delivery runs them concurrently, and serializing them here once
+masked a production-only deadlock.
+
+The harness also watches engine health (``check_*`` methods, run from the
+``world`` fixture's teardown or called explicitly by tests):
+
+* ``check_settled`` — every step reached a terminal state and every run
+  either finished or is parked on a hook. A step left ``running`` is the
+  signature of the production wedge: a dropped step invocation can never be
+  retried with ``max_retries = 0``.
+* ``check_replay_determinism`` — every replay pass of a run must request the
+  same steps/hooks in the same order. The engine matches results to requests
+  purely by position, so a reordered replay silently wires results to the
+  wrong calls (and the colliding step_created is swallowed as a conflict).
+* ``check_step_serialization`` — no two steps of one run in flight at once.
+  Concurrent in-flight steps are the precondition for the wedge above; this
+  reddens the pattern even on runs that happen to complete.
+
+``hostile_delivery=True`` simulates the production failure itself: a step
+invocation that starts while another step of the same run is in flight is
+killed silently right after its step_started event — exactly what the VQS
+delivery layer did to wedged dev runs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import gc
 import itertools
+import json
+import re
 from typing import Any
 
 import vercel._internal.workflow.py_sandbox as py_sandbox
@@ -19,23 +48,62 @@ import vercel._internal.workflow.py_sandbox as py_sandbox
 py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
 
 import vercel._internal.workflow.runtime as wf_runtime  # noqa: E402
+import vercel._internal.workflow.world as wf_world  # noqa: E402
 import vercel._internal.workflow.worlds.local as wf_local  # noqa: E402
 import vercel.workflow  # noqa: E402
 
 import agent.driver as driver  # noqa: E402
 from agent import proto, stream  # noqa: E402
 
+RUN_TERMINAL = ("completed", "failed", "cancelled")
+STEP_TERMINAL = ("completed", "failed")
+
+# ids the app generates fresh inside the workflow body on every replay pass.
+_VOLATILE_ID = re.compile(r"\b(?:msg|part|turn)_[0-9a-f]+\b")
+
+
+def _canon_pass(entries: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    """Replace generated ids with stable placeholders, in encounter order."""
+    mapping: dict[str, str] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        return mapping.setdefault(match.group(0), f"id-{len(mapping)}")
+
+    return [
+        tuple(_VOLATILE_ID.sub(replace, field) for field in entry) for entry in entries
+    ]
+
+
+class _HostileKill(BaseException):
+    """Kills a delivery the way the real queue layer can: silently.
+
+    BaseException so the step handler's ``except Exception`` retry path
+    cannot see it — the step stays ``running`` with no terminal event,
+    which is the exact production wedge state.
+    """
+
+
+# the (world, run_id) of the delivery currently executing in this task; lets
+# the orchestrator patches below attribute suspension requests to a run.
+_DELIVERY: contextvars.ContextVar[tuple[InProcessWorld, str] | None] = (
+    contextvars.ContextVar("seal_delivery", default=None)
+)
+
 
 class InProcessWorld(wf_local.LocalWorld):
     """LocalWorld with the queue bridged to in-process handler dispatch."""
 
-    def __init__(self, registry: Any) -> None:
+    def __init__(self, registry: Any, *, hostile_delivery: bool = False) -> None:
         super().__init__()
         self._registry = registry
         self._tasks: set[asyncio.Task[None]] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._ids = itertools.count()
         self.errors: list[BaseException] = []
+        self.hostile_delivery = hostile_delivery
+        # run_id -> one entry per replay pass, each the ordered list of
+        # suspension requests (steps/hooks/waits) that pass made.
+        self.suspension_traces: dict[str, list[list[tuple[str, ...]]]] = {}
 
     async def queue(
         self,
@@ -61,17 +129,22 @@ class InProcessWorld(wf_local.LocalWorld):
         try:
             if delay:
                 await asyncio.sleep(min(delay, 1.0))
+            run_id = getattr(message, "run_id", None) or message.workflow_run_id
+            _DELIVERY.set((self, run_id))
             if queue_name.startswith("__wkf_workflow_"):
                 handler = wf_runtime.workflow_handler
+                # workflow replays of one run must not interleave: every
+                # invocation replays the same body from scratch.
+                lock = self._locks.setdefault(run_id, asyncio.Lock())
             elif queue_name.startswith("__wkf_step_"):
                 handler = wf_runtime.step_handler
+                # steps are intentionally unserialized — see module docstring.
+                lock = None
             else:
                 raise RuntimeError(f"unexpected queue: {queue_name}")
-            run_id = getattr(message, "run_id", None) or message.workflow_run_id
-            lock = self._locks.setdefault(run_id, asyncio.Lock())
             attempt = 1
             while True:
-                async with lock:
+                if lock is None:
                     retry = await handler(
                         message.model_dump(),
                         attempt=attempt,
@@ -79,22 +152,223 @@ class InProcessWorld(wf_local.LocalWorld):
                         message_id=message_id,
                         registry=self._registry,
                     )
-                    # a suspended workflow abandons its in-flight agent.run
-                    # generator. in production the invocation's process dies
-                    # with it; here its finalizer must run (it clears global
-                    # ai-sdk hook state) before the next invocation replays
-                    # the body, or it clobbers the replay's pending hooks.
-                    for _ in range(3):
-                        gc.collect()
-                        await asyncio.sleep(0)
+                else:
+                    async with lock:
+                        retry = await handler(
+                            message.model_dump(),
+                            attempt=attempt,
+                            queue_name=queue_name,
+                            message_id=message_id,
+                            registry=self._registry,
+                        )
+                        # a suspended workflow abandons its in-flight agent.run
+                        # generator. in production the invocation's process dies
+                        # with it; here its finalizer must run (it clears global
+                        # ai-sdk hook state) before the next invocation replays
+                        # the body, or it clobbers the replay's pending hooks.
+                        for _ in range(3):
+                            gc.collect()
+                            await asyncio.sleep(0)
                 if retry is None:
                     return
                 attempt += 1
                 await asyncio.sleep(min(retry, 0.5))
         except asyncio.CancelledError:
             raise
+        except _HostileKill:
+            return  # the simulated drop is silent by definition
         except BaseException as error:  # noqa: BLE001 — surfaced via fixture teardown
             self.errors.append(error)
+
+    async def events_create(
+        self, run_id: str | None, data: wf_world.Event
+    ) -> wf_world.EventResult:
+        if (
+            self.hostile_delivery
+            and run_id is not None
+            and data.event_type == "step_started"
+            and self._another_step_in_flight(run_id, data.correlation_id)
+        ):
+            # the start is durably recorded — then the invocation dies before
+            # executing or writing any terminal event, like the real drop.
+            await super().events_create(run_id, data)
+            raise _HostileKill(
+                f"dropped step {data.correlation_id} of {run_id}: "
+                "started while another step was in flight"
+            )
+        return await super().events_create(run_id, data)
+
+    async def drain(self, timeout: float = 15) -> None:
+        """Wait until every delivery (and the ones it spawns) has finished."""
+
+        async def settle() -> None:
+            while self._tasks:
+                await asyncio.wait(list(self._tasks))
+
+        try:
+            await asyncio.wait_for(settle(), timeout)
+        except TimeoutError:
+            pending = [str(task) for task in self._tasks]
+            for task in list(self._tasks):
+                task.cancel()
+            raise AssertionError(
+                f"deliveries still in flight after {timeout}s: {pending}"
+            ) from None
+
+    # --- engine health checks (read the per-test .workflow-data store) ---------
+
+    def check_settled(self) -> None:
+        """No work left hanging: steps terminal, runs finished or on a hook."""
+        failures = []
+        for step in self._steps():
+            if step.status not in STEP_TERMINAL:
+                failures.append(
+                    f"step {step.step_name!r} ({step.step_id}) of run "
+                    f"{step.run_id} is stuck in {step.status!r}"
+                )
+        parked = self._runs_with_hooks()
+        for run in self._runs():
+            if run.status in RUN_TERMINAL or run.run_id in parked:
+                continue
+            failures.append(
+                f"run {run.run_id} ({run.workflow_name}) is {run.status!r} "
+                "with no hook to wake it — this is a wedged run"
+            )
+        assert not failures, "engine left work hanging:\n" + "\n".join(failures)
+
+    def check_replay_determinism(self) -> None:
+        """Consecutive replay passes must request the same things in order.
+
+        The engine correlates a pass's requests with the event log purely by
+        position; a divergent pass attaches logged results to the wrong
+        requests without any error.
+
+        Generated ids (msg_*/part_*) are canonicalized before comparing: the
+        workflow body mints fresh ones on every pass, and the engine discards
+        re-issued inputs for already-logged requests, so they are noise.
+        """
+        for run_id, passes in self.suspension_traces.items():
+            canonical = [_canon_pass(entries) for entries in passes]
+            for index in range(1, len(canonical)):
+                previous, current = canonical[index - 1], canonical[index]
+                for pos in range(min(len(previous), len(current))):
+                    assert previous[pos] == current[pos], (
+                        f"run {run_id} replay diverged at request #{pos}: "
+                        f"pass {index - 1} made {previous[pos]!r}, "
+                        f"pass {index} made {current[pos]!r}"
+                    )
+
+    async def check_step_serialization(self) -> None:
+        """At most one step of a run dispatched (created → terminal) at a time.
+
+        Two concurrently in-flight step invocations are the precondition for
+        the production wedge: the delivery layer can drop one between its
+        step_started and any terminal event, unrecoverable at max_retries=0.
+        """
+        violations = []
+        for run in self._runs():
+            result = await self.events_list(run.run_id)
+            in_flight: dict[str, str] = {}  # correlation_id -> step name
+            for event in result.data:
+                correlation_id = event.correlation_id
+                if correlation_id is None:
+                    continue
+                if event.event_type == "step_created":
+                    name = event.event_data.step_name
+                    if in_flight:
+                        violations.append(
+                            f"run {run.run_id} ({run.workflow_name}): step "
+                            f"{name!r} dispatched while "
+                            f"{sorted(in_flight.values())} still in flight"
+                        )
+                    in_flight[correlation_id] = name
+                elif event.event_type in ("step_completed", "step_failed"):
+                    in_flight.pop(correlation_id, None)
+        assert not violations, "concurrent step dispatch:\n" + "\n".join(violations)
+
+    # --- store readers ----------------------------------------------------------
+
+    def _runs(self) -> list[Any]:
+        return self._read_dir("runs", wf_world.WorkflowRunAdaptor)
+
+    def _steps(self) -> list[Any]:
+        return self._read_dir("steps", wf_world.WorkflowStepAdaptor)
+
+    def _runs_with_hooks(self) -> set[str]:
+        hooks = self._read_dir("hooks", wf_world.Hook)
+        return {hook.run_id for hook in hooks}
+
+    def _read_dir(self, name: str, schema: Any) -> list[Any]:
+        directory = self.data_dir / name
+        if not directory.exists():
+            return []
+        records = [
+            wf_local.read_json(path, schema)
+            for path in sorted(directory.iterdir())
+            if path.suffix == ".json"
+        ]
+        return [record for record in records if record is not None]
+
+    def _another_step_in_flight(self, run_id: str, correlation_id: str) -> bool:
+        return any(
+            step.run_id == run_id
+            and step.step_id != correlation_id
+            and step.status == "running"
+            for step in self._steps()
+        )
+
+
+# --- replay tracing ---------------------------------------------------------------
+# The orchestrator gives no visibility into the order a replay pass requests
+# its steps/hooks in, and order bugs leave no trace in the event log (the
+# colliding step_created is swallowed as an EntityConflictError). Record every
+# pass's requests here so check_replay_determinism can compare them.
+
+_original_init = wf_runtime.WorkflowOrchestratorContext.__init__
+_original_run_step = wf_runtime.WorkflowOrchestratorContext.run_step
+_original_create_hook = wf_runtime.WorkflowOrchestratorContext.create_hook
+_original_run_wait = wf_runtime.WorkflowOrchestratorContext.run_wait
+
+
+def _tracing_init(self: Any, *args: Any, **kwargs: Any) -> None:
+    _original_init(self, *args, **kwargs)
+    delivery = _DELIVERY.get()
+    if delivery is not None:
+        world, run_id = delivery
+        trace: list[tuple[str, ...]] = []
+        world.suspension_traces.setdefault(run_id, []).append(trace)
+        self._seal_trace = trace
+
+
+async def _tracing_run_step(self: Any, step: Any, *args: Any, **kwargs: Any) -> Any:
+    trace = getattr(self, "_seal_trace", None)
+    if trace is not None:
+        trace.append(("step", step.name, json.dumps((args, kwargs), sort_keys=True)))
+    return await _original_run_step(self, step, *args, **kwargs)
+
+
+def _tracing_create_hook(self: Any, *args: Any, **kwargs: Any) -> Any:
+    event = _original_create_hook(self, *args, **kwargs)
+    trace = getattr(self, "_seal_trace", None)
+    if trace is not None:
+        trace.append(("hook", event._token))
+    return event
+
+
+async def _tracing_run_wait(self: Any, param: Any) -> None:
+    trace = getattr(self, "_seal_trace", None)
+    if trace is not None:
+        trace.append(("wait", str(param)))
+    return await _original_run_wait(self, param)
+
+
+for _name, _wrapper in (
+    ("__init__", _tracing_init),
+    ("run_step", _tracing_run_step),
+    ("create_hook", _tracing_create_hook),
+    ("run_wait", _tracing_run_wait),
+):
+    setattr(wf_runtime.WorkflowOrchestratorContext, _name, _wrapper)
 
 
 async def start_session(session_id: str, prompt: str) -> Any:

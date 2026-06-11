@@ -33,6 +33,10 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 timeout = 30
+markers = [
+    "hostile_delivery: the in-process engine silently kills a step invocation that starts while another step of the same run is in flight (reproduces the production delivery drop); teardown health checks are skipped",
+    "replay_divergent: the scenario hits the known pre-refactor bug where replay passes issue steps in runner-completion order (unstable), so the teardown determinism check is skipped; remove with the hook-dispatch refactor",
+]
 
 [tool.uv]
 exclude-newer = "2 days"

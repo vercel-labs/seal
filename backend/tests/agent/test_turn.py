@@ -1,4 +1,5 @@
-"""The replay-smuggling boundary (``turn._dump_message`` / ``_load_message``).
+"""The replay-smuggling boundary (``turn._dump_message`` / ``_load_message``)
+and the direct ``run_turn`` seam.
 
 ``Message.replay`` and ``ToolCallPart.cached_result`` are ``exclude=True``
 pydantic fields in the ai SDK, so they vanish through a plain
@@ -11,8 +12,12 @@ from __future__ import annotations
 
 import ai
 import ai.types.messages as messages_
+import turn_capture
+import vercel.workflow
+from conftest import MockProvider, text_msg
+from harness import InProcessWorld, wait_run
 
-from agent import turn
+from agent import proto, turn
 
 
 def _assistant_with_tool_calls() -> messages_.Message:
@@ -86,3 +91,31 @@ def test_plain_model_dump_drops_the_hidden_fields() -> None:
     restored = messages_.Message.model_validate(data)
     assert restored.replay is False
     assert restored.tool_calls[0].cached_result is None
+
+
+async def test_capture_turn_runs_a_single_turn_directly(
+    world: InProcessWorld, scripted_model: MockProvider
+) -> None:
+    """The turn-level seam: run one ``run_turn`` without a session around it.
+
+    This is the fast iteration loop for changes to ``DurableAgent.loop`` —
+    a failure here is a turn bug, not a driver bug.
+    """
+    scripted_model.responses = [[text_msg("solo answer")]]
+    turn_input = proto.TurnInput(
+        session_id="s1",
+        messages=[
+            ai.system_message(turn.SYSTEM_PROMPT),
+            ai.user_message("hi"),
+        ],
+        turn_hook_token="seal-turn:s1:0",
+    )
+
+    run = await vercel.workflow.start(
+        turn_capture.capture_turn, turn_input.model_dump(mode="json")
+    )
+    output = proto.TurnOutput.model_validate(await wait_run(run))
+
+    assert output.kind == "suspend"
+    assert output.messages[-1].text == "solo answer"
+    assert output.pending_requests == []

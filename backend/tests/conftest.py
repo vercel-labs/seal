@@ -33,7 +33,7 @@ import harness  # noqa: E402
 import vercel._internal.workflow.world as wf_world  # noqa: E402
 
 import agent  # noqa: E402
-from agent import storage  # noqa: E402
+from agent import storage, stream  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -145,14 +145,27 @@ def mock_llm() -> Iterator[MockProvider]:
 
 
 @pytest.fixture
-async def world() -> AsyncGenerator[harness.InProcessWorld]:
-    bridged = harness.InProcessWorld(agent.workflow)
+async def world(
+    request: pytest.FixtureRequest,
+) -> AsyncGenerator[harness.InProcessWorld]:
+    hostile = request.node.get_closest_marker("hostile_delivery") is not None
+    bridged = harness.InProcessWorld(agent.workflow, hostile_delivery=hostile)
     wf_world.set_world(bridged)
-    yield bridged
-    for task in list(bridged._tasks):
-        task.cancel()
-    wf_world.set_world(None)
+    try:
+        yield bridged
+        # let in-flight deliveries finish before judging the engine's state —
+        # a run can look wedged while its final events are still queued.
+        await bridged.drain()
+    finally:
+        for task in list(bridged._tasks):
+            task.cancel()
+        wf_world.set_world(None)
     assert bridged.errors == [], f"workflow delivery errors: {bridged.errors}"
+    if hostile:  # a deliberately sabotaged engine cannot promise health
+        return
+    bridged.check_settled()
+    if request.node.get_closest_marker("replay_divergent") is None:
+        bridged.check_replay_determinism()
 
 
 @pytest.fixture
@@ -214,3 +227,62 @@ def assert_message_invariants(messages: list[messages_.Message]) -> None:
         index for index, message in enumerate(messages) if message.role == "system"
     ]
     assert system_indices in ([], [0]), f"system message misplaced: {system_indices}"
+
+
+async def assert_stream_invariants(
+    session_id: str,
+    messages: Sequence[messages_.Message],
+    *,
+    in_order: bool = False,
+) -> None:
+    """The durable stream answered every tool call with one consistent result.
+
+    Pending placeholders may repeat (each interrupted pass re-announces them)
+    and a cached result may be re-emitted on replay, but the final results
+    must cover exactly the history's tool calls and re-emissions must carry
+    the same payload — a different payload means results got cross-wired.
+
+    ``in_order=True`` additionally requires first emissions to follow the
+    assistant messages' tool-call order: the post-refactor stream contract.
+    """
+    finals: dict[str, list[Any]] = {}
+    first_seen: list[str] = []
+    async for event in stream.replay(session_id):
+        if isinstance(event, events_.ToolCallResult):
+            for part in event.results:
+                if part.is_hook_pending:
+                    continue
+                if part.tool_call_id not in finals:
+                    first_seen.append(part.tool_call_id)
+                # a cached re-emission mints a fresh part id; content is what
+                # must not change between emissions.
+                finals.setdefault(part.tool_call_id, []).append(
+                    part.model_dump(mode="json", exclude={"id"})
+                )
+
+    history = [part.tool_call_id for message in messages for part in message.tool_calls]
+    # subagent finals may be absent: the driver attaches them to history off
+    # stream, and the live UI renders child progress from the child's own
+    # stream. (They appear when a replayed turn re-emits them as cached.)
+    required = {
+        part.tool_call_id
+        for message in messages
+        for part in message.tool_calls
+        if part.tool_name != "subagent"
+    }
+    assert required <= set(finals), (
+        f"stream is missing results for {required - set(finals)}"
+    )
+    assert set(finals) <= set(history), (
+        f"stream carries results for unknown calls: {set(finals) - set(history)}"
+    )
+    for tool_call_id, payloads in finals.items():
+        assert all(payload == payloads[0] for payload in payloads), (
+            f"stream re-emitted {tool_call_id} with a different result — "
+            "results were wired to the wrong calls"
+        )
+    if in_order:
+        expected = [call for call in history if call in finals]
+        assert first_seen == expected, (
+            f"stream result order {first_seen} != tool-call order {expected}"
+        )
