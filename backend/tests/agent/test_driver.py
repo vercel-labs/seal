@@ -258,16 +258,22 @@ def _assistant(text: str, *calls: tuple[str, str, str]) -> messages_.Message:
 
 @pytest.fixture
 async def http_url() -> AsyncGenerator[str]:
-    """A local one-response HTTP server so web_fetch needs no network."""
+    """A local HTTP server so web_fetch needs no network.
+
+    The body echoes the request path, so two fetches in one turn get distinct
+    payloads — a cross-wired result is then visible, not just a missing one.
+    """
 
     async def handle(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        request_line = await reader.readline()
+        path = request_line.split()[1].decode()
         while True:
             line = await reader.readline()
             if not line or line == b"\r\n":
                 break
-        body = b"fetched-ok"
+        body = f"fetched-ok {path}".encode()
         writer.write(
             b"HTTP/1.1 200 OK\r\ncontent-length: %d\r\n"
             b"connection: close\r\n\r\n%s" % (len(body), body)
@@ -477,6 +483,37 @@ async def test_subagent_scheduled_before_bash(
     await assert_stream_invariants("s1", state.messages)
 
 
+async def test_subagent_and_web_fetch_share_a_turn(
+    world: InProcessWorld, scripted_model: MockProvider, http_url: str
+) -> None:
+    # no approval anywhere: the subagent leaves the loop and web_fetch is the
+    # only live in-loop step, so this pair works end to end today.
+    scripted_model.responses = [
+        [
+            _assistant(
+                "delegate and fetch",
+                ("tc-sub", "subagent", '{"prompt": "task-iota", "name": "iota"}'),
+                ("tc-web", "web_fetch", json.dumps({"url": http_url})),
+            )
+        ],
+        [text_msg("merged")],
+    ]
+    scripted_model.keyed_responses = {"task-iota": [text_msg("iota report")]}
+
+    await _start("s1", "delegate and fetch")
+    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+
+    state = await session.read_session("s1")
+    assert state is not None
+    assert_message_invariants(state.messages)
+    results = _results_by_id(state)
+    assert "fetched-ok" in str(results["tc-web"].result)
+    bundle = ai.agents.MessageBundle.model_validate(results["tc-sub"].result)
+    assert bundle.messages[-1].text == "iota report"
+    assert state.messages[-1].text == "merged"
+    await assert_stream_invariants("s1", state.messages)
+
+
 async def test_web_fetch_scheduled_before_gated_bash(
     world: InProcessWorld, scripted_model: MockProvider, http_url: str
 ) -> None:
@@ -512,6 +549,41 @@ async def test_web_fetch_scheduled_before_gated_bash(
     assert "fetched-ok" in str(results["tc-web"].result)
     assert not results["tc-web"].is_error
     assert results["tc-cmd"].result == "cmd-out\n"
+    await assert_stream_invariants("s1", state.messages)
+
+
+async def test_two_web_fetches_stream_both_results(
+    world: InProcessWorld, scripted_model: MockProvider, http_url: str
+) -> None:
+    """Two ungated tools live in the same turn — no approval pause to stagger
+    them, so this is the all-concurrent happy path.
+
+    History always comes out right; the durable stream is where this cell
+    breaks today (a diverged replay drops or duplicates a result, so the UI
+    only shows it after a reload). The stream invariants and the teardown
+    determinism check catch that.
+    """
+    scripted_model.responses = [
+        [
+            _assistant(
+                "fetching both",
+                ("tc-w1", "web_fetch", json.dumps({"url": http_url + "one"})),
+                ("tc-w2", "web_fetch", json.dumps({"url": http_url + "two"})),
+            )
+        ],
+        [text_msg("both fetched")],
+    ]
+
+    await _start("s1", "fetch both")
+    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+
+    state = await session.read_session("s1")
+    assert state is not None
+    assert_message_invariants(state.messages)
+    results = _results_by_id(state)
+    assert "fetched-ok /one" in str(results["tc-w1"].result)
+    assert "fetched-ok /two" in str(results["tc-w2"].result)
+    assert state.messages[-1].text == "both fetched"
     await assert_stream_invariants("s1", state.messages)
 
 
