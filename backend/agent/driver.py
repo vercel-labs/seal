@@ -1,4 +1,5 @@
 import asyncio
+import random
 from typing import Any
 
 import ai
@@ -93,6 +94,9 @@ def _last_text(messages: list[ai.messages.Message]) -> str:
 
 
 @workflow.workflow
+# HACK: workflow sets up `random` as a custom seeded thing...
+# We ought to make it have something explicit instead
+@ai.messages.use_random_async(lambda: random)  # type: ignore
 async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
     # prepare the session
     _session_input = proto.SessionInput.model_validate(session_input)

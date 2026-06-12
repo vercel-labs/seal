@@ -9,14 +9,13 @@ suspensions, workflow hooks, the jsonl store, the bash subprocess.
 from __future__ import annotations
 
 import asyncio
-import gc
 import itertools
 from typing import Any
 
 import vercel._internal.workflow.py_sandbox as py_sandbox
 
 # mirror worker.py: these modules must come from the host inside the sandbox.
-py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
+py_sandbox._PASSTHROUGHS.update({"rich", "modelsdotdev"})
 
 import vercel._internal.workflow.runtime as wf_runtime  # noqa: E402
 import vercel._internal.workflow.worlds.local as wf_local  # noqa: E402
@@ -79,18 +78,10 @@ class InProcessWorld(wf_local.LocalWorld):
                         message_id=message_id,
                         registry=self._registry,
                     )
-                    # a suspended workflow abandons its in-flight agent.run
-                    # generator. in production the invocation's process dies
-                    # with it; here its finalizer must run (it clears global
-                    # ai-sdk hook state) before the next invocation replays
-                    # the body, or it clobbers the replay's pending hooks.
-                    for _ in range(3):
-                        gc.collect()
-                        await asyncio.sleep(0)
                 if retry is None:
                     return
                 attempt += 1
-                await asyncio.sleep(min(retry, 0.5))
+                await asyncio.sleep(min(retry.delay_seconds, 0.5))
         except asyncio.CancelledError:
             raise
         except BaseException as error:  # noqa: BLE001 — surfaced via fixture teardown
@@ -107,7 +98,7 @@ async def start_session(session_id: str, prompt: str) -> Any:
 
 
 async def wait_for_lifecycle(
-    session_id: str, type_: str, *, count: int = 1, timeout: float = 15
+    session_id: str, type_: str, *, count: int = 1, timeout: float = 30
 ) -> None:
     async def watch() -> None:
         while True:

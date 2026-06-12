@@ -6,10 +6,10 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.115.0",
     "vercel>=0.5.9",
-    "vercel-workers>=0.0.22",
     "asyncpg>=0.29.0",
     "httpx>=0.28.1",
     "ai",
+    "vercel",
 ]
 
 [tool.mypy]
@@ -39,7 +39,7 @@ exclude-newer = "2 days"
 
 [tool.uv.sources]
 ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
-vercel = { git = "https://github.com/vercel/vercel-py", rev = "47d881242e35b18dcbc7d58b7018e1188894f332" }
+vercel = { git = "https://github.com/vercel/vercel-py", branch = "seal-workflow-dev" }
 
 [dependency-groups]
 dev = [

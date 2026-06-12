@@ -12,8 +12,8 @@ exclude-newer-span = "P2D"
 
 [[package]]
 name = "ai"
-version = "0.2.2.dev1+63ad8c5"
-source = { git = "https://github.com/vercel-labs/ai-python?branch=main#63ad8c5d96a24b53b9f0fa03a6b4d7e059f3c1bd" }
+version = "0.2.2.dev3+f07e50a"
+source = { git = "https://github.com/vercel-labs/ai-python?branch=main#f07e50ac1600e0fbaccc520f807d55c467313abc" }
 dependencies = [
     { name = "httpx" },
     { name = "modelsdotdev" },
@@ -93,7 +93,6 @@ dependencies = [
     { name = "fastapi", extra = ["standard"] },
     { name = "httpx" },
     { name = "vercel" },
-    { name = "vercel-workers" },
 ]
 
 [package.dev-dependencies]
@@ -113,8 +112,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "vercel", git = "https://github.com/vercel/vercel-py?rev=47d881242e35b18dcbc7d58b7018e1188894f332" },
-    { name = "vercel-workers", specifier = ">=0.0.22" },
+    { name = "vercel", git = "https://github.com/vercel/vercel-py?branch=seal-workflow-dev" },
 ]
 
 [package.metadata.requires-dev]
@@ -1093,7 +1091,7 @@ wheels = [
 [[package]]
 name = "vercel"
 version = "0.5.9"
-source = { git = "https://github.com/vercel/vercel-py?rev=47d881242e35b18dcbc7d58b7018e1188894f332#47d881242e35b18dcbc7d58b7018e1188894f332" }
+source = { git = "https://github.com/vercel/vercel-py?branch=seal-workflow-dev#97fbf661ff03eb381b1c9552cb0bb05e213c7a0d" }
 dependencies = [
     { name = "anyio" },
     { name = "cbor2" },
