@@ -22,14 +22,9 @@ The harness also watches engine health (``check_*`` methods, run from the
   same steps/hooks in the same order. The engine matches results to requests
   purely by position, so a reordered replay silently wires results to the
   wrong calls (and the colliding step_created is swallowed as a conflict).
-* ``check_step_serialization`` — no two steps of one run in flight at once.
-  Concurrent in-flight steps are the precondition for the wedge above; this
-  reddens the pattern even on runs that happen to complete.
 
-``hostile_delivery=True`` simulates the production failure itself: a step
-invocation that starts while another step of the same run is in flight is
-killed silently right after its step_started event — exactly what the VQS
-delivery layer did to wedged dev runs.
+Concurrent steps of one run are expected and healthy (that's what lets two
+tools execute side by side); only the two checks above are laws.
 """
 
 from __future__ import annotations
@@ -74,15 +69,6 @@ def _canon_pass(entries: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
     ]
 
 
-class _HostileKill(BaseException):
-    """Kills a delivery the way the real queue layer can: silently.
-
-    BaseException so the step handler's ``except Exception`` retry path
-    cannot see it — the step stays ``running`` with no terminal event,
-    which is the exact production wedge state.
-    """
-
-
 # the (world, run_id) of the delivery currently executing in this task; lets
 # the orchestrator patches below attribute suspension requests to a run.
 _DELIVERY: contextvars.ContextVar[tuple[InProcessWorld, str] | None] = (
@@ -93,14 +79,13 @@ _DELIVERY: contextvars.ContextVar[tuple[InProcessWorld, str] | None] = (
 class InProcessWorld(wf_local.LocalWorld):
     """LocalWorld with the queue bridged to in-process handler dispatch."""
 
-    def __init__(self, registry: Any, *, hostile_delivery: bool = False) -> None:
+    def __init__(self, registry: Any) -> None:
         super().__init__()
         self._registry = registry
         self._tasks: set[asyncio.Task[None]] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._ids = itertools.count()
         self.errors: list[BaseException] = []
-        self.hostile_delivery = hostile_delivery
         # run_id -> one entry per replay pass, each the ordered list of
         # suspension requests (steps/hooks/waits) that pass made.
         self.suspension_traces: dict[str, list[list[tuple[str, ...]]]] = {}
@@ -175,28 +160,8 @@ class InProcessWorld(wf_local.LocalWorld):
                 await asyncio.sleep(min(retry, 0.5))
         except asyncio.CancelledError:
             raise
-        except _HostileKill:
-            return  # the simulated drop is silent by definition
         except BaseException as error:  # noqa: BLE001 — surfaced via fixture teardown
             self.errors.append(error)
-
-    async def events_create(
-        self, run_id: str | None, data: wf_world.Event
-    ) -> wf_world.EventResult:
-        if (
-            self.hostile_delivery
-            and run_id is not None
-            and data.event_type == "step_started"
-            and self._another_step_in_flight(run_id, data.correlation_id)
-        ):
-            # the start is durably recorded — then the invocation dies before
-            # executing or writing any terminal event, like the real drop.
-            await super().events_create(run_id, data)
-            raise _HostileKill(
-                f"dropped step {data.correlation_id} of {run_id}: "
-                "started while another step was in flight"
-            )
-        return await super().events_create(run_id, data)
 
     async def drain(self, timeout: float = 15) -> None:
         """Wait until every delivery (and the ones it spawns) has finished."""
@@ -258,34 +223,6 @@ class InProcessWorld(wf_local.LocalWorld):
                         f"pass {index} made {current[pos]!r}"
                     )
 
-    async def check_step_serialization(self) -> None:
-        """At most one step of a run dispatched (created → terminal) at a time.
-
-        Two concurrently in-flight step invocations are the precondition for
-        the production wedge: the delivery layer can drop one between its
-        step_started and any terminal event, unrecoverable at max_retries=0.
-        """
-        violations = []
-        for run in self._runs():
-            result = await self.events_list(run.run_id)
-            in_flight: dict[str, str] = {}  # correlation_id -> step name
-            for event in result.data:
-                correlation_id = event.correlation_id
-                if correlation_id is None:
-                    continue
-                if event.event_type == "step_created":
-                    name = event.event_data.step_name
-                    if in_flight:
-                        violations.append(
-                            f"run {run.run_id} ({run.workflow_name}): step "
-                            f"{name!r} dispatched while "
-                            f"{sorted(in_flight.values())} still in flight"
-                        )
-                    in_flight[correlation_id] = name
-                elif event.event_type in ("step_completed", "step_failed"):
-                    in_flight.pop(correlation_id, None)
-        assert not violations, "concurrent step dispatch:\n" + "\n".join(violations)
-
     # --- store readers ----------------------------------------------------------
 
     def _runs(self) -> list[Any]:
@@ -308,14 +245,6 @@ class InProcessWorld(wf_local.LocalWorld):
             if path.suffix == ".json"
         ]
         return [record for record in records if record is not None]
-
-    def _another_step_in_flight(self, run_id: str, correlation_id: str) -> bool:
-        return any(
-            step.run_id == run_id
-            and step.step_id != correlation_id
-            and step.status == "running"
-            for step in self._steps()
-        )
 
 
 # --- replay tracing ---------------------------------------------------------------

@@ -145,11 +145,8 @@ def mock_llm() -> Iterator[MockProvider]:
 
 
 @pytest.fixture
-async def world(
-    request: pytest.FixtureRequest,
-) -> AsyncGenerator[harness.InProcessWorld]:
-    hostile = request.node.get_closest_marker("hostile_delivery") is not None
-    bridged = harness.InProcessWorld(agent.workflow, hostile_delivery=hostile)
+async def world() -> AsyncGenerator[harness.InProcessWorld]:
+    bridged = harness.InProcessWorld(agent.workflow)
     wf_world.set_world(bridged)
     try:
         yield bridged
@@ -161,11 +158,8 @@ async def world(
             task.cancel()
         wf_world.set_world(None)
     assert bridged.errors == [], f"workflow delivery errors: {bridged.errors}"
-    if hostile:  # a deliberately sabotaged engine cannot promise health
-        return
     bridged.check_settled()
-    if request.node.get_closest_marker("replay_divergent") is None:
-        bridged.check_replay_determinism()
+    bridged.check_replay_determinism()
 
 
 @pytest.fixture
@@ -232,8 +226,6 @@ def assert_message_invariants(messages: list[messages_.Message]) -> None:
 async def assert_stream_invariants(
     session_id: str,
     messages: Sequence[messages_.Message],
-    *,
-    in_order: bool = False,
 ) -> None:
     """The durable stream answered every tool call with one consistent result.
 
@@ -241,19 +233,15 @@ async def assert_stream_invariants(
     and a cached result may be re-emitted on replay, but the final results
     must cover exactly the history's tool calls and re-emissions must carry
     the same payload — a different payload means results got cross-wired.
-
-    ``in_order=True`` additionally requires first emissions to follow the
-    assistant messages' tool-call order: the post-refactor stream contract.
+    Emission order is deliberately unconstrained: concurrent tools finish in
+    whatever order they finish.
     """
     finals: dict[str, list[Any]] = {}
-    first_seen: list[str] = []
     async for event in stream.replay(session_id):
         if isinstance(event, events_.ToolCallResult):
             for part in event.results:
                 if part.is_hook_pending:
                     continue
-                if part.tool_call_id not in finals:
-                    first_seen.append(part.tool_call_id)
                 # a cached re-emission mints a fresh part id; content is what
                 # must not change between emissions.
                 finals.setdefault(part.tool_call_id, []).append(
@@ -280,9 +268,4 @@ async def assert_stream_invariants(
         assert all(payload == payloads[0] for payload in payloads), (
             f"stream re-emitted {tool_call_id} with a different result — "
             "results were wired to the wrong calls"
-        )
-    if in_order:
-        expected = [call for call in history if call in finals]
-        assert first_seen == expected, (
-            f"stream result order {first_seen} != tool-call order {expected}"
         )

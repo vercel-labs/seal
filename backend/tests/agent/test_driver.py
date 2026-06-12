@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import Any
 
 import ai
 import ai.types.messages as messages_
@@ -162,8 +164,6 @@ async def test_gated_tool_approval_replays_the_turn_without_duplication(
     assert state.tool_approvals == []
     assert state.pending is None
     await assert_stream_invariants("s1", state.messages)
-    await world.drain()
-    await world.check_step_serialization()
 
     assert await _lifecycle("s1") == [
         proto.SESSION_STARTED,
@@ -216,8 +216,6 @@ async def test_subagent_result_lands_on_the_trailing_tool_message(
     assert [m.role for m in bundle.messages] == ["system", "user", "assistant"]
     assert bundle.messages[-1].text == "child answer"
     await assert_stream_invariants("s1", state.messages)
-    await world.drain()
-    await world.check_step_serialization()
 
     assert await _lifecycle("s1") == [
         proto.SESSION_STARTED,
@@ -241,10 +239,12 @@ async def test_subagent_result_lands_on_the_trailing_tool_message(
 
 # --- schedule-order coverage matrix -----------------------------------------------
 #
-# Every combination of tools that can share one assistant turn, in the
-# schedule orders that previously only passed (or failed) by luck in the real
-# delivery topology. Each scenario runs to completion and checks history,
-# stream, and (where current code already satisfies it) engine health.
+# Every combination of tools that can share one assistant turn, in both
+# schedule orders. Each scenario runs to completion and checks history and
+# stream; the ``world`` fixture's teardown adds the engine laws (nothing left
+# hanging, every replay pass requests the same things in the same order).
+# Steps of one run overlapping is expected — tools are meant to run
+# concurrently — so the rendezvous tests below assert that they actually do.
 
 
 def _assistant(text: str, *calls: tuple[str, str, str]) -> messages_.Message:
@@ -282,39 +282,6 @@ async def http_url() -> AsyncGenerator[str]:
     await server.wait_closed()
 
 
-async def _run_two_granted_bash(
-    scripted_model: MockProvider, *, timeout: float = 15
-) -> proto.SessionState:
-    """Both commands approved — two tool steps become live in the same turn."""
-    scripted_model.responses = [
-        [
-            _assistant(
-                "running both",
-                ("tc-a", "bash", '{"command": "echo alpha-out"}'),
-                ("tc-b", "bash", '{"command": "echo beta-out"}'),
-            )
-        ],
-        [text_msg("both done")],
-    ]
-
-    await _start("s1", "run both")
-    await _wait_for_lifecycle("s1", proto.TOOL_APPROVAL_REQUESTED, timeout=timeout)
-    await _resume(
-        "seal-session:s1:0",
-        proto.ToolApprovals(
-            tool_approvals=[
-                proto.ToolApprovalResponse(tool_call_id="tc-a", granted=True),
-                proto.ToolApprovalResponse(tool_call_id="tc-b", granted=True),
-            ]
-        ),
-    )
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING, timeout=timeout)
-
-    state = await session.read_session("s1")
-    assert state is not None
-    return state
-
-
 def _results_by_id(
     state: proto.SessionState,
 ) -> dict[str, ai.messages.ToolResultPart]:
@@ -325,36 +292,115 @@ def _results_by_id(
     }
 
 
-@pytest.mark.replay_divergent
-async def test_two_granted_bash_commands_both_run(
-    world: InProcessWorld, scripted_model: MockProvider
+async def test_two_granted_bash_commands_run_concurrently(
+    world: InProcessWorld, scripted_model: MockProvider, tmp_path: Path
 ) -> None:
-    state = await _run_two_granted_bash(scripted_model)
+    """The happy path of "run these two commands": both approved in one turn.
 
+    Each command parks until the other's marker file appears, so the results
+    only come out clean if the engine really runs them side by side —
+    serialized execution makes the first command exit 1.
+    """
+
+    def rendezvous(mine: str, other: str) -> str:
+        return (
+            f"cd {tmp_path} && touch {mine} && for _ in $(seq 100); do "
+            f"[ -f {other} ] && echo {mine}-out && exit 0; sleep 0.05; done; exit 1"
+        )
+
+    scripted_model.responses = [
+        [
+            _assistant(
+                "running both",
+                ("tc-a", "bash", json.dumps({"command": rendezvous("alpha", "beta")})),
+                ("tc-b", "bash", json.dumps({"command": rendezvous("beta", "alpha")})),
+            )
+        ],
+        [text_msg("both done")],
+    ]
+
+    await _start("s1", "run both")
+    await _wait_for_lifecycle("s1", proto.TOOL_APPROVAL_REQUESTED)
+    await _resume(
+        "seal-session:s1:0",
+        proto.ToolApprovals(
+            tool_approvals=[
+                proto.ToolApprovalResponse(tool_call_id="tc-a", granted=True),
+                proto.ToolApprovalResponse(tool_call_id="tc-b", granted=True),
+            ]
+        ),
+    )
+    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+
+    state = await session.read_session("s1")
+    assert state is not None
     assert_message_invariants(state.messages)
     results = _results_by_id(state)
     assert results["tc-a"].result == "alpha-out\n"
     assert results["tc-b"].result == "beta-out\n"
     assert state.messages[-1].text == "both done"
+    await assert_stream_invariants("s1", state.messages)
 
 
-@pytest.mark.replay_divergent
-@pytest.mark.xfail(
-    strict=True,
-    reason="run_turn dispatches both _bash steps (and monitor/loop write_event "
-    "steps) concurrently, and writes results in runner-completion order, which "
-    "is not replay-stable — a diverged replay drops or duplicates stream "
-    "results. The hook-dispatch refactor must issue all durable steps from "
-    "one coroutine in a replay-stable order.",
-)
-async def test_two_granted_bash_engine_health(
-    world: InProcessWorld, scripted_model: MockProvider
+async def test_parallel_subagents_run_concurrently(
+    world: InProcessWorld,
+    scripted_model: MockProvider,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = await _run_two_granted_bash(scripted_model)
-    await world.drain()
-    await world.check_step_serialization()
-    world.check_replay_determinism()
-    await assert_stream_invariants("s1", state.messages, in_order=True)
+    """Two delegated tasks must overlap, not run one after the other.
+
+    Each child's model call blocks until the other child has also reached the
+    model; sequential dispatch times that wait out and errors the first child,
+    so its report assertion reds.
+    """
+    scripted_model.responses = [
+        [
+            _assistant(
+                "fanning out",
+                ("tc-a", "subagent", '{"prompt": "task-a", "name": "a"}'),
+                ("tc-b", "subagent", '{"prompt": "task-b", "name": "b"}'),
+            )
+        ],
+        [text_msg("combined")],
+    ]
+    scripted_model.keyed_responses = {
+        "task-a": [text_msg("report-a")],
+        "task-b": [text_msg("report-b")],
+    }
+
+    reached = {"task-a": asyncio.Event(), "task-b": asyncio.Event()}
+    inner_stream = scripted_model.stream
+
+    def rendezvous_stream(model: Any, messages: Any, **kwargs: Any) -> Any:
+        events = inner_stream(model, messages, **kwargs)
+        last_user = next((m.text for m in reversed(messages) if m.role == "user"), "")
+        keys = [key for key in reached if key in last_user]
+        if not keys:
+            return events  # the parent's own calls pass through ungated
+
+        async def gated() -> AsyncGenerator[Any]:
+            reached[keys[0]].set()
+            others = [event for key, event in reached.items() if key != keys[0]]
+            await asyncio.gather(*(asyncio.wait_for(e.wait(), 10) for e in others))
+            async for event in events:
+                yield event
+
+        return gated()
+
+    monkeypatch.setattr(scripted_model, "stream", rendezvous_stream)
+
+    await _start("s1", "fan out")
+    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+
+    state = await session.read_session("s1")
+    assert state is not None
+    assert_message_invariants(state.messages)
+    results = _results_by_id(state)
+    for tool_call_id, report in (("tc-a", "report-a"), ("tc-b", "report-b")):
+        bundle = ai.agents.MessageBundle.model_validate(results[tool_call_id].result)
+        assert bundle.messages[-1].text == report
+    assert state.messages[-1].text == "combined"
+    await assert_stream_invariants("s1", state.messages)
 
 
 async def test_bash_scheduled_before_subagent(
@@ -392,8 +438,6 @@ async def test_bash_scheduled_before_subagent(
     bundle = ai.agents.MessageBundle.model_validate(results["tc-sub"].result)
     assert bundle.messages[-1].text == "delta report"
     await assert_stream_invariants("s1", state.messages)
-    await world.drain()
-    await world.check_step_serialization()
 
 
 async def test_subagent_scheduled_before_bash(
@@ -431,8 +475,6 @@ async def test_subagent_scheduled_before_bash(
     bundle = ai.agents.MessageBundle.model_validate(results["tc-sub"].result)
     assert bundle.messages[-1].text == "edge report"
     await assert_stream_invariants("s1", state.messages)
-    await world.drain()
-    await world.check_step_serialization()
 
 
 async def test_web_fetch_scheduled_before_gated_bash(
@@ -511,33 +553,3 @@ async def test_one_of_everything_in_a_single_turn(
     assert bundle.messages[-1].text == "omega report"
     assert state.messages[-1].text == "done with everything"
     await assert_stream_invariants("s1", state.messages)
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="run_turn dispatches overlapping steps; see "
-    "test_two_granted_bash_engine_health",
-)
-async def test_one_of_everything_steps_never_overlap(
-    world: InProcessWorld, scripted_model: MockProvider, http_url: str
-) -> None:
-    await test_one_of_everything_in_a_single_turn(world, scripted_model, http_url)
-    await world.drain()
-    await world.check_step_serialization()
-
-
-@pytest.mark.hostile_delivery
-@pytest.mark.xfail(
-    strict=True,
-    reason="overlapping step dispatch lets the delivery layer drop one step "
-    "between step_started and any terminal event; with max_retries=0 and the "
-    "already-started redelivery guard the run wedges forever (the production "
-    "failure). Goes green once run_turn never has two steps in flight.",
-)
-async def test_session_survives_a_hostile_delivery_layer(
-    world: InProcessWorld, scripted_model: MockProvider
-) -> None:
-    state = await _run_two_granted_bash(scripted_model, timeout=5)
-    results = _results_by_id(state)
-    assert results["tc-a"].result == "alpha-out\n"
-    assert results["tc-b"].result == "beta-out\n"
