@@ -8,10 +8,10 @@ snapshots (``session.py``) ride this single primitive, keyed by
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import pathlib
+import threading
 import typing
 import urllib.parse
 
@@ -77,7 +77,13 @@ def store() -> _Store:
 
 # --- jsonl --------------------------------------------------------------------
 
-_locks: dict[str, asyncio.Lock] = {}
+# One lock per (stream_id, namespace). Each workflow step runs on a fresh event
+# loop per queue message, often on a different thread, so an asyncio.Lock would
+# bind to the first loop and raise on the next. A threading.Lock has no loop
+# affinity, and it is only ever held across the synchronous file I/O below --
+# never across an await -- so it serializes the worker's threads without
+# freezing a loop or risking a same-loop deadlock.
+_locks: dict[tuple[str, str], threading.Lock] = {}
 
 
 class _JsonlStore:
@@ -94,11 +100,14 @@ class _JsonlStore:
         name = urllib.parse.quote(namespace, safe="")
         return directory / f"{name}.jsonl", directory / f"{name}.closed"
 
-    def _lock(self, stream_id: str, namespace: str) -> asyncio.Lock:
-        key = f"{stream_id}\x00{namespace}"
-        if key not in _locks:
-            _locks[key] = asyncio.Lock()
-        return _locks[key]
+    def _lock(self, stream_id: str, namespace: str) -> threading.Lock:
+        """Get a lock that protects against other tasks on the same dev server.
+
+        THIS MUST ONLY BE HELD FOR SYNCHRONOUS OPERATIONS. NO await MAY BE PERFORMED
+        WHILE HOLDING IT.
+        """
+        # setdefault is an atomic get-or-create, so racing threads share one lock.
+        return _locks.setdefault((stream_id, namespace), threading.Lock())
 
     async def ensure_ready(self) -> None:
         pass
@@ -110,7 +119,7 @@ class _JsonlStore:
         data: dict[str, typing.Any],
     ) -> int:
         events, closed = self._paths(stream_id, namespace)
-        async with self._lock(stream_id, namespace):
+        with self._lock(stream_id, namespace):
             if closed.exists():
                 raise RuntimeError("cannot write to a closed stream")
             index = (
@@ -132,7 +141,7 @@ class _JsonlStore:
         start_index: int,
     ) -> list[tuple[int, dict[str, typing.Any]]]:
         events, _ = self._paths(stream_id, namespace)
-        async with self._lock(stream_id, namespace):
+        with self._lock(stream_id, namespace):
             if not events.exists():
                 return []
             records: list[tuple[int, dict[str, typing.Any]]] = []
@@ -143,7 +152,7 @@ class _JsonlStore:
 
     async def info(self, stream_id: str, namespace: str) -> tuple[int, bool]:
         events, closed = self._paths(stream_id, namespace)
-        async with self._lock(stream_id, namespace):
+        with self._lock(stream_id, namespace):
             count = (
                 sum(1 for line in events.read_text().splitlines() if line)
                 if events.exists()
@@ -153,7 +162,7 @@ class _JsonlStore:
 
     async def close(self, stream_id: str, namespace: str) -> None:
         _, closed = self._paths(stream_id, namespace)
-        async with self._lock(stream_id, namespace):
+        with self._lock(stream_id, namespace):
             closed.parent.mkdir(parents=True, exist_ok=True)
             closed.touch()
 
@@ -161,7 +170,6 @@ class _JsonlStore:
 # --- postgres -----------------------------------------------------------------
 
 _schema_ready = False
-_schema_lock = asyncio.Lock()
 
 
 class _PgStore:
@@ -171,14 +179,14 @@ class _PgStore:
         return await db.get_pool()
 
     async def ensure_ready(self) -> None:
+        # _SCHEMA is all CREATE ... IF NOT EXISTS, so concurrent first-callers
+        # racing here just re-run idempotent DDL -- no lock needed (and a
+        # threading.Lock held across the await below could deadlock the loop).
         global _schema_ready
         if _schema_ready:
             return
-        async with _schema_lock:
-            if _schema_ready:
-                return
-            await (await self._pool()).execute(_SCHEMA)
-            _schema_ready = True
+        await (await self._pool()).execute(_SCHEMA)
+        _schema_ready = True
 
     async def append(
         self,

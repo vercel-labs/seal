@@ -8,10 +8,10 @@ one JSON file per session for local dev.
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import os
 import pathlib
+import threading
 import urllib.parse
 from typing import Any
 
@@ -36,7 +36,11 @@ CREATE TABLE IF NOT EXISTS seal_sessions (
 );
 """
 
-_locks: dict[str, asyncio.Lock] = {}
+# One lock per session id, guarding the local-file metadata read/modify/write.
+# A threading.Lock has no event-loop affinity (so it's safe under any loop or
+# thread that touches it) and is only ever held across the synchronous file I/O
+# below -- never across an await -- so it can't deadlock the loop.
+_locks: dict[str, threading.Lock] = {}
 
 
 class SessionMeta(pydantic.BaseModel):
@@ -67,8 +71,13 @@ def _path(session_id: str) -> pathlib.Path:
     return _root() / f"{urllib.parse.quote(session_id, safe='')}.json"
 
 
-def _lock_for(session_id: str) -> asyncio.Lock:
-    return _locks.setdefault(session_id, asyncio.Lock())
+def _lock_for(session_id: str) -> threading.Lock:
+    """Get a lock that protects against other tasks on the same dev server.
+
+    THIS MUST ONLY BE HELD FOR SYNCHRONOUS OPERATIONS. NO await MAY BE PERFORMED
+    WHILE HOLDING IT.
+    """
+    return _locks.setdefault(session_id, threading.Lock())
 
 
 def _read_local(session_id: str) -> SessionMeta | None:
@@ -129,7 +138,7 @@ async def get_session(session_id: str) -> SessionMeta | None:
         )
         return _from_row(row) if row is not None else None
 
-    async with _lock_for(session_id):
+    with _lock_for(session_id):
         return _read_local(session_id)
 
 
@@ -149,7 +158,7 @@ async def create_session(session_id: str, title: str | None = None) -> SessionMe
             )
         return _from_row(row)
 
-    async with _lock_for(session_id):
+    with _lock_for(session_id):
         existing = _read_local(session_id)
         if existing is not None:
             return existing
@@ -167,7 +176,7 @@ async def touch(session_id: str) -> None:
             "UPDATE seal_sessions SET updated_at = now() WHERE id = $1", session_id
         )
         return
-    async with _lock_for(session_id):
+    with _lock_for(session_id):
         existing = _read_local(session_id)
         if existing is not None:
             _write_local(existing.model_copy(update={"updated_at": _now()}))
@@ -183,7 +192,7 @@ async def set_title(session_id: str, title: str) -> SessionMeta | None:
         )
         return _from_row(row) if row is not None else None
 
-    async with _lock_for(session_id):
+    with _lock_for(session_id):
         existing = _read_local(session_id)
         if existing is None:
             return None
@@ -199,7 +208,7 @@ async def delete_session(session_id: str) -> bool:
         )
         return bool(result == "DELETE 1")
 
-    async with _lock_for(session_id):
+    with _lock_for(session_id):
         path = _path(session_id)
         if not path.exists():
             return False
