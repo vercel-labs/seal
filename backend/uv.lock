@@ -12,8 +12,8 @@ exclude-newer-span = "P2D"
 
 [[package]]
 name = "ai"
-version = "0.2.1.dev28+3853b67"
-source = { git = "https://github.com/vercel-labs/ai-python?rev=main#3853b67ba01b2ad8c9365d3a71c1b92d1ee79768" }
+version = "0.2.1.dev34+8b626d7"
+source = { git = "https://github.com/vercel-labs/ai-python?branch=main#8b626d73ec12697b1a02663b49c5d5cbe52852a3" }
 dependencies = [
     { name = "httpx" },
     { name = "modelsdotdev" },
@@ -109,7 +109,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai", git = "https://github.com/vercel-labs/ai-python?rev=main" },
+    { name = "ai", git = "https://github.com/vercel-labs/ai-python?branch=main" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },
