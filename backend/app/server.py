@@ -46,7 +46,10 @@ import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
 from agent import proto, stream  # noqa: E402
-from app import attachments, chat, sessions  # noqa: E402
+from app import attachments, chat, sessions, test_model  # noqa: E402
+
+if script := os.environ.get("SEAL_TEST_MODEL_SCRIPT"):
+    test_model.install(script)
 
 
 @contextlib.asynccontextmanager

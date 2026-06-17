@@ -1,6 +1,6 @@
 .PHONY: ci ci-backend ci-frontend \
        backend-sync backend-format backend-lint backend-typecheck backend-ty backend-test \
-       frontend-install frontend-format frontend-lint frontend-typecheck frontend-build
+       frontend-install frontend-format frontend-lint frontend-typecheck frontend-test frontend-build
 
 # Run all CI checks
 ci: ci-backend ci-frontend
@@ -29,7 +29,7 @@ backend-test:
 
 # --- Frontend -------------------------------------------------------------- #
 
-ci-frontend: frontend-install frontend-format frontend-lint frontend-typecheck frontend-build
+ci-frontend: frontend-install frontend-format frontend-lint frontend-typecheck frontend-test frontend-build
 
 frontend-install:
 	cd frontend && pnpm install --frozen-lockfile
@@ -42,6 +42,9 @@ frontend-lint:
 
 frontend-typecheck:
 	cd frontend && pnpm run typecheck
+
+frontend-test:
+	cd frontend && pnpm run test
 
 frontend-build:
 	cd frontend && pnpm run build

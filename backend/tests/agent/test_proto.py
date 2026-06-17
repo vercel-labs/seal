@@ -1,10 +1,4 @@
-"""Round-trips of every shape the app persists or sends across a hook.
-
-The durable stream and session snapshots hold ``model_dump(mode="json")``
-output that must validate back through these adapters — including data
-written by *older* versions of the app — so each round trip here is a
-compatibility contract, especially across ai SDK updates.
-"""
+"""Round-trips of every shape the app persists or sends across a hook."""
 
 from __future__ import annotations
 
@@ -27,9 +21,6 @@ def _hook_event() -> events_.HookEvent:
     return events_.HookEvent(
         message=ai.messages.Message(role="internal", parts=[hook]), hook=hook
     )
-
-
-# --- resume payloads (session hook) --------------------------------------------
 
 
 def test_resume_payloads_round_trip() -> None:
@@ -79,13 +70,9 @@ def test_subagent_result_restores_message_bundle() -> None:
     assert restored.output.output.messages[0].text == "task"
 
 
-# --- stream events ---------------------------------------------------------------
-
-
 def test_stream_events_round_trip() -> None:
-    """Every event type the app writes to the durable stream validates back."""
     tool_message = ai.tool_message(tool_call_id="tc-1", tool_name="bash", result="ok")
-    events: list[proto.StreamEvent] = [
+    stream_events: list[proto.StreamEvent] = [
         proto.LifecycleEvent(type=proto.TURN_STARTED, data={"turn_index": 0}),
         events_.TextDelta(block_id="text-0", chunk="hello"),
         events_.StreamEnd(
@@ -102,7 +89,7 @@ def test_stream_events_round_trip() -> None:
         events_.ToolCallResult(message=tool_message, results=tool_message.tool_results),
         _hook_event(),
     ]
-    for event in events:
+    for event in stream_events:
         restored = proto.STREAM_EVENT_ADAPTER.validate_python(
             event.model_dump(mode="json")
         )
@@ -111,7 +98,6 @@ def test_stream_events_round_trip() -> None:
 
 
 def test_hook_event_round_trip_keeps_approval_fields() -> None:
-    """run_turn rebuilds approval requests from these fields after replay."""
     restored = proto.STREAM_EVENT_ADAPTER.validate_python(
         _hook_event().model_dump(mode="json")
     )
@@ -122,11 +108,7 @@ def test_hook_event_round_trip_keeps_approval_fields() -> None:
     assert restored.hook.metadata["kwargs"] == {"command": "ls"}
 
 
-# --- session snapshots ------------------------------------------------------------
-
-
 def test_session_state_round_trip_is_dump_stable() -> None:
-    """A realistic snapshot survives persist → load → persist unchanged."""
     bundle = ai.agents.MessageBundle(
         messages=(
             ai.user_message("task"),
@@ -175,7 +157,6 @@ def test_session_state_round_trip_is_dump_stable() -> None:
     restored = proto.SessionState.model_validate(once)
     assert restored.model_dump(mode="json") == once
 
-    # message structure is intact after the round trip
     roles = [message.role for message in restored.messages]
     assert roles == ["system", "user", "assistant", "tool"]
     assert restored.messages[2].tool_calls[0].tool_call_id == "tc-1"

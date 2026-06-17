@@ -31,5 +31,10 @@ vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
 
 # Importing the driver pulls in turn/session/stream; constructing each module's
 # `Workflows()` registers its queue handlers.
+from app import test_model  # noqa: E402
+
+if script := os.environ.get("SEAL_TEST_MODEL_SCRIPT"):
+    test_model.install(script)
+
 import agent.driver  # noqa: E402, F401
 import agent.turn  # noqa: E402, F401

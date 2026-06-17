@@ -1,11 +1,4 @@
-"""The replay-smuggling boundary (``turn._dump_message`` / ``_load_message``).
-
-``Message.replay`` and ``ToolCallPart.cached_result`` are ``exclude=True``
-pydantic fields in the ai SDK, so they vanish through a plain
-``model_dump``/``model_validate`` round trip. The turn module smuggles them
-through the llm_step JSON boundary by hand; replay-after-approval depends on
-them surviving.
-"""
+"""Round-trips for hidden ai SDK message fields used during replay."""
 
 from __future__ import annotations
 
@@ -55,7 +48,6 @@ def test_round_trip_preserves_replay_and_cached_result() -> None:
     assert by_id["tc-1"].cached_result is not None
     assert by_id["tc-1"].cached_result.result == "file.txt"
     assert by_id["tc-2"].cached_result is None
-    # the visible content is untouched
     assert restored.model_dump(mode="json") == message.model_dump(mode="json")
 
 
@@ -70,11 +62,6 @@ def test_round_trip_of_plain_message_stays_plain() -> None:
 
 
 def test_plain_model_dump_drops_the_hidden_fields() -> None:
-    """Documents why the hack exists.
-
-    If this fails, the SDK started serializing ``replay``/``cached_result``
-    and ``_dump_message``/``_load_message`` can be deleted.
-    """
     cached = ai.tool_result_part("tc-1", tool_name="bash", result="file.txt")
     message = _assistant_with_tool_calls().model_copy(update={"replay": True})
     message.parts[1] = message.parts[1].model_copy(update={"cached_result": cached})
