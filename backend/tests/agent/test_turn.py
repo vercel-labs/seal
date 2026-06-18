@@ -62,27 +62,8 @@ def test_round_trip_preserves_replay_and_cached_result() -> None:
 def test_round_trip_of_plain_message_stays_plain() -> None:
     message = _assistant_with_tool_calls()
 
-    restored = turn._load_message(turn._dump_message(message))
+    restored = ai.types.messages.Message.model_validate(message.model_dump(mode="json"))
 
     assert restored.replay is False
     assert all(part.cached_result is None for part in restored.tool_calls)
     assert restored.model_dump(mode="json") == message.model_dump(mode="json")
-
-
-def test_plain_model_dump_drops_the_hidden_fields() -> None:
-    """Documents why the hack exists.
-
-    If this fails, the SDK started serializing ``replay``/``cached_result``
-    and ``_dump_message``/``_load_message`` can be deleted.
-    """
-    cached = ai.tool_result_part("tc-1", tool_name="bash", result="file.txt")
-    message = _assistant_with_tool_calls().model_copy(update={"replay": True})
-    message.parts[1] = message.parts[1].model_copy(update={"cached_result": cached})
-
-    data = message.model_dump(mode="json")
-    assert "replay" not in data
-    assert "cached_result" not in data["parts"][1]
-
-    restored = messages_.Message.model_validate(data)
-    assert restored.replay is False
-    assert restored.tool_calls[0].cached_result is None

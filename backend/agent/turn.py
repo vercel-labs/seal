@@ -287,14 +287,13 @@ class DurableAgent(ai.Agent):
             context.add(assistant_message)
 
             pending_subagents: list[proto.SubagentRequest] = []
-            cached_results: list[ai.messages.ToolResultPart] = []
             tool_message: ai.messages.Message | None = None
 
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
                     if tool_call.cached_result is not None:
                         # hack: special treatment of replayed results
-                        cached_results.append(tool_call.cached_result)
+                        runner.add_result(ai.tool_result(tool_call.cached_result))
                     elif tool_call.tool_name == "subagent":
                         # we're not processing this inside the loop
                         # we'll return that and have session driver dispatch
@@ -314,18 +313,6 @@ class DurableAgent(ai.Agent):
                     if session_id is not None:
                         await write_event(session_id, event.model_dump(mode="json"))
                     yield event
-
-                # hack: special treatment of replayed results
-                for cached_result in cached_results:
-                    tool_message = ai.tool_message(cached_result)
-                    event = ai.events.ToolCallResult(
-                        message=tool_message,
-                        results=tool_message.tool_results,
-                    )
-                    if session_id is not None:
-                        await write_event(session_id, event.model_dump(mode="json"))
-                    yield event
-                    runner.add_result(event)
 
                 tool_message = runner.get_tool_message()
 
