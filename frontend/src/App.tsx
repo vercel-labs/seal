@@ -127,16 +127,20 @@ function renderPart({
   key,
   role,
   addToolApprovalResponse,
+  depth = 0,
 }: {
   part: UIMessagePart<UIDataTypes, UITools>;
   key: string;
   role: UIMessage["role"];
   addToolApprovalResponse: ChatAddToolApproveResponseFunction;
+  depth?: number;
 }): ReactNode {
   if (isToolUIPart(part)) {
+    const toolName = getToolName(part);
+
     // a subagent runs its own agent; its output is a nested UIMessage we render
     // recursively rather than dumping as JSON.
-    if (getToolName(part) === "subagent") {
+    if (toolName === "subagent") {
       // live: a nested UIMessage streamed via preliminary output. final/reload:
       // a plain text summary -- fall back to the normal tool output renderer.
       const output = part.output;
@@ -145,11 +149,18 @@ function renderPart({
           ? (output as UIMessage)
           : undefined;
       return (
-        <Tool key={key} defaultOpen>
+        <Tool
+          key={key}
+          data-testid="tool-card"
+          data-tool-depth={depth}
+          data-tool-name={toolName}
+          data-tool-state={part.state}
+          defaultOpen
+        >
           <ToolHeader
             type="dynamic-tool"
             state={part.state}
-            toolName="subagent"
+            toolName={toolName}
           />
           <ToolContent>
             <ToolInput input={part.input} />
@@ -160,6 +171,7 @@ function renderPart({
                   key: `${key}-sub-${nestedIndex}`,
                   role: nested.role,
                   addToolApprovalResponse,
+                  depth: depth + 1,
                 }),
               )
             ) : (
@@ -175,13 +187,16 @@ function renderPart({
     const needsApproval = part.state === "approval-requested";
 
     return (
-      <Tool key={key} defaultOpen={isComplete || needsApproval}>
+      <Tool
+        key={key}
+        data-testid="tool-card"
+        data-tool-depth={depth}
+        data-tool-name={toolName}
+        data-tool-state={part.state}
+        defaultOpen={isComplete || needsApproval}
+      >
         {part.type === "dynamic-tool" ? (
-          <ToolHeader
-            type={part.type}
-            state={part.state}
-            toolName={getToolName(part)}
-          />
+          <ToolHeader type={part.type} state={part.state} toolName={toolName} />
         ) : (
           <ToolHeader type={part.type} state={part.state} />
         )}
@@ -325,7 +340,7 @@ function ChatView({
   return (
     <>
       <Conversation className="flex-1">
-        <ConversationContent>
+        <ConversationContent data-testid="chat-log">
           <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-4">
             {messages.length === 0 ? (
               <ConversationEmptyState
@@ -341,6 +356,7 @@ function ChatView({
                       key: `${message.id}-${partIndex}`,
                       role: message.role,
                       addToolApprovalResponse,
+                      depth: 0,
                     }),
                   )}
                 </Fragment>

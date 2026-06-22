@@ -34,13 +34,47 @@ const TIMEOUT_MS = {
   headedPause: 3_000,
 };
 
-const log = (msg) => console.log(`- ${msg}`);
-const fail = (msg) => {
-  console.error(`\nX ${msg}`);
+const colors =
+  process.env.NO_COLOR || process.env.TERM === "dumb"
+    ? {
+        red: "",
+        green: "",
+        yellow: "",
+        cyan: "",
+        dim: "",
+        bold: "",
+        reset: "",
+      }
+    : {
+        red: "\x1b[31m",
+        green: "\x1b[32m",
+        yellow: "\x1b[33m",
+        cyan: "\x1b[36m",
+        dim: "\x1b[2m",
+        bold: "\x1b[1m",
+        reset: "\x1b[0m",
+      };
+
+const color = (style, text) => `${colors[style]}${text}${colors.reset}`;
+const results = [];
+let activeResult = null;
+
+const log = (msg) => console.log(`${color("dim", "-")} ${msg}`);
+const pass = (msg, category = "run") => {
+  activeResult?.checks.push({ category, kind: "pass", msg });
+  console.log(`${color("green", "PASS")} ${color("dim", category)} ${msg}`);
+};
+const warn = (msg, category = "run") => {
+  activeResult?.checks.push({ category, kind: "warn", msg });
+  console.warn(`${color("yellow", "WARN")} ${color("dim", category)} ${msg}`);
+};
+const fail = (msg, category = "run") => {
+  activeResult?.checks.push({ category, kind: "fail", msg });
+  activeResult?.failures.push({ category, msg });
+  console.error(`${color("red", "FAIL")} ${color("dim", category)} ${msg}`);
   process.exitCode = 1;
 };
 
-const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const safeName = (value) => value.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
 
 function bashPrompt(command) {
@@ -163,20 +197,47 @@ function expectedOutputCount(scenario, text) {
   return 1;
 }
 
+function chatLog(page) {
+  return page.getByTestId("chat-log");
+}
+
+function toolCards(page) {
+  return chatLog(page).locator(
+    '[data-testid="tool-card"][data-tool-depth="0"]',
+  );
+}
+
+function toolState(page, state) {
+  return chatLog(page).locator(
+    `[data-testid="tool-card"][data-tool-depth="0"][data-tool-state="${state}"]`,
+  );
+}
+
 async function snapshot(page) {
-  const [approve, awaiting, completed, denied, errored, streaming, bodyText] =
-    await Promise.all([
-      page.getByRole("button", { name: /approve/i }).count(),
-      page.getByText("Awaiting Approval").count(),
-      page.getByText("Completed").count(),
-      page.getByText("Denied").count(),
-      page.getByText("Error").count(),
-      page.getByRole("button", { name: "Stop" }).count(),
-      page.locator("body").innerText().catch(() => ""),
-    ]);
+  const chat = chatLog(page);
+  const [
+    approve,
+    awaiting,
+    responded,
+    completed,
+    denied,
+    errored,
+    streaming,
+    bodyText,
+  ] = await Promise.all([
+    chat.getByRole("button", { name: /approve/i }).count(),
+    toolState(page, "approval-requested").count(),
+    toolState(page, "approval-responded").count(),
+    toolState(page, "output-available").count(),
+    toolState(page, "output-denied").count(),
+    toolState(page, "output-error").count(),
+    page.getByRole("button", { name: "Stop" }).count(),
+    chat.innerText().catch(() => ""),
+  ]);
   return {
     approve,
     awaiting,
+    responded,
     completed,
     denied,
     errored,
@@ -188,8 +249,9 @@ async function snapshot(page) {
 
 function describeSnapshot(s) {
   return (
-    `approve:${s.approve} awaiting:${s.awaiting} completed:${s.completed} ` +
-    `denied:${s.denied} error:${s.errored} streaming:${s.streaming}`
+    `approve:${s.approve} awaiting:${s.awaiting} responded:${s.responded} ` +
+    `completed:${s.completed} denied:${s.denied} error:${s.errored} ` +
+    `streaming:${s.streaming}`
   );
 }
 
@@ -197,6 +259,7 @@ function progressSignature(s) {
   return JSON.stringify([
     s.approve,
     s.awaiting,
+    s.responded,
     s.completed,
     s.denied,
     s.errored,
@@ -224,7 +287,7 @@ async function openFreshChat(page) {
 
   const textarea = page.getByPlaceholder("Ask me anything...");
   await textarea.waitFor({ state: "visible", timeout: TIMEOUT_MS.appReady });
-  await page
+  await chatLog(page)
     .getByText("Start a conversation")
     .waitFor({ state: "visible", timeout: TIMEOUT_MS.emptyState });
   log("app ready in a fresh empty chat");
@@ -259,12 +322,13 @@ async function approveAndWait(page, scenario) {
       fail(
         `${scenario.name}: no e2e progress for ${TIMEOUT_MS.stalledProgress}ms; ` +
           `last state -> ${describeSnapshot(s)}`,
+        "lifecycle",
       );
       break;
     }
 
     if (s.approve > 0) {
-      await page
+      await chatLog(page)
         .getByRole("button", { name: /approve/i })
         .first()
         .click({ timeout: TIMEOUT_MS.action });
@@ -276,13 +340,11 @@ async function approveAndWait(page, scenario) {
     }
 
     if (s.awaiting > 0) {
-      const headers = page
-        .getByRole("button")
-        .filter({ hasText: "Awaiting Approval" });
-      const n = await headers.count();
+      const cards = toolState(page, "approval-requested");
+      const n = await cards.count();
       let opened = 0;
       for (let i = 0; i < n; i++) {
-        const h = headers.nth(i);
+        const h = cards.nth(i).getByRole("button").first();
         if ((await h.getAttribute("data-state")) === "closed") {
           await h.click().catch(() => {});
           opened++;
@@ -321,22 +383,24 @@ async function approveAndWait(page, scenario) {
   }
 
   if (scenario.approvals > 0 && !sawApprovalUI) {
-    fail(`${scenario.name}: no tool approval UI ever appeared`);
+    fail(`${scenario.name}: no tool approval UI ever appeared`, "approval");
   }
   if (approvals !== scenario.approvals) {
     fail(
       `${scenario.name}: approved ${approvals} tool execution(s), ` +
         `expected ${scenario.approvals}`,
+      "approval",
     );
   } else if (approvals > 0) {
-    log(`approved ${approvals} tool execution(s) total`);
+    pass(`${scenario.name}: approved ${approvals} tool execution(s)`, "approval");
   }
 }
 
 async function countToolHeaders(page, toolName) {
-  return page
-    .getByRole("button")
-    .filter({ hasText: new RegExp(`\\b${escapeRegExp(toolName)}\\b`) })
+  return chatLog(page)
+    .locator(
+      `[data-testid="tool-card"][data-tool-depth="0"][data-tool-name="${toolName}"]`,
+    )
     .count();
 }
 
@@ -355,43 +419,70 @@ async function verifyScenario(page, scenario) {
   const final = await snapshot(page);
   log(
     `tool states -> Completed: ${final.completed}, ` +
-      `Denied: ${final.denied}, Error: ${final.errored}`,
+      `Responded: ${final.responded}, Denied: ${final.denied}, Error: ${final.errored}`,
   );
 
   if (final.completed < scenario.tools.length) {
     fail(
       `${scenario.name}: ${final.completed} tool(s) completed, ` +
         `expected at least ${scenario.tools.length}`,
+      "lifecycle",
+    );
+    if (final.responded > 0) {
+      warn(
+        `${scenario.name}: ${final.responded} tool(s) stopped at Responded`,
+        "lifecycle",
+      );
+    }
+  } else {
+    pass(`${scenario.name}: expected tool count completed`, "lifecycle");
+  }
+  if (final.denied > 0) {
+    fail(
+      `${scenario.name}: ${final.denied} tool execution(s) were Denied`,
+      "lifecycle",
     );
   }
-  if (final.denied > 0) fail(`${scenario.name}: ${final.denied} tool execution(s) were Denied`);
-  if (final.errored > 0) fail(`${scenario.name}: ${final.errored} tool execution(s) Errored`);
+  if (final.errored > 0) {
+    fail(
+      `${scenario.name}: ${final.errored} tool execution(s) Errored`,
+      "lifecycle",
+    );
+  }
 
   const toolCounts = expectedToolCounts(scenario);
   for (const [tool, expected] of Object.entries(toolCounts)) {
     const actual = await countToolHeaders(page, tool);
     if (actual !== expected) {
-      fail(`${scenario.name}: saw ${actual} ${tool} tool card(s), expected ${expected}`);
+      fail(
+        `${scenario.name}: saw ${actual} ${tool} tool card(s), expected ${expected}`,
+        "rendering",
+      );
     } else {
-      log(`found ${expected} ${tool} tool card(s)`);
+      pass(`${scenario.name}: found ${expected} ${tool} tool card(s)`, "rendering");
     }
   }
 
-  const convo = await page.locator("body").innerText();
+  const convo = await chatLog(page).innerText();
   for (const text of scenario.outputTexts) {
     const actual = countText(convo, text);
     const expected = expectedOutputCount(scenario, text);
     if (actual < expected) {
-      fail(`${scenario.name}: missing expected text "${text}"`);
+      fail(`${scenario.name}: missing expected text "${text}"`, "output");
     } else {
-      log(`found expected text "${text}"`);
+      pass(`${scenario.name}: found expected text "${text}"`, "output");
     }
   }
 }
 
 async function runScenario(browser, scenario) {
-  console.log(`\n== ${scenario.name} ==`);
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const result = { name: scenario.name, checks: [], failures: [] };
+  results.push(result);
+  activeResult = result;
+  console.log(`\n${color("bold", `== ${scenario.name} ==`)}`);
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+  });
   const page = await context.newPage();
   page.setDefaultTimeout(TIMEOUT_MS.action);
   page.setDefaultNavigationTimeout(TIMEOUT_MS.navigation);
@@ -403,7 +494,7 @@ async function runScenario(browser, scenario) {
     await page.getByRole("button", { name: "Submit" }).click();
     log(`sent prompt: "${scenario.prompt}"`);
 
-    await page
+    await chatLog(page)
       .getByText(scenario.prompt, { exact: false })
       .first()
       .waitFor({ state: "visible", timeout: TIMEOUT_MS.promptVisible });
@@ -415,9 +506,33 @@ async function runScenario(browser, scenario) {
     await verifyScenario(page, scenario);
   } catch (err) {
     await shot(page, scenario, "error");
-    fail(`${scenario.name}: unexpected error: ${err?.stack || err}`);
+    fail(`${scenario.name}: unexpected error: ${err?.stack || err}`, "run");
   } finally {
     await context.close();
+    activeResult = null;
+  }
+}
+
+function printSummary() {
+  console.log(`\n${color("bold", "== summary ==")}`);
+  const width = Math.max(...results.map((result) => result.name.length), 8);
+
+  for (const result of results) {
+    const label =
+      result.failures.length === 0
+        ? color("green", "PASS")
+        : color("red", "FAIL");
+    const categories = [
+      ...new Set(result.failures.map((failure) => failure.category)),
+    ].join(", ");
+    const suffix = categories ? color("yellow", categories) : color("green", "ok");
+    console.log(`${label} ${result.name.padEnd(width)} ${suffix}`);
+
+    for (const failure of result.failures) {
+      console.log(
+        `     ${color("dim", failure.category.padEnd(10))} ${failure.msg}`,
+      );
+    }
   }
 }
 
@@ -431,12 +546,20 @@ try {
     await runScenario(browser, scenario);
   }
 
+  printSummary();
+
   if (process.exitCode === 1) {
-    console.error("\nX verification FAILED (see /tmp/seal-e2e-*.png)");
+    console.error(
+      `\n${color("red", "FAIL")} verification failed (see /tmp/seal-e2e-*.png)`,
+    );
   } else {
-    console.log("\nPASS - covered individual tools and tool pairs");
+    console.log(
+      `\n${color("green", "PASS")} covered individual tools and tool pairs`,
+    );
   }
 } finally {
-  if (HEADED) await new Promise((resolve) => setTimeout(resolve, TIMEOUT_MS.headedPause));
+  if (HEADED) {
+    await new Promise((resolve) => setTimeout(resolve, TIMEOUT_MS.headedPause));
+  }
   await browser.close();
 }
