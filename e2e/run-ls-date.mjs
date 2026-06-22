@@ -1,9 +1,9 @@
-// E2E smoke test: drives a real browser against a running seal instance.
+// E2E tool coverage test: drives a real browser against a running seal instance.
 //
 //   1. open seal in a fresh empty chat
-//   2. prompt "run ls and date"
-//   3. approve every tool execution the agent requests (expects two: ls + date)
-//   4. verify both bash commands ran and the agent produced a final reply
+//   2. run scenarios for each individual tool and each pair of tools
+//   3. approve every bash execution the agent requests
+//   4. verify the expected tools completed and recognizable outputs rendered
 //
 // Setup (once): pnpm install && pnpm run install-browser
 // Run against a live server (default http://localhost:3000):
@@ -15,10 +15,9 @@
 
 import { chromium } from "playwright";
 
-const URL = process.env.SEAL_URL ?? "http://localhost:3000";
+const SEAL_URL = process.env.SEAL_URL ?? "http://localhost:3000";
 const HEADED = !!process.env.HEADED;
-const PROMPT = "run ls and date";
-const YEAR = String(new Date().getFullYear());
+const HEALTH_URL = new URL("/api/health", SEAL_URL).toString();
 
 const TIMEOUT_MS = {
   action: 5_000,
@@ -26,7 +25,7 @@ const TIMEOUT_MS = {
   appReady: 5_000,
   emptyState: 5_000,
   promptVisible: 5_000,
-  stalledProgress: 5_000,
+  stalledProgress: 30_000,
   heartbeat: 1_000,
   afterApproval: 250,
   afterCardExpand: 150,
@@ -35,21 +34,136 @@ const TIMEOUT_MS = {
   headedPause: 3_000,
 };
 
-const log = (msg) => console.log(`• ${msg}`);
+const log = (msg) => console.log(`- ${msg}`);
 const fail = (msg) => {
-  console.error(`\n✗ ${msg}`);
+  console.error(`\nX ${msg}`);
   process.exitCode = 1;
 };
 
-const browser = await chromium.launch({ headless: !HEADED, timeout: TIMEOUT_MS.action });
-const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-page.setDefaultTimeout(TIMEOUT_MS.action);
-page.setDefaultNavigationTimeout(TIMEOUT_MS.navigation);
-const shot = (label) =>
-  page.screenshot({ path: `/tmp/seal-e2e-${label}.png`, fullPage: true }).catch(() => {});
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const safeName = (value) => value.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
 
-// Count what the script currently perceives -- used for live diagnostics.
-async function snapshot() {
+function bashPrompt(command) {
+  return `Use exactly one tool call: bash. Run this exact command: ${command}. Do not call web_fetch or subagent. After the tool returns, answer briefly.`;
+}
+
+function webFetchPrompt(url) {
+  return `Use exactly one tool call: web_fetch. Fetch this exact URL: ${url}. Do not call bash or subagent. After the tool returns, answer briefly.`;
+}
+
+function subagentPrompt(name, first, second) {
+  return (
+    `Use exactly one tool call: subagent. Name it "${name}" and ask it to ` +
+    `reply with exactly the concatenation of "${first}" and "${second}". ` +
+    "Do not call bash or web_fetch. After the tool returns, answer briefly."
+  );
+}
+
+const SCENARIOS = [
+  {
+    name: "bash",
+    prompt: bashPrompt("printf 'seal-e2e-bash-%s\\n' single"),
+    tools: ["bash"],
+    approvals: 1,
+    outputTexts: ["seal-e2e-bash-single"],
+  },
+  {
+    name: "web_fetch",
+    prompt: webFetchPrompt(HEALTH_URL),
+    tools: ["web_fetch"],
+    approvals: 0,
+    outputTexts: ["HTTP 200", "status", "ok"],
+  },
+  {
+    name: "subagent",
+    prompt: subagentPrompt("single-helper", "seal-e2e-subagent", "-single"),
+    tools: ["subagent"],
+    approvals: 0,
+    outputTexts: ["seal-e2e-subagent-single"],
+  },
+  {
+    name: "bash+bash",
+    prompt:
+      "Use exactly two tool calls, both bash. " +
+      "First run: printf 'seal-e2e-bash-pair-%s\\n' a. " +
+      "Second run: printf 'seal-e2e-bash-pair-%s\\n' b. " +
+      "Do not call web_fetch or subagent. After both tools return, answer briefly.",
+    tools: ["bash", "bash"],
+    approvals: 2,
+    outputTexts: ["seal-e2e-bash-pair-a", "seal-e2e-bash-pair-b"],
+  },
+  {
+    name: "bash+web_fetch",
+    prompt:
+      "Use exactly two tool calls: first bash, then web_fetch. " +
+      "For bash, run: printf 'seal-e2e-bash-%s\\n' web. " +
+      `For web_fetch, fetch this exact URL: ${HEALTH_URL}. ` +
+      "Do not call subagent. After both tools return, answer briefly.",
+    tools: ["bash", "web_fetch"],
+    approvals: 1,
+    outputTexts: ["seal-e2e-bash-web", "HTTP 200", "status", "ok"],
+  },
+  {
+    name: "bash+subagent",
+    prompt:
+      "Use exactly two tool calls: first bash, then subagent. " +
+      "For bash, run: printf 'seal-e2e-bash-%s\\n' subagent. " +
+      'For subagent, name it "bash-subagent-helper" and ask it to reply with exactly the concatenation of "seal-e2e-subagent" and "-with-bash". ' +
+      "Do not call web_fetch. After both tools return, answer briefly.",
+    tools: ["bash", "subagent"],
+    approvals: 1,
+    outputTexts: ["seal-e2e-bash-subagent", "seal-e2e-subagent-with-bash"],
+  },
+  {
+    name: "web_fetch+web_fetch",
+    prompt:
+      "Use exactly two tool calls, both web_fetch. " +
+      `First fetch this exact URL: ${HEALTH_URL}?case=first. ` +
+      `Second fetch this exact URL: ${HEALTH_URL}?case=second. ` +
+      "Do not call bash or subagent. After both tools return, answer briefly.",
+    tools: ["web_fetch", "web_fetch"],
+    approvals: 0,
+    outputTexts: ["HTTP 200", "status", "ok"],
+  },
+  {
+    name: "web_fetch+subagent",
+    prompt:
+      "Use exactly two tool calls: first web_fetch, then subagent. " +
+      `For web_fetch, fetch this exact URL: ${HEALTH_URL}. ` +
+      'For subagent, name it "web-subagent-helper" and ask it to reply with exactly the concatenation of "seal-e2e-subagent" and "-with-web". ' +
+      "Do not call bash. After both tools return, answer briefly.",
+    tools: ["web_fetch", "subagent"],
+    approvals: 0,
+    outputTexts: ["HTTP 200", "status", "ok", "seal-e2e-subagent-with-web"],
+  },
+  {
+    name: "subagent+subagent",
+    prompt:
+      "Use exactly two tool calls, both subagent. " +
+      'First, name it "subagent-alpha" and ask it to reply with exactly the concatenation of "seal-e2e-subagent-pair" and "-a". ' +
+      'Second, name it "subagent-beta" and ask it to reply with exactly the concatenation of "seal-e2e-subagent-pair" and "-b". ' +
+      "Do not call bash or web_fetch. After both tools return, answer briefly.",
+    tools: ["subagent", "subagent"],
+    approvals: 0,
+    outputTexts: ["seal-e2e-subagent-pair-a", "seal-e2e-subagent-pair-b"],
+  },
+];
+
+function expectedToolCounts(scenario) {
+  return scenario.tools.reduce((counts, tool) => {
+    counts[tool] = (counts[tool] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function expectedOutputCount(scenario, text) {
+  if (text === "HTTP 200") {
+    return scenario.tools.filter((tool) => tool === "web_fetch").length;
+  }
+  return 1;
+}
+
+async function snapshot(page) {
   const [approve, awaiting, completed, denied, errored, streaming, bodyText] =
     await Promise.all([
       page.getByRole("button", { name: /approve/i }).count(),
@@ -92,48 +206,41 @@ function progressSignature(s) {
   ]);
 }
 
-try {
-  // --- 1. open seal in a fresh empty chat --------------------------------
-  log(`opening ${URL}`);
-  await page.goto(URL, { waitUntil: "domcontentloaded", timeout: TIMEOUT_MS.navigation });
+async function shot(page, scenario, label) {
+  await page
+    .screenshot({
+      path: `/tmp/seal-e2e-${safeName(scenario.name)}-${label}.png`,
+      fullPage: true,
+    })
+    .catch(() => {});
+}
 
-  // A fresh browser context has empty localStorage, so bootstrap() drops us
-  // straight into a new empty chat -- no need to click "New chat". App shows
-  // "Loading..." until bootstrap() finishes and ChatView mounts; the textarea
-  // only exists once it's up, and the empty-state confirms a clean conversation.
+async function openFreshChat(page) {
+  log(`opening ${SEAL_URL}`);
+  await page.goto(SEAL_URL, {
+    waitUntil: "domcontentloaded",
+    timeout: TIMEOUT_MS.navigation,
+  });
+
   const textarea = page.getByPlaceholder("Ask me anything...");
   await textarea.waitFor({ state: "visible", timeout: TIMEOUT_MS.appReady });
   await page
     .getByText("Start a conversation")
     .waitFor({ state: "visible", timeout: TIMEOUT_MS.emptyState });
   log("app ready in a fresh empty chat");
+  return textarea;
+}
 
-  // --- 2. send the prompt -------------------------------------------------
-  await textarea.fill(PROMPT);
-  await page.getByRole("button", { name: "Submit" }).click();
-  log(`sent prompt: "${PROMPT}"`);
-
-  // Confirm the prompt actually landed in the *visible* conversation (catches
-  // any session/remount race -- if this fails, we'd be staring at the wrong UI).
-  await page
-    .getByText(PROMPT, { exact: false })
-    .first()
-    .waitFor({ state: "visible", timeout: TIMEOUT_MS.promptVisible });
-  log("prompt is visible in the conversation");
-  await shot("after-send");
-
-  // --- 3. approve each tool execution as it appears ----------------------
-  // bash requires approval, so each command surfaces a Confirmation with an
-  // Approve button. Approvals may arrive in parallel or one per turn; keep
-  // approving until the agent goes idle.
+async function approveAndWait(page, scenario) {
   let approvals = 0;
   let sawApprovalUI = false;
   let lastProgressAt = Date.now();
   let lastProgressSignature = "";
   let lastLog = 0;
+  const expectedCompletions = scenario.tools.length;
 
   while (true) {
-    const s = await snapshot();
+    const s = await snapshot(page);
     const now = Date.now();
     const signature = progressSignature(s);
     if (signature !== lastProgressSignature) {
@@ -142,16 +249,15 @@ try {
     }
     if (s.approve > 0 || s.awaiting > 0) sawApprovalUI = true;
 
-    // Throttled heartbeat so we can see what the script perceives.
     if (now - lastLog > TIMEOUT_MS.heartbeat) {
       log(`...waiting (${describeSnapshot(s)})`);
       lastLog = now;
     }
 
     if (now - lastProgressAt > TIMEOUT_MS.stalledProgress) {
-      await shot("timeout");
+      await shot(page, scenario, "timeout");
       fail(
-        `no e2e progress for ${TIMEOUT_MS.stalledProgress}ms; ` +
+        `${scenario.name}: no e2e progress for ${TIMEOUT_MS.stalledProgress}ms; ` +
           `last state -> ${describeSnapshot(s)}`,
       );
       break;
@@ -169,10 +275,6 @@ try {
       continue;
     }
 
-    // Approval requested but no Approve button is reachable: the tool card
-    // mounted while "Running" (defaultOpen=false) and Radix only honors
-    // defaultOpen at mount, so it stays collapsed after flipping to
-    // "Awaiting Approval", hiding its Approve button. Expand the card(s).
     if (s.awaiting > 0) {
       const headers = page
         .getByRole("button")
@@ -194,16 +296,22 @@ try {
       continue;
     }
 
-    // No pending approval. We're only done once every approved tool has reached
-    // a terminal state (Completed/Denied/Error) AND the agent stopped streaming.
-    // Requiring terminal tools avoids bailing in the brief idle gap between
-    // turns, before the bash output (and final reply) has rendered.
     const terminal = s.completed + s.denied + s.errored;
-    if (!s.streaming && !s.awaiting && approvals >= 1 && terminal >= approvals) {
+    if (
+      !s.streaming &&
+      !s.awaiting &&
+      approvals >= scenario.approvals &&
+      terminal >= expectedCompletions
+    ) {
       await page.waitForTimeout(TIMEOUT_MS.stableIdle);
-      const s2 = await snapshot();
+      const s2 = await snapshot(page);
       const terminal2 = s2.completed + s2.denied + s2.errored;
-      if (!s2.streaming && !s2.awaiting && s2.approve === 0 && terminal2 >= approvals) {
+      if (
+        !s2.streaming &&
+        !s2.awaiting &&
+        s2.approve === 0 &&
+        terminal2 >= expectedCompletions
+      ) {
         break;
       }
       continue;
@@ -212,45 +320,123 @@ try {
     await page.waitForTimeout(TIMEOUT_MS.poll);
   }
 
-  await shot("final");
+  if (scenario.approvals > 0 && !sawApprovalUI) {
+    fail(`${scenario.name}: no tool approval UI ever appeared`);
+  }
+  if (approvals !== scenario.approvals) {
+    fail(
+      `${scenario.name}: approved ${approvals} tool execution(s), ` +
+        `expected ${scenario.approvals}`,
+    );
+  } else if (approvals > 0) {
+    log(`approved ${approvals} tool execution(s) total`);
+  }
+}
 
-  if (!sawApprovalUI) fail("no tool approval UI ever appeared");
-  if (approvals === 0) fail("no tool approval was ever clicked");
-  else log(`approved ${approvals} tool execution(s) total`);
+async function countToolHeaders(page, toolName) {
+  return page
+    .getByRole("button")
+    .filter({ hasText: new RegExp(`\\b${escapeRegExp(toolName)}\\b`) })
+    .count();
+}
 
-  // --- 4. verify it worked ------------------------------------------------
-  const final = await snapshot();
+function countText(haystack, needle) {
+  let count = 0;
+  let start = 0;
+  while (true) {
+    const index = haystack.indexOf(needle, start);
+    if (index === -1) return count;
+    count++;
+    start = index + needle.length;
+  }
+}
+
+async function verifyScenario(page, scenario) {
+  const final = await snapshot(page);
   log(
     `tool states -> Completed: ${final.completed}, ` +
       `Denied: ${final.denied}, Error: ${final.errored}`,
   );
 
-  if (final.completed < 1) fail("no tool reached the Completed state");
-  if (final.denied > 0) fail(`${final.denied} tool execution(s) were Denied`);
-  if (final.errored > 0) fail(`${final.errored} tool execution(s) Errored`);
+  if (final.completed < scenario.tools.length) {
+    fail(
+      `${scenario.name}: ${final.completed} tool(s) completed, ` +
+        `expected at least ${scenario.tools.length}`,
+    );
+  }
+  if (final.denied > 0) fail(`${scenario.name}: ${final.denied} tool execution(s) were Denied`);
+  if (final.errored > 0) fail(`${scenario.name}: ${final.errored} tool execution(s) Errored`);
 
-  // The whole conversation as plain text: should contain both commands and the
-  // date command's output (the current year).
+  const toolCounts = expectedToolCounts(scenario);
+  for (const [tool, expected] of Object.entries(toolCounts)) {
+    const actual = await countToolHeaders(page, tool);
+    if (actual !== expected) {
+      fail(`${scenario.name}: saw ${actual} ${tool} tool card(s), expected ${expected}`);
+    } else {
+      log(`found ${expected} ${tool} tool card(s)`);
+    }
+  }
+
   const convo = await page.locator("body").innerText();
+  for (const text of scenario.outputTexts) {
+    const actual = countText(convo, text);
+    const expected = expectedOutputCount(scenario, text);
+    if (actual < expected) {
+      fail(`${scenario.name}: missing expected text "${text}"`);
+    } else {
+      log(`found expected text "${text}"`);
+    }
+  }
+}
 
-  if (!/\bls\b/.test(convo)) fail('conversation has no "ls" command');
-  else log('found "ls" in the conversation');
+async function runScenario(browser, scenario) {
+  console.log(`\n== ${scenario.name} ==`);
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(TIMEOUT_MS.action);
+  page.setDefaultNavigationTimeout(TIMEOUT_MS.navigation);
 
-  if (!/\bdate\b/.test(convo)) fail('conversation has no "date" command');
-  else log('found "date" in the conversation');
+  try {
+    const textarea = await openFreshChat(page);
 
-  if (!convo.includes(YEAR)) fail(`date output missing current year (${YEAR})`);
-  else log(`found current year (${YEAR}) -- date ran`);
+    await textarea.fill(scenario.prompt);
+    await page.getByRole("button", { name: "Submit" }).click();
+    log(`sent prompt: "${scenario.prompt}"`);
+
+    await page
+      .getByText(scenario.prompt, { exact: false })
+      .first()
+      .waitFor({ state: "visible", timeout: TIMEOUT_MS.promptVisible });
+    log("prompt is visible in the conversation");
+    await shot(page, scenario, "after-send");
+
+    await approveAndWait(page, scenario);
+    await shot(page, scenario, "final");
+    await verifyScenario(page, scenario);
+  } catch (err) {
+    await shot(page, scenario, "error");
+    fail(`${scenario.name}: unexpected error: ${err?.stack || err}`);
+  } finally {
+    await context.close();
+  }
+}
+
+const browser = await chromium.launch({
+  headless: !HEADED,
+  timeout: TIMEOUT_MS.action,
+});
+
+try {
+  for (const scenario of SCENARIOS) {
+    await runScenario(browser, scenario);
+  }
 
   if (process.exitCode === 1) {
-    console.error("\n✗ verification FAILED (see /tmp/seal-e2e-*.png)");
+    console.error("\nX verification FAILED (see /tmp/seal-e2e-*.png)");
   } else {
-    console.log("\n✓ PASS -- ran ls + date, approved executions, verified output");
+    console.log("\nPASS - covered individual tools and tool pairs");
   }
-} catch (err) {
-  await shot("error");
-  fail(`unexpected error: ${err?.stack || err}`);
 } finally {
-  if (HEADED) await page.waitForTimeout(TIMEOUT_MS.headedPause);
+  if (HEADED) await new Promise((resolve) => setTimeout(resolve, TIMEOUT_MS.headedPause));
   await browser.close();
 }
