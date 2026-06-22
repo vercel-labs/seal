@@ -20,20 +20,37 @@ const HEADED = !!process.env.HEADED;
 const PROMPT = "run ls and date";
 const YEAR = String(new Date().getFullYear());
 
+const TIMEOUT_MS = {
+  action: 5_000,
+  navigation: 5_000,
+  appReady: 5_000,
+  emptyState: 5_000,
+  promptVisible: 5_000,
+  stalledProgress: 5_000,
+  heartbeat: 1_000,
+  afterApproval: 250,
+  afterCardExpand: 150,
+  stableIdle: 1_000,
+  poll: 250,
+  headedPause: 3_000,
+};
+
 const log = (msg) => console.log(`• ${msg}`);
 const fail = (msg) => {
   console.error(`\n✗ ${msg}`);
   process.exitCode = 1;
 };
 
-const browser = await chromium.launch({ headless: !HEADED });
+const browser = await chromium.launch({ headless: !HEADED, timeout: TIMEOUT_MS.action });
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+page.setDefaultTimeout(TIMEOUT_MS.action);
+page.setDefaultNavigationTimeout(TIMEOUT_MS.navigation);
 const shot = (label) =>
   page.screenshot({ path: `/tmp/seal-e2e-${label}.png`, fullPage: true }).catch(() => {});
 
 // Count what the script currently perceives -- used for live diagnostics.
 async function snapshot() {
-  const [approve, awaiting, completed, denied, errored, streaming] =
+  const [approve, awaiting, completed, denied, errored, streaming, bodyText] =
     await Promise.all([
       page.getByRole("button", { name: /approve/i }).count(),
       page.getByText("Awaiting Approval").count(),
@@ -41,24 +58,54 @@ async function snapshot() {
       page.getByText("Denied").count(),
       page.getByText("Error").count(),
       page.getByRole("button", { name: "Stop" }).count(),
+      page.locator("body").innerText().catch(() => ""),
     ]);
-  return { approve, awaiting, completed, denied, errored, streaming: streaming > 0 };
+  return {
+    approve,
+    awaiting,
+    completed,
+    denied,
+    errored,
+    streaming: streaming > 0,
+    bodyLength: bodyText.length,
+    bodyTail: bodyText.slice(-400),
+  };
+}
+
+function describeSnapshot(s) {
+  return (
+    `approve:${s.approve} awaiting:${s.awaiting} completed:${s.completed} ` +
+    `denied:${s.denied} error:${s.errored} streaming:${s.streaming}`
+  );
+}
+
+function progressSignature(s) {
+  return JSON.stringify([
+    s.approve,
+    s.awaiting,
+    s.completed,
+    s.denied,
+    s.errored,
+    s.streaming,
+    s.bodyLength,
+    s.bodyTail,
+  ]);
 }
 
 try {
   // --- 1. open seal in a fresh empty chat --------------------------------
   log(`opening ${URL}`);
-  await page.goto(URL, { waitUntil: "domcontentloaded" });
+  await page.goto(URL, { waitUntil: "domcontentloaded", timeout: TIMEOUT_MS.navigation });
 
   // A fresh browser context has empty localStorage, so bootstrap() drops us
   // straight into a new empty chat -- no need to click "New chat". App shows
   // "Loading..." until bootstrap() finishes and ChatView mounts; the textarea
   // only exists once it's up, and the empty-state confirms a clean conversation.
   const textarea = page.getByPlaceholder("Ask me anything...");
-  await textarea.waitFor({ state: "visible", timeout: 30_000 });
+  await textarea.waitFor({ state: "visible", timeout: TIMEOUT_MS.appReady });
   await page
     .getByText("Start a conversation")
-    .waitFor({ state: "visible", timeout: 15_000 });
+    .waitFor({ state: "visible", timeout: TIMEOUT_MS.emptyState });
   log("app ready in a fresh empty chat");
 
   // --- 2. send the prompt -------------------------------------------------
@@ -71,7 +118,7 @@ try {
   await page
     .getByText(PROMPT, { exact: false })
     .first()
-    .waitFor({ state: "visible", timeout: 15_000 });
+    .waitFor({ state: "visible", timeout: TIMEOUT_MS.promptVisible });
   log("prompt is visible in the conversation");
   await shot("after-send");
 
@@ -81,28 +128,44 @@ try {
   // approving until the agent goes idle.
   let approvals = 0;
   let sawApprovalUI = false;
-  const start = Date.now();
-  const MAX_MS = 120_000;
+  let lastProgressAt = Date.now();
+  let lastProgressSignature = "";
   let lastLog = 0;
 
-  while (Date.now() - start < MAX_MS) {
+  while (true) {
     const s = await snapshot();
+    const now = Date.now();
+    const signature = progressSignature(s);
+    if (signature !== lastProgressSignature) {
+      lastProgressSignature = signature;
+      lastProgressAt = now;
+    }
     if (s.approve > 0 || s.awaiting > 0) sawApprovalUI = true;
 
     // Throttled heartbeat so we can see what the script perceives.
-    if (Date.now() - lastLog > 2500) {
-      log(
-        `…waiting (approve:${s.approve} awaiting:${s.awaiting} ` +
-          `completed:${s.completed} streaming:${s.streaming})`,
+    if (now - lastLog > TIMEOUT_MS.heartbeat) {
+      log(`...waiting (${describeSnapshot(s)})`);
+      lastLog = now;
+    }
+
+    if (now - lastProgressAt > TIMEOUT_MS.stalledProgress) {
+      await shot("timeout");
+      fail(
+        `no e2e progress for ${TIMEOUT_MS.stalledProgress}ms; ` +
+          `last state -> ${describeSnapshot(s)}`,
       );
-      lastLog = Date.now();
+      break;
     }
 
     if (s.approve > 0) {
-      await page.getByRole("button", { name: /approve/i }).first().click();
+      await page
+        .getByRole("button", { name: /approve/i })
+        .first()
+        .click({ timeout: TIMEOUT_MS.action });
       approvals++;
+      lastProgressAt = Date.now();
       log(`approved tool execution #${approvals}`);
-      await page.waitForTimeout(600); // let state settle / auto-send fire
+      await page.waitForTimeout(TIMEOUT_MS.afterApproval);
       continue;
     }
 
@@ -123,8 +186,11 @@ try {
           opened++;
         }
       }
-      if (opened) log(`expanded ${opened} collapsed approval card(s)`);
-      await page.waitForTimeout(300);
+      if (opened) {
+        lastProgressAt = Date.now();
+        log(`expanded ${opened} collapsed approval card(s)`);
+      }
+      await page.waitForTimeout(TIMEOUT_MS.afterCardExpand);
       continue;
     }
 
@@ -134,7 +200,7 @@ try {
     // turns, before the bash output (and final reply) has rendered.
     const terminal = s.completed + s.denied + s.errored;
     if (!s.streaming && !s.awaiting && approvals >= 1 && terminal >= approvals) {
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(TIMEOUT_MS.stableIdle);
       const s2 = await snapshot();
       const terminal2 = s2.completed + s2.denied + s2.errored;
       if (!s2.streaming && !s2.awaiting && s2.approve === 0 && terminal2 >= approvals) {
@@ -143,7 +209,7 @@ try {
       continue;
     }
 
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(TIMEOUT_MS.poll);
   }
 
   await shot("final");
@@ -185,6 +251,6 @@ try {
   await shot("error");
   fail(`unexpected error: ${err?.stack || err}`);
 } finally {
-  if (HEADED) await page.waitForTimeout(3000);
+  if (HEADED) await page.waitForTimeout(TIMEOUT_MS.headedPause);
   await browser.close();
 }
