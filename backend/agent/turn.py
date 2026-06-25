@@ -20,16 +20,6 @@ SUBAGENT_SYSTEM_PROMPT = (
 )
 
 
-# hack: agent.run requires model, but can't actually pass it to ai.stream
-# that's wrapped in a step
-class WorkflowModelProvider(ai.Provider[Any]):
-    def __init__(self) -> None:
-        super().__init__(name="workflow-placeholder", base_url="")
-
-
-# end of hack
-
-
 @workflow.step
 async def llm_step(
     model_id: str,
@@ -41,16 +31,7 @@ async def llm_step(
     messages = [
         ai.messages.Message.model_validate(message) for message in messages_data
     ]
-    # hack: ai.Tool erases args type so we have to reconstruct them manually
-    tools: list[ai.Tool] = []
-    for tool in tools_data:
-        if tool.get("kind") == "function":
-            tool = {
-                **tool,
-                "args": ai.tools.FunctionToolArgs.model_validate(tool["args"]),
-            }
-        tools.append(ai.Tool.model_validate(tool))
-    # end of hack
+    tools = [ai.Tool.model_validate(tool) for tool in tools_data]
 
     writer = await stream.get_writable(session_id) if session_id else None
     message: ai.messages.Message | None = None
@@ -219,11 +200,7 @@ class DurableAgent(ai.Agent):
             result = await llm_step(
                 model_id,
                 [message.model_dump(mode="json") for message in context.messages],
-                # hack: have to use serialize_as_any because ai.Tool erases args type
-                [
-                    tool.model_dump(mode="json", serialize_as_any=True)
-                    for tool in context.tools
-                ],
+                [tool.model_dump(mode="json") for tool in context.tools],
                 session_id,
             )
 
@@ -334,7 +311,7 @@ async def _run_turn(turn_input: dict[str, Any]) -> None:
     tool_approval_requests: list[proto.ToolApprovalRequest] = []
 
     try:
-        model = ai.Model(MODEL_ID, provider=WorkflowModelProvider())
+        model = ai.get_model(MODEL_ID)
         async with agent.run(model, messages) as run:
             async for event in run:
                 # monitor the stream for hook events and interrupt on them.

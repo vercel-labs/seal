@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from collections.abc import AsyncGenerator, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pydantic
 import pytest
@@ -62,11 +62,21 @@ class MockProvider(models.Provider):
     the wrong tool call.
     """
 
-    def __init__(self) -> None:
-        super().__init__(name="mock", base_url="http://mock.test", api_key_env=None)
-        self.responses: list[list[messages_.Message]] = []
-        self.keyed_responses: dict[str, list[messages_.Message]] = {}
-        self.call_count = 0
+    # Provider is now a frozen pydantic model; opt this test double back into
+    # mutability and keep the scripted state out of serialization/hashing.
+    model_config = pydantic.ConfigDict(frozen=False)
+
+    provider_class_id: Literal["mock"] = "mock"
+    name: str = "mock"
+    default_base_url: str = "http://mock.test"
+
+    responses: list[list[messages_.Message]] = pydantic.Field(
+        default_factory=list, exclude=True
+    )
+    keyed_responses: dict[str, list[messages_.Message]] = pydantic.Field(
+        default_factory=dict, exclude=True
+    )
+    call_count: int = pydantic.Field(default=0, exclude=True)
 
     async def list_models(self) -> list[str]:
         return []
