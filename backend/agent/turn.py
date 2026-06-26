@@ -7,7 +7,7 @@ from typing import Any, ClassVar, cast
 
 import ai
 
-from agent import proto, stream, util, workflow
+from agent import proto, stream, workflow
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
@@ -21,7 +21,6 @@ SUBAGENT_SYSTEM_PROMPT = (
 
 
 @workflow.step
-@util.print_traceback
 async def llm_step(
     model_id: str,
     messages_data: list[dict[str, object]],
@@ -55,7 +54,6 @@ llm_step.max_retries = 0
 
 
 @workflow.step
-@util.print_traceback
 async def write_event(
     # writes one stream event (agent or lifecycle) to the durable stream
     session_id: str,
@@ -276,10 +274,20 @@ resume_turn_hook.max_retries = 0
 
 
 # runs one agent turn, maybe requests subagents
-# XXX: some sort of cleanup on failure?
 @workflow.workflow
-@util.print_traceback
 async def run_turn(turn_input: dict[str, Any]) -> None:
+    try:
+        return await _run_turn(turn_input)
+    except Exception:
+        print(
+            f"[seal] run_turn failed:\n{traceback.format_exc()}",
+            flush=True,
+        )
+        # XXX: some sort of cleanup?
+        raise
+
+
+async def _run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
     messages = _turn_input.messages
 
