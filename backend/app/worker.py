@@ -10,7 +10,13 @@ workflow libraries are imported, so it lives at module top.
 
 from __future__ import annotations
 
+import logging
 import os
+
+# the vercel runtime forces the root logger to INFO, and httpx logs every
+# request at INFO; the worker's constant HTTP traffic makes that unreadable.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
 os.environ.setdefault(
