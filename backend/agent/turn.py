@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+import random
 import traceback
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any, ClassVar, cast
@@ -275,6 +276,9 @@ resume_turn_hook.max_retries = 0
 
 # runs one agent turn, maybe requests subagents
 @workflow.workflow
+# HACK: workflow sets up `random` as a custom seeded thing...
+# We ought to make it have something explicit instead
+@ai.messages.use_random_async(lambda: random)  # type: ignore
 async def run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
     messages = _turn_input.messages

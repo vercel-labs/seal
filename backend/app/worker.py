@@ -30,10 +30,10 @@ os.environ.setdefault(
 
 import vercel._internal.workflow.py_sandbox  # noqa: E402
 
-# The workflow sandbox rewrites `os` in a way that breaks dependents at import
-# time; serve these from the host unchanged. `ai` needs `shutil`/`os`; the
-# agent modules import `pathlib` (via storage) at the top level.
-vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"ai", "pathlib"})
+# Need to make `ai` a passthrough currently because of how it uses
+# uuid, though honestly that does seem to be the bug causing
+# trouble. `rich` also needs host access for terminal detection.
+vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"rich", "modelsdotdev"})
 
 # Importing the driver pulls in turn/session/stream; constructing each module's
 # `Workflows()` registers its queue handlers.
