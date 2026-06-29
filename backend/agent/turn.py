@@ -9,7 +9,7 @@ from typing import Any, ClassVar, cast
 import ai
 import vercel.workflow
 
-from agent import proto, stream, workflow
+from agent import proto, stream, util, workflow
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
@@ -152,6 +152,7 @@ tool_call_context: contextvars.ContextVar[tuple[str, str]] = contextvars.Context
 # aggregator, so we use MessageAggregator without actually being a
 # generator.
 @ai.tool(aggregator=ai.agents.MessageAggregator)  # type: ignore
+@util.print_traceback
 async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
     """Delegate a focused task to a child agent and return its answer."""
     session_id, tool_call_id = tool_call_context.get()
