@@ -231,8 +231,6 @@ class DurableAgent(ai.Agent):
                     tool_call_context.reset(token)
 
                 async for event in runner.events():
-                    if session_id is not None:
-                        await write_event(session_id, event.model_dump(mode="json"))
                     yield event
 
                 tool_message = runner.get_tool_message()
@@ -289,6 +287,12 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         model = ai.get_model(MODEL_ID)
         async with agent.run(model, messages) as run:
             async for event in run:
+                # N.B: DurableAgent.run filters out most events -- we
+                # will only get tool running events and hooks.
+                await write_event(
+                    _turn_input.session_id,
+                    event.model_dump(mode="json"),
+                )
                 # monitor the stream for hook events and interrupt on them.
                 if (
                     isinstance(event, ai.events.HookEvent)
@@ -296,15 +300,6 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
                 ):
                     hook = event.hook
                     if hook.hook_id.startswith(proto.TOOL_APPROVAL_HOOK_PREFIX):
-                        # HookEvents ride the runtime queue, not runner.events(),
-                        # so the loop never wrote this to the durable stream. write
-                        # it here so the AI SDK UI adapter emits the approval
-                        # request part (it skips the is_hook_pending tool result
-                        # and waits for the pending HookEvent to drive the UI).
-                        await write_event(
-                            _turn_input.session_id,
-                            event.model_dump(mode="json"),
-                        )
                         tool_approval_requests.append(
                             proto.ToolApprovalRequest(
                                 tool_call_id=hook.hook_id[
