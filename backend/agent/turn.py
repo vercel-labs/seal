@@ -249,9 +249,8 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
         try:
             await hook.resume(token)
             return
-        except RuntimeError as error:
-            message = str(error).lower()
-            if attempt == 39 or "not found" not in message:
+        except vercel.workflow.HookNotFoundError:
+            if attempt == 39:
                 raise
             await asyncio.sleep(0.05)
 
