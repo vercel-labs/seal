@@ -21,7 +21,7 @@ SUBAGENT_SYSTEM_PROMPT = (
 )
 
 
-@workflow.step
+@workflow.step(max_retries=0)
 async def llm_step(
     model_id: str,
     messages_data: list[dict[str, object]],
@@ -51,10 +51,7 @@ async def llm_step(
     return message.model_dump(mode="json")
 
 
-llm_step.max_retries = 0
-
-
-@workflow.step
+@workflow.step(max_retries=0)
 async def write_event(
     # writes one stream event (agent or lifecycle) to the durable stream
     session_id: str,
@@ -64,21 +61,16 @@ async def write_event(
     await writer.write(event_data)
 
 
-write_event.max_retries = 0
-
-
 # closes a durable event stream once the owning session is terminal.
-@workflow.step
+@workflow.step(max_retries=0)
 async def close_stream(session_id: str) -> None:
     writer = await stream.get_writable(session_id)
     await writer.close()
 
 
-close_stream.max_retries = 0
-
-
-@workflow.step
-async def _bash(command: str, timeout: int | None = None) -> str:
+@ai.tool(require_approval=True)
+@workflow.step(max_retries=0)
+async def bash(command: str, timeout: int | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(
         "bash",
         "-c",
@@ -99,15 +91,6 @@ async def _bash(command: str, timeout: int | None = None) -> str:
     return output
 
 
-_bash.max_retries = 0
-
-
-@ai.tool(require_approval=True)
-async def bash(command: str, timeout: int | None = None) -> str:
-    """Execute a bash command. Use timeout in seconds to limit long-running commands."""
-    return await _bash(command, timeout)
-
-
 # subagent (task) sessions cannot surface tool approvals to a human and would
 # deadlock on a gated tool, so they run an ungated copy of the same tool.
 bash_ungated = dataclasses.replace(
@@ -115,8 +98,9 @@ bash_ungated = dataclasses.replace(
 )
 
 
-@workflow.step
-async def _web_fetch(
+@ai.tool
+@workflow.step(max_retries=0)
+async def web_fetch(
     url: str,
     method: str = "GET",
     headers: str = "",
@@ -145,20 +129,6 @@ async def _web_fetch(
         response.text[:50_000],
     ]
     return "\n".join(parts)
-
-
-_web_fetch.max_retries = 0
-
-
-@ai.tool
-async def web_fetch(
-    url: str,
-    method: str = "GET",
-    headers: str = "",
-    body: str = "",
-) -> str:
-    """Fetch a URL and return the response."""
-    return await _web_fetch(url, method, headers, body)
 
 
 # we only need schema off of this tool
@@ -251,7 +221,7 @@ class DurableAgent(ai.Agent):
                 break
 
 
-@workflow.step
+@workflow.step(max_retries=0)
 async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
     # resume() is a side effect, so it must run in a step. the driver may not
     # have parked on the hook yet, so retry while it is missing.
@@ -265,9 +235,6 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
             if attempt == 39 or "not found" not in message:
                 raise
             await asyncio.sleep(0.05)
-
-
-resume_turn_hook.max_retries = 0
 
 
 # runs one agent turn, maybe requests subagents

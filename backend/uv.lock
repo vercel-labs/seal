@@ -1091,7 +1091,7 @@ wheels = [
 [[package]]
 name = "vercel"
 version = "0.5.9"
-source = { git = "https://github.com/vercel/vercel-py?branch=seal-workflow-dev#97fbf661ff03eb381b1c9552cb0bb05e213c7a0d" }
+source = { git = "https://github.com/vercel/vercel-py?branch=seal-workflow-dev#ac1aec5a86afbb71a36891a1cbd618c34d08d70b" }
 dependencies = [
     { name = "anyio" },
     { name = "cbor2" },
