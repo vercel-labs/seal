@@ -213,10 +213,10 @@ class DurableAgent(ai.Agent):
 
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
-                    if tool_call.cached_result is not None:
-                        # hack: special treatment of replayed results
-                        runner.add_result(ai.tool_result(tool_call.cached_result))
-                    elif tool_call.tool_name == "subagent":
+                    if (
+                        tool_call.tool_name == "subagent"
+                        and not tool_call.cached_result
+                    ):
                         # we're not processing this inside the loop
                         # we'll return that and have session driver dispatch
                         # a separate agent session for this
@@ -249,10 +249,6 @@ class DurableAgent(ai.Agent):
                     request.model_dump(mode="json") for request in pending_subagents
                 ]
                 break
-
-        # Keeps this method an async generator when the loop exits without yielding.
-        if False:
-            yield
 
 
 @workflow.step
