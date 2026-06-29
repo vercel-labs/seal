@@ -106,7 +106,7 @@ const SCENARIOS = [
     prompt: webFetchPrompt(HEALTH_URL),
     tools: ["web_fetch"],
     approvals: 0,
-    outputTexts: ["HTTP 200", "status", "ok"],
+    outputTexts: ["200", "status", "ok"],
   },
   {
     name: "subagent",
@@ -135,7 +135,7 @@ const SCENARIOS = [
       "Do not call subagent. After both tools return, answer briefly.",
     tools: ["bash", "web_fetch"],
     approvals: 1,
-    outputTexts: ["seal-e2e-bash-web", "HTTP 200", "status", "ok"],
+    outputTexts: ["seal-e2e-bash-web", "200", "status", "ok"],
   },
   {
     name: "bash+subagent",
@@ -157,7 +157,7 @@ const SCENARIOS = [
       "Do not call bash or subagent. After both tools return, answer briefly.",
     tools: ["web_fetch", "web_fetch"],
     approvals: 0,
-    outputTexts: ["HTTP 200", "status", "ok"],
+    outputTexts: ["200", "status", "ok"],
   },
   {
     name: "web_fetch+subagent",
@@ -168,7 +168,7 @@ const SCENARIOS = [
       "Do not call bash. After both tools return, answer briefly.",
     tools: ["web_fetch", "subagent"],
     approvals: 0,
-    outputTexts: ["HTTP 200", "status", "ok", "seal-e2e-subagent-with-web"],
+    outputTexts: ["200", "status", "ok", "seal-e2e-subagent-with-web"],
   },
   {
     name: "subagent+subagent",
@@ -191,7 +191,7 @@ function expectedToolCounts(scenario) {
 }
 
 function expectedOutputCount(scenario, text) {
-  if (text === "HTTP 200") {
+  if (text === "200") {
     return scenario.tools.filter((tool) => tool === "web_fetch").length;
   }
   return 1;
@@ -213,6 +213,27 @@ function toolState(page, state) {
   );
 }
 
+// True when the conversation ends with the main agent's own answer rather than a
+// tool card -- i.e. the agent actually responded after its tools finished. A
+// run that errors out after a tool completes ends on the (depth-0) tool card.
+function finalAnswerPresent(page) {
+  return page.evaluate(() => {
+    const log = document.querySelector('[data-testid="chat-log"]');
+    if (!log) return false;
+    const nodes = log.querySelectorAll(
+      '[data-testid="message"][data-message-depth="0"],' +
+        '[data-testid="tool-card"][data-tool-depth="0"]',
+    );
+    const last = nodes[nodes.length - 1];
+    return (
+      !!last &&
+      last.getAttribute("data-testid") === "message" &&
+      last.getAttribute("data-message-role") === "assistant" &&
+      (last.textContent || "").trim().length > 0
+    );
+  });
+}
+
 async function snapshot(page) {
   const chat = chatLog(page);
   const [
@@ -224,6 +245,7 @@ async function snapshot(page) {
     errored,
     streaming,
     bodyText,
+    answered,
   ] = await Promise.all([
     chat.getByRole("button", { name: /approve/i }).count(),
     toolState(page, "approval-requested").count(),
@@ -233,6 +255,7 @@ async function snapshot(page) {
     toolState(page, "output-error").count(),
     page.getByRole("button", { name: "Stop" }).count(),
     chat.innerText().catch(() => ""),
+    finalAnswerPresent(page),
   ]);
   return {
     approve,
@@ -242,6 +265,7 @@ async function snapshot(page) {
     denied,
     errored,
     streaming: streaming > 0,
+    answered,
     bodyLength: bodyText.length,
     bodyTail: bodyText.slice(-400),
   };
@@ -251,7 +275,7 @@ function describeSnapshot(s) {
   return (
     `approve:${s.approve} awaiting:${s.awaiting} responded:${s.responded} ` +
     `completed:${s.completed} denied:${s.denied} error:${s.errored} ` +
-    `streaming:${s.streaming}`
+    `streaming:${s.streaming} answered:${s.answered}`
   );
 }
 
@@ -264,6 +288,7 @@ function progressSignature(s) {
     s.denied,
     s.errored,
     s.streaming,
+    s.answered,
     s.bodyLength,
     s.bodyTail,
   ]);
@@ -363,7 +388,8 @@ async function approveAndWait(page, scenario) {
       !s.streaming &&
       !s.awaiting &&
       approvals >= scenario.approvals &&
-      terminal >= expectedCompletions
+      terminal >= expectedCompletions &&
+      s.answered
     ) {
       await page.waitForTimeout(TIMEOUT_MS.stableIdle);
       const s2 = await snapshot(page);
@@ -372,7 +398,8 @@ async function approveAndWait(page, scenario) {
         !s2.streaming &&
         !s2.awaiting &&
         s2.approve === 0 &&
-        terminal2 >= expectedCompletions
+        terminal2 >= expectedCompletions &&
+        s2.answered
       ) {
         break;
       }
@@ -448,6 +475,15 @@ async function verifyScenario(page, scenario) {
       `${scenario.name}: ${final.errored} tool execution(s) Errored`,
       "lifecycle",
     );
+  }
+  if (!final.answered) {
+    fail(
+      `${scenario.name}: agent never produced a final answer after its tools ` +
+        `completed (run ended on a tool card)`,
+      "lifecycle",
+    );
+  } else {
+    pass(`${scenario.name}: agent produced a final answer`, "lifecycle");
   }
 
   const toolCounts = expectedToolCounts(scenario);
@@ -542,7 +578,21 @@ const browser = await chromium.launch({
 });
 
 try {
-  for (const scenario of SCENARIOS) {
+  const only = process.env.SCENARIO?.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const scenarios = only
+    ? SCENARIOS.filter((s) => only.some((o) => s.name.includes(o)))
+    : SCENARIOS;
+  if (only && scenarios.length === 0) {
+    throw new Error(
+      `SCENARIO=${process.env.SCENARIO} matched no scenarios; ` +
+        `available: ${SCENARIOS.map((s) => s.name).join(", ")}`,
+    );
+  }
+  if (only) log(`running ${scenarios.map((s) => s.name).join(", ")}`);
+
+  for (const scenario of scenarios) {
     await runScenario(browser, scenario);
   }
 

@@ -247,7 +247,13 @@ function renderPart({
 
   if (part.type === "text") {
     return (
-      <Message key={key} from={role}>
+      <Message
+        key={key}
+        from={role}
+        data-testid="message"
+        data-message-role={role}
+        data-message-depth={depth}
+      >
         <MessageContent>
           <MessageResponse>{part.text}</MessageResponse>
         </MessageContent>
