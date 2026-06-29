@@ -204,10 +204,8 @@ async def test_subagent_result_lands_on_the_trailing_tool_message(
     assert await _lifecycle("s1") == [
         proto.SESSION_STARTED,
         proto.TURN_STARTED,
-        proto.TURN_COMPLETED,
         proto.SUBAGENT_CALLED,
         proto.SUBAGENT_COMPLETED,
-        proto.TURN_STARTED,
         proto.TURN_COMPLETED,
         proto.SESSION_WAITING,
     ]

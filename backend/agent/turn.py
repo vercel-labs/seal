@@ -1,12 +1,13 @@
 import asyncio
+import contextvars
 import dataclasses
-import json
 import random
 import traceback
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any, ClassVar, cast
 
 import ai
+import vercel.workflow
 
 from agent import proto, stream, workflow
 
@@ -131,19 +132,62 @@ async def web_fetch(
     return "\n".join(parts)
 
 
-# we only need schema off of this tool
-@ai.tool
-async def subagent(prompt: str, name: str | None = None) -> str:
+@workflow.step(max_retries=0)
+async def spawn_subagent_session(session_input: dict[str, object]) -> dict[str, object]:
+    # fires a child session workflow for a subagent. imported lazily because
+    # driver imports turn.
+    import agent.driver as driver
+
+    started = await vercel.workflow.start(driver.run_session, session_input)
+    return {"run_id": started.run_id}
+
+
+# the running tool call's session and id, set by the loop around each schedule so
+# a tool can reach them without smuggling args. tasks copy the context at
+# creation, so each tool sees its own call.
+tool_call_context: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
+    "tool_call_context"
+)
+
+
+# hack: the only way the library currently supports transforming a
+# tool result before sending it to the model is by using an
+# aggregator, so we use MessageAggregator without actually being a
+# generator.
+@ai.tool(aggregator=ai.agents.MessageAggregator)  # type: ignore
+async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
     """Delegate a focused task to a child agent and return its answer."""
-    raise RuntimeError("subagent is dispatched by the durable driver")
-
-
-# the driver stores the child's full transcript (a MessageBundle) as this tool's
-# result for rich UI rendering. declaring MessageAggregator lets Agent.run reduce
-# that bundle to the summary string the model sees: _populate_model_inputs looks
-# up this aggregator by tool name and calls to_model_input(result) each turn,
-# since the model-facing value is not serialized across the durable boundary.
-subagent = dataclasses.replace(subagent, aggregator=ai.agents.MessageAggregator)
+    session_id, tool_call_id = tool_call_context.get()
+    name = name or "subagent"
+    child_session_id = f"{session_id}:child:{tool_call_id}"
+    token = f"seal-subagent:{session_id}:{tool_call_id}"
+    await write_event(
+        session_id,
+        stream.subagent_called(
+            tool_call_id=tool_call_id, child_session_id=child_session_id, name=name
+        ),
+    )
+    hook = proto.SessionHook.wait(token=token)
+    await spawn_subagent_session(
+        proto.SessionInput(
+            session_id=child_session_id,
+            prompt=prompt,
+            mode="task",
+            session_hook_token=token,
+            tool_call_id=tool_call_id,
+        ).model_dump(mode="json")
+    )
+    resolution = await hook
+    hook.dispose()
+    assert isinstance(resolution, proto.SessionHook)
+    assert isinstance(resolution.payload, proto.SubagentResult)
+    output = resolution.payload.output
+    await write_event(
+        session_id,
+        stream.subagent_completed(tool_call_id=tool_call_id, is_error=output.is_error),
+    )
+    assert isinstance(output.output, ai.agents.MessageBundle)
+    return output.output
 
 
 class DurableAgent(ai.Agent):
@@ -178,28 +222,13 @@ class DurableAgent(ai.Agent):
             assistant_message = ai.messages.Message.model_validate(result)
             context.add(assistant_message)
 
-            pending_subagents: list[proto.SubagentRequest] = []
-            tool_message: ai.messages.Message | None = None
-
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
-                    if (
-                        tool_call.tool_name == "subagent"
-                        and not tool_call.cached_result
-                    ):
-                        # we're not processing this inside the loop
-                        # we'll return that and have session driver dispatch
-                        # a separate agent session for this
-                        args = json.loads(tool_call.tool_args or "{}")
-                        pending_subagents.append(
-                            proto.SubagentRequest(
-                                tool_call_id=tool_call.tool_call_id,
-                                name=str(args.get("name") or "subagent"),
-                                prompt=str(args["prompt"]),
-                            )
-                        )
-                    else:
-                        runner.schedule(context.resolve(tool_call))
+                    token = tool_call_context.set(
+                        (session_id or "", tool_call.tool_call_id)
+                    )
+                    runner.schedule(context.resolve(tool_call))
+                    tool_call_context.reset(token)
 
                 async for event in runner.events():
                     if session_id is not None:
@@ -210,15 +239,6 @@ class DurableAgent(ai.Agent):
 
             if tool_message is not None:
                 context.add(tool_message)
-            elif pending_subagents:
-                # guarantee a trailing tool message for the driver to extend
-                context.add(ai.messages.Message(role="tool", parts=[]))
-
-            if pending_subagents:
-                self.pending_subagents = [
-                    request.model_dump(mode="json") for request in pending_subagents
-                ]
-                break
 
 
 @workflow.step(max_retries=0)
