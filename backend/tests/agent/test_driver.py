@@ -209,11 +209,6 @@ async def test_subagent_result_lands_on_the_trailing_tool_message(
         proto.TURN_COMPLETED,
         proto.SESSION_WAITING,
     ]
-    # the child ran as its own session on its own stream, and completed
-    assert await _lifecycle("s1:child:tc-sub") == [
-        proto.SESSION_STARTED,
-        proto.TURN_STARTED,
-        proto.TURN_COMPLETED,
-        proto.SESSION_COMPLETED,
-    ]
+    # the child ran as a single turn on its own stream (no session wrapper)
+    assert await _lifecycle("s1:child:tc-sub") == []
     assert scripted_model.call_count == 3

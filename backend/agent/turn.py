@@ -132,13 +132,10 @@ async def web_fetch(
     return "\n".join(parts)
 
 
-@workflow.step(max_retries=0)
-async def spawn_subagent_session(session_input: dict[str, object]) -> dict[str, object]:
-    # fires a child session workflow for a subagent. imported lazily because
-    # driver imports turn.
-    import agent.driver as driver
-
-    started = await vercel.workflow.start(driver.run_session, session_input)
+@workflow.step
+async def spawn_subagent_turn(turn_input: dict[str, object]) -> dict[str, object]:
+    # a subagent is just one ungated turn writing to its own stream.
+    started = await vercel.workflow.start(run_turn, turn_input)
     return {"run_id": started.run_id}
 
 
@@ -160,34 +157,39 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
     session_id, tool_call_id = tool_call_context.get()
     name = name or "subagent"
     child_session_id = f"{session_id}:child:{tool_call_id}"
-    token = f"seal-subagent:{session_id}:{tool_call_id}"
+    token = f"seal-turn:{child_session_id}:0"
     await write_event(
         session_id,
         stream.subagent_called(
             tool_call_id=tool_call_id, child_session_id=child_session_id, name=name
         ),
     )
-    hook = proto.SessionHook.wait(token=token)
-    await spawn_subagent_session(
-        proto.SessionInput(
+    hook = proto.TurnHook.wait(token=token)
+    await spawn_subagent_turn(
+        proto.TurnInput(
             session_id=child_session_id,
-            prompt=prompt,
-            mode="task",
-            session_hook_token=token,
-            tool_call_id=tool_call_id,
+            messages=[
+                ai.system_message(SUBAGENT_SYSTEM_PROMPT),
+                ai.user_message(prompt),
+            ],
+            gated=False,
+            turn_hook_token=token,
         ).model_dump(mode="json")
     )
     resolution = await hook
     hook.dispose()
-    assert isinstance(resolution, proto.SessionHook)
-    assert isinstance(resolution.payload, proto.SubagentResult)
-    output = resolution.payload.output
+    assert resolution is not None
+    output = resolution.output
     await write_event(
         session_id,
-        stream.subagent_completed(tool_call_id=tool_call_id, is_error=output.is_error),
+        stream.subagent_completed(
+            tool_call_id=tool_call_id, is_error=output.kind == "error"
+        ),
     )
-    assert isinstance(output.output, ai.agents.MessageBundle)
-    return output.output
+    await close_stream(child_session_id)
+    return ai.agents.MessageBundle(
+        messages=tuple(m for m in output.messages if m.role in ("assistant", "tool"))
+    )
 
 
 class DurableAgent(ai.Agent):
@@ -267,7 +269,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     # messages should already contain either the user message
     # or the tool result message, so no need to do anything
 
-    extra_tools = [bash_ungated] if _turn_input.mode == "task" else [bash, subagent]
+    extra_tools = [bash, subagent] if _turn_input.gated else [bash_ungated]
     agent = DurableAgent(
         tools=extra_tools,
         session_id=_turn_input.session_id,
@@ -328,15 +330,9 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             flush=True,
         )
     else:
-        # create normal output if the run has completed successfully
-        if _turn_input.mode == "infinite":
-            output_kind = "pending_requests" if tool_approval_requests else "suspend"
-        else:
-            # task (subagent) sessions never gate; pending requests would deadlock.
-            output_kind = "done"
-
+        # ungated turns never raise approvals, so they fall through to suspend.
         output = proto.TurnOutput(
-            kind=output_kind,
+            kind="pending_requests" if tool_approval_requests else "suspend",
             messages=messages,
             pending_requests=tool_approval_requests,
         )

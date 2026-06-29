@@ -52,7 +52,7 @@ async def test_no_stream_means_nothing_to_resume() -> None:
 async def test_completed_run_is_not_resumable() -> None:
     await _write(
         "s1",
-        stream.session_started(mode="infinite"),
+        stream.session_started(),
         stream.turn_started(turn_index=0),
         *_text_events("hi"),
         stream.turn_completed(turn_index=0, kind="suspend"),
@@ -64,7 +64,7 @@ async def test_completed_run_is_not_resumable() -> None:
 async def test_in_flight_run_resumes_from_its_opener() -> None:
     await _write(
         "s1",
-        stream.session_started(mode="infinite"),  # 0
+        stream.session_started(),  # 0
         stream.turn_started(turn_index=0),  # 1
         *_text_events("hi"),  # 2-6
         stream.turn_completed(turn_index=0, kind="suspend"),  # 7
@@ -80,7 +80,7 @@ async def test_multi_turn_run_resumes_from_run_start_not_inner_turn() -> None:
     # from the inner turn.started would replay a partial message and duplicate.
     await _write(
         "s1",
-        stream.session_started(mode="infinite"),  # 0 ← run opens here
+        stream.session_started(),  # 0 ← run opens here
         stream.turn_started(turn_index=0),  # 1
         *_text_events("delegating"),  # 2-6
         stream.turn_completed(turn_index=0, kind="pending_requests"),  # 7
@@ -97,7 +97,7 @@ async def test_multi_turn_run_resumes_from_run_start_not_inner_turn() -> None:
 async def test_run_parked_on_approval_is_not_resumable() -> None:
     await _write(
         "s1",
-        stream.session_started(mode="infinite"),
+        stream.session_started(),
         stream.turn_started(turn_index=0),
         *_text_events("need approval"),
         stream.tool_approval_requested(
@@ -191,7 +191,7 @@ async def test_to_sse_streams_one_turn_and_terminates_at_waiting() -> None:
     # from the session.waiting boundary — getting this wrong is a client hang.
     await _write(
         "s1",
-        stream.session_started(mode="infinite"),
+        stream.session_started(),
         stream.turn_started(turn_index=0),
         *_text_events("hello world"),
         stream.turn_completed(turn_index=0, kind="suspend"),
@@ -228,7 +228,7 @@ async def test_to_sse_parks_at_a_pending_approval() -> None:
     )
     await _write(
         "s1",
-        stream.session_started(mode="infinite"),
+        stream.session_started(),
         stream.turn_started(turn_index=0),
         events_.StreamStart(),
         events_.ToolStart(tool_call_id="tc-1", tool_name="bash"),
@@ -256,12 +256,8 @@ async def test_to_sse_interleaves_live_subagent_progress() -> None:
     )
     await _write(
         child_id,
-        stream.session_started(mode="task"),
-        stream.turn_started(turn_index=0),
         events_.StreamStart(),
         events_.StreamEnd(message=child_message),
-        stream.turn_completed(turn_index=0, kind="done"),
-        stream.session_completed(),
     )
     child_writer = await stream.get_writable(child_id)
     await child_writer.close()
@@ -271,7 +267,7 @@ async def test_to_sse_interleaves_live_subagent_progress() -> None:
     )
     await _write(
         "s1",
-        stream.session_started(mode="infinite"),
+        stream.session_started(),
         stream.turn_started(turn_index=0),
         events_.StreamStart(),
         events_.ToolStart(tool_call_id="tc-1", tool_name="subagent"),

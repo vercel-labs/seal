@@ -1,4 +1,3 @@
-import asyncio
 import random
 from typing import Any
 
@@ -42,23 +41,6 @@ async def save_session(state_data: dict[str, Any]) -> None:
     await session.write_session(proto.SessionState.model_validate(state_data))
 
 
-@workflow.step(max_retries=0)
-async def resume_session_hook(token: str, payload_data: dict[str, Any]) -> None:
-    # resume() is a side effect, so it must run in a step. the session may not
-    # have parked on the hook yet, so retry while it is missing.
-    payload = proto.RESUME_PAYLOAD_ADAPTER.validate_python(payload_data)
-    hook = proto.SessionHook(payload=payload)
-    for attempt in range(40):
-        try:
-            await hook.resume(token)
-            return
-        except RuntimeError as error:
-            message = str(error).lower()
-            if attempt == 39 or "not found" not in message:
-                raise
-            await asyncio.sleep(0.05)
-
-
 def _last_text(messages: list[ai.messages.Message]) -> str:
     for message in reversed(messages):
         if message.role == "assistant" and message.text:
@@ -81,21 +63,15 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         state = proto.SessionState.model_validate(restored)
         state.messages.append(ai.user_message(_session_input.prompt))
     else:
-        system = (
-            turn.SUBAGENT_SYSTEM_PROMPT
-            if _session_input.mode == "task"
-            else turn.SYSTEM_PROMPT
-        )
         state = proto.SessionState(
             session_id=session_id,
-            mode=_session_input.mode,
             messages=[
-                ai.system_message(system),
+                ai.system_message(turn.SYSTEM_PROMPT),
                 ai.user_message(_session_input.prompt),
             ],
         )
     await save_session(state.model_dump(mode="json"))
-    await write_event(session_id, stream.session_started(mode=state.mode))
+    await write_event(session_id, stream.session_started())
 
     turn_index = 0
     while True:
@@ -106,7 +82,6 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         turn_input = proto.TurnInput(
             session_id=session_id,
             messages=state.messages,
-            mode=state.mode,
             turn_hook_token=turn_hook_token,
             tool_approvals=state.tool_approvals,
         )
@@ -126,32 +101,6 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         )
 
         match turn_result.kind:
-            case "done":
-                # we're currently in a subagent session; return output and quit.
-                # we're returning all assistant and tool messages in the bundle
-                output = proto.SessionOutput(
-                    tool_call_id=_session_input.tool_call_id,
-                    session_id=session_id,
-                    output=ai.agents.MessageBundle(
-                        messages=tuple(
-                            msg
-                            for msg in state.messages
-                            if msg.role in ("assistant", "tool")
-                        )
-                    ),
-                )
-
-                # notify the parent session. output carries the tool_call_id
-                # so parent knows which subagent this is
-                if _session_input.session_hook_token is not None:
-                    await resume_session_hook(
-                        _session_input.session_hook_token,
-                        proto.SubagentResult(output=output).model_dump(mode="json"),
-                    )
-                await write_event(session_id, stream.session_completed())
-                await turn.close_stream(session_id)
-                return output.model_dump(mode="json")
-
             case "suspend":
                 # we are currently in the main session. wait for the next user message.
                 await write_event(
