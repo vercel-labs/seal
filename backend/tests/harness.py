@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import random
 from typing import Any
 
+import ai
 import vercel._internal.workflow.py_sandbox as py_sandbox
 
 # mirror worker.py: these modules must come from the host inside the sandbox.
@@ -35,6 +37,22 @@ class InProcessWorld(wf_local.LocalWorld):
         self._locks: dict[str, asyncio.Lock] = {}
         self._ids = itertools.count()
         self.errors: list[BaseException] = []
+        # Deterministic run ids so the workflow sandbox's seeded
+        # `random` (the seed is the run id) draws the same
+        # message/part ids on every run.  This isn't needed for test
+        # correctness (the tests that care canonicalize ids when
+        # comparing), but should reduce churn when using
+        # UPDATE_FIXTURES=1.
+        self._ulid = itertools.count()
+        self.monotonic_ulid = self._det_ulid
+        # One seeded rng shared by every step body (see `_deliver`). Fresh per
+        # world, so each test draws the same sequence.
+        self._step_rng = random.Random("seal-test-step-ids")
+
+    def _det_ulid(self, _timestamp_ms: int | None = None) -> str:
+        # Fixed time prefix + monotonic counter: a valid 26-char Crockford-base32
+        # ULID that's stable across runs (the real one is time + os.urandom).
+        return f"0000000000{next(self._ulid):016d}"
 
     async def queue(
         self,
@@ -68,9 +86,11 @@ class InProcessWorld(wf_local.LocalWorld):
                 raise RuntimeError(f"unexpected queue: {queue_name}")
             run_id = getattr(message, "run_id", None) or message.workflow_run_id
             lock = self._locks.setdefault(run_id, asyncio.Lock())
+            # Install a seeded RNG for steps so they get deterministic IDs also.
+            rng_ctx = ai.messages.use_random_async(self._step_rng)
             attempt = 1
             while True:
-                async with lock:
+                async with lock, rng_ctx:
                     retry = await handler(
                         message.model_dump(),
                         attempt=attempt,
