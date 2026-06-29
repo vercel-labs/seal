@@ -30,15 +30,6 @@ async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object
 
 
 @workflow.step(max_retries=0)
-async def spawn_task_session_workflow(
-    session_input: dict[str, object],
-) -> dict[str, object]:
-    # fires child workflow for subagent session
-    started = await vercel.workflow.start(run_session, session_input)
-    return {"run_id": started.run_id}
-
-
-@workflow.step(max_retries=0)
 async def load_session(session_id: str) -> dict[str, Any] | None:
     # restores the latest persisted session snapshot, if any
     state = await session.read_session(session_id)
@@ -184,80 +175,36 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                 state.messages.append(ai.user_message(message.prompt or ""))
 
             case "pending_requests":
-                # we are currently in the main session. the turn has requested
-                # out-of-session work (subagents or human-in-the-loop).
-                # dispatch work, suspend on the hook and wait.
+                # we are currently in the main session. the turn parked on gated
+                # tool calls awaiting a human decision. surface them, suspend on
+                # the hook and wait.
                 if state.pending is None:
                     state.pending = proto.PendingState(
                         turn_index=turn_index,
-                        subagents=[
-                            request
-                            for request in turn_result.pending_requests
-                            if isinstance(request, proto.SubagentRequest)
-                        ],
-                        tool_approval_requests=[
-                            request
-                            for request in turn_result.pending_requests
-                            if isinstance(request, proto.ToolApprovalRequest)
-                        ],
+                        tool_approval_requests=turn_result.pending_requests,
                     )
                     await save_session(state.model_dump(mode="json"))
                 pending = state.pending
                 token = f"seal-session:{session_id}:{turn_index}"
 
-                # process all requests
                 if not pending.dispatched:
-                    for request in pending.subagents:
-                        child_input = proto.SessionInput(
-                            session_id=f"{session_id}:child:{request.tool_call_id}",
-                            prompt=request.prompt,
-                            mode="task",
-                            session_hook_token=token,
-                            tool_call_id=request.tool_call_id,
-                        )
-                        await spawn_task_session_workflow(
-                            child_input.model_dump(mode="json")
-                        )
-                        await write_event(
-                            session_id,
-                            stream.subagent_called(
-                                tool_call_id=request.tool_call_id,
-                                child_session_id=child_input.session_id,
-                                name=request.name,
-                            ),
-                        )
-                    if pending.tool_approval_requests:
-                        await write_event(
-                            session_id,
-                            stream.tool_approval_requested(
-                                turn_index=turn_index,
-                                requests=pending.tool_approval_requests,
-                            ),
-                        )
+                    await write_event(
+                        session_id,
+                        stream.tool_approval_requested(
+                            turn_index=turn_index,
+                            requests=pending.tool_approval_requests,
+                        ),
+                    )
                     pending.dispatched = True
                     await save_session(state.model_dump(mode="json"))
 
-                # suspend on the same hook repeatedly until we collect results
-                # from all out-of-loop work.
+                # suspend on the hook until the human resolves the approvals.
                 hook = proto.SessionHook.wait(token=token)
-                while pending.subagent_outputs.keys() != {
-                    request.tool_call_id for request in pending.subagents
-                } or (
-                    pending.tool_approval_requests and pending.tool_approvals is None
-                ):
+                while pending.tool_approvals is None:
                     resolution = await hook
                     payload = resolution.payload if resolution is not None else None
 
                     match payload:
-                        case proto.SubagentResult(output=output):
-                            pending.subagent_outputs[output.tool_call_id] = output
-                            await write_event(
-                                session_id,
-                                stream.subagent_completed(
-                                    tool_call_id=output.tool_call_id,
-                                    is_error=output.is_error,
-                                ),
-                            )
                         case proto.ToolApprovals(tool_approvals=tool_approvals):
                             pending.tool_approvals = tool_approvals
                             await write_event(
@@ -269,7 +216,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                             )
                         case _:
                             # a close (or no payload) tears the session down even
-                            # with work outstanding; the child runs are orphaned.
+                            # with work outstanding.
                             hook.dispose()
                             await write_event(session_id, stream.session_completed())
                             await turn.close_stream(session_id)
@@ -281,24 +228,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                     await save_session(state.model_dump(mode="json"))
                 hook.dispose()
 
-                # the turn always leaves a trailing tool message; extend it with
-                # the subagent results.
-                if pending.subagents:
-                    tool_message = state.messages[-1]
-                    assert tool_message.role == "tool"
-                    for request in pending.subagents:
-                        completed = pending.subagent_outputs[request.tool_call_id]
-                        # the result is the child's MessageBundle
-                        tool_message.parts.append(
-                            ai.tool_result_part(
-                                request.tool_call_id,
-                                tool_name="subagent",
-                                result=completed.output,
-                                is_error=completed.is_error,
-                            )
-                        )
-
-                # every tool call must now have a result.
+                # every tool call must have a result
                 tool_calls = {
                     part.tool_call_id
                     for message in state.messages

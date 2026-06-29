@@ -161,13 +161,8 @@ def test_session_state_round_trip_is_dump_stable() -> None:
         tool_approvals=[proto.ToolApprovalResponse(tool_call_id="tc-2", granted=True)],
         pending=proto.PendingState(
             turn_index=3,
-            subagents=[proto.SubagentRequest(tool_call_id="tc-9", prompt="go")],
+            tool_approval_requests=[proto.ToolApprovalRequest(tool_call_id="tc-2")],
             dispatched=True,
-            subagent_outputs={
-                "tc-9": proto.SessionOutput(
-                    tool_call_id="tc-9", session_id="s1:child:tc-9", output=bundle
-                )
-            },
         ),
     )
 

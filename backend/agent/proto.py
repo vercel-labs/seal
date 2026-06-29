@@ -11,12 +11,6 @@ import vercel.workflow
 type SessionMode = Literal["infinite", "task"]
 
 
-class SubagentRequest(pydantic.BaseModel):
-    tool_call_id: str
-    name: str = "subagent"
-    prompt: str
-
-
 class ToolApprovalRequest(pydantic.BaseModel):
     tool_call_id: str
     tool_name: str = ""
@@ -85,14 +79,11 @@ class SessionHook(pydantic.BaseModel, vercel.workflow.BaseHook):
 # of which scheduled jobs have been completed and accumulate results.
 class PendingState(pydantic.BaseModel):
     turn_index: int
-    subagents: list[SubagentRequest] = pydantic.Field(default_factory=list)
     tool_approval_requests: list[ToolApprovalRequest] = pydantic.Field(
         default_factory=list
     )
-    # side effects (child spawns + lifecycle events) fired exactly once.
+    # side effects (lifecycle events) fired exactly once.
     dispatched: bool = False
-    # tool_call_id -> finished subagent output.
-    subagent_outputs: dict[str, SessionOutput] = pydantic.Field(default_factory=dict)
     # human decision once resolved; None until then.
     tool_approvals: list[ToolApprovalResponse] | None = None
 
@@ -122,10 +113,8 @@ class TurnInput(pydantic.BaseModel):
 class TurnOutput(pydantic.BaseModel):
     kind: Literal["done", "suspend", "pending_requests", "error"]
     messages: list[ai.messages.Message]
-    # subagents to dispatch and/or gated tool calls awaiting a human decision.
-    pending_requests: list[SubagentRequest | ToolApprovalRequest] = pydantic.Field(
-        default_factory=list
-    )
+    # gated tool calls awaiting a human decision.
+    pending_requests: list[ToolApprovalRequest] = pydantic.Field(default_factory=list)
     error: str | None = None
 
 

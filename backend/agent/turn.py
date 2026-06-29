@@ -204,8 +204,6 @@ class DurableAgent(ai.Agent):
     ) -> None:
         super().__init__(tools=tools)
         self.session_id = session_id
-        # side-channel for exfiltrating subagent requests out of the loop
-        self.pending_subagents: list[dict[str, object]] = []
 
     async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
         model_id = context.model.id
@@ -257,7 +255,7 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
             await asyncio.sleep(0.05)
 
 
-# runs one agent turn, maybe requests subagents
+# runs one agent turn, maybe parks on a tool approval
 @workflow.workflow
 # HACK: workflow sets up `random` as a custom seeded thing...
 # We ought to make it have something explicit instead
@@ -331,14 +329,8 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         )
     else:
         # create normal output if the run has completed successfully
-        subagent_requests = [
-            proto.SubagentRequest.model_validate(item)
-            for item in agent.pending_subagents
-        ]
-
-        has_pending = bool(subagent_requests or tool_approval_requests)
         if _turn_input.mode == "infinite":
-            output_kind = "pending_requests" if has_pending else "suspend"
+            output_kind = "pending_requests" if tool_approval_requests else "suspend"
         else:
             # task (subagent) sessions never gate; pending requests would deadlock.
             output_kind = "done"
@@ -346,7 +338,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         output = proto.TurnOutput(
             kind=output_kind,
             messages=messages,
-            pending_requests=[*subagent_requests, *tool_approval_requests],
+            pending_requests=tool_approval_requests,
         )
 
     # notify session that the turn is complete
