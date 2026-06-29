@@ -12,7 +12,7 @@ import agent.turn as turn
 from agent import workflow
 
 
-@workflow.step
+@workflow.step(max_retries=0)
 async def write_event(
     # writes one stream event (here, lifecycle) to the durable stream
     session_id: str,
@@ -22,20 +22,14 @@ async def write_event(
     await writer.write(event_data)
 
 
-write_event.max_retries = 0
-
-
-@workflow.step
+@workflow.step(max_retries=0)
 async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object]:
     # fires child workflow for an agent turn
     started = await vercel.workflow.start(turn.run_turn, turn_input)
     return {"run_id": started.run_id}
 
 
-spawn_turn_workflow.max_retries = 0
-
-
-@workflow.step
+@workflow.step(max_retries=0)
 async def spawn_task_session_workflow(
     session_input: dict[str, object],
 ) -> dict[str, object]:
@@ -44,29 +38,20 @@ async def spawn_task_session_workflow(
     return {"run_id": started.run_id}
 
 
-spawn_task_session_workflow.max_retries = 0
-
-
-@workflow.step
+@workflow.step(max_retries=0)
 async def load_session(session_id: str) -> dict[str, Any] | None:
     # restores the latest persisted session snapshot, if any
     state = await session.read_session(session_id)
     return state.model_dump(mode="json") if state is not None else None
 
 
-load_session.max_retries = 0
-
-
-@workflow.step
+@workflow.step(max_retries=0)
 async def save_session(state_data: dict[str, Any]) -> None:
     # appends the current session state as the latest snapshot
     await session.write_session(proto.SessionState.model_validate(state_data))
 
 
-save_session.max_retries = 0
-
-
-@workflow.step
+@workflow.step(max_retries=0)
 async def resume_session_hook(token: str, payload_data: dict[str, Any]) -> None:
     # resume() is a side effect, so it must run in a step. the session may not
     # have parked on the hook yet, so retry while it is missing.
@@ -81,9 +66,6 @@ async def resume_session_hook(token: str, payload_data: dict[str, Any]) -> None:
             if attempt == 39 or "not found" not in message:
                 raise
             await asyncio.sleep(0.05)
-
-
-resume_session_hook.max_retries = 0
 
 
 def _last_text(messages: list[ai.messages.Message]) -> str:
