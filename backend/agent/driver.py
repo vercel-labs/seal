@@ -292,7 +292,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                         tool_message.parts.append(
                             ai.tool_result_part(
                                 request.tool_call_id,
-                                tool_name=request.name,
+                                tool_name="subagent",
                                 result=completed.output,
                                 is_error=completed.is_error,
                             )
