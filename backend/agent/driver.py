@@ -83,7 +83,6 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
             session_id=session_id,
             messages=state.messages,
             turn_hook_token=turn_hook_token,
-            tool_approvals=state.tool_approvals,
         )
         await spawn_turn_workflow(turn_input.model_dump(mode="json"))
         turn_resolution = await turn_hook
@@ -93,7 +92,6 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
 
         # process turn results
         state.messages = turn_result.messages
-        state.tool_approvals = []  # clear because turn has consumed them
         await save_session(state.model_dump(mode="json"))
         await write_event(
             session_id,
@@ -122,82 +120,6 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                     ).model_dump(mode="json")
 
                 state.messages.append(ai.user_message(message.prompt or ""))
-
-            case "pending_requests":
-                # we are currently in the main session. the turn parked on gated
-                # tool calls awaiting a human decision. surface them, suspend on
-                # the hook and wait.
-                if state.pending is None:
-                    state.pending = proto.PendingState(
-                        turn_index=turn_index,
-                        tool_approval_requests=turn_result.pending_requests,
-                    )
-                    await save_session(state.model_dump(mode="json"))
-                pending = state.pending
-                token = f"seal-session:{session_id}:{turn_index}"
-
-                if not pending.dispatched:
-                    await write_event(
-                        session_id,
-                        stream.tool_approval_requested(
-                            turn_index=turn_index,
-                            requests=pending.tool_approval_requests,
-                        ),
-                    )
-                    pending.dispatched = True
-                    await save_session(state.model_dump(mode="json"))
-
-                # suspend on the hook until the human resolves the approvals.
-                hook = proto.SessionHook.wait(token=token)
-                while pending.tool_approvals is None:
-                    resolution = await hook
-                    payload = resolution.payload if resolution is not None else None
-
-                    match payload:
-                        case proto.ToolApprovals(tool_approvals=tool_approvals):
-                            pending.tool_approvals = tool_approvals
-                            await write_event(
-                                session_id,
-                                stream.tool_approval_resolved(
-                                    turn_index=turn_index,
-                                    tool_approvals=tool_approvals,
-                                ),
-                            )
-                        case _:
-                            # a close (or no payload) tears the session down even
-                            # with work outstanding.
-                            hook.dispose()
-                            await write_event(session_id, stream.session_completed())
-                            await turn.close_stream(session_id)
-                            return proto.SessionOutput(
-                                session_id=session_id,
-                                output=_last_text(state.messages),
-                            ).model_dump(mode="json")
-
-                    await save_session(state.model_dump(mode="json"))
-                hook.dispose()
-
-                # every tool call must have a result
-                tool_calls = {
-                    part.tool_call_id
-                    for message in state.messages
-                    for part in message.tool_calls
-                }
-                tool_results = {
-                    part.tool_call_id
-                    for message in state.messages
-                    for part in message.tool_results
-                }
-                assert tool_calls == tool_results, (
-                    f"incomplete tool history: unsatisfied={tool_calls - tool_results}"
-                )
-
-                # store tool approvals for the next turn
-                if pending.tool_approvals is not None:
-                    state.tool_approvals = pending.tool_approvals
-
-                # collection complete; clear so the next turn replays clean.
-                state.pending = None
 
             case "error":
                 await write_event(session_id, stream.session_completed(is_error=True))

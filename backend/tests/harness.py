@@ -1,9 +1,15 @@
 """In-process runner for the durable workflow engine.
 
 ``run_session`` executes under the workflow SDK's LocalWorld with one change:
-``world.queue`` dispatches to the workflow/step handlers as asyncio tasks
-instead of going through the queue service. Everything else is real — replay,
-suspensions, workflow hooks, the jsonl store, the bash subprocess.
+``world.queue`` dispatches to the workflow/step handlers directly instead of
+going through the queue service. Deliveries run as plain asyncio tasks on the
+test's event loop; the engine gives each workflow invocation its own dedicated
+loop internally (``run_workflow`` runs the body under ``asyncio.run``), so the
+``loop._ready`` check stays sound without the harness managing loops itself.
+Dispatching on one shared loop also keeps cross-delivery ordering deterministic
+(cooperative FIFO), so e.g. two parallel subagents don't race. Everything else
+is real — replay, suspensions, workflow hooks, the jsonl store, the bash
+subprocess.
 """
 
 from __future__ import annotations
@@ -28,6 +34,10 @@ class InProcessWorld(wf_local.LocalWorld):
     def __init__(self, registry: Any) -> None:
         super().__init__()
         self._registry = registry
+        # Deliveries run as tasks on the test's loop; the engine spins up a
+        # dedicated loop per workflow invocation internally, so the harness
+        # doesn't manage loops. One asyncio.Lock per run_id serializes that run's
+        # deliveries.
         self._tasks: set[asyncio.Task[None]] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._ids = itertools.count()
@@ -59,6 +69,8 @@ class InProcessWorld(wf_local.LocalWorld):
         delay_seconds: float | None = None,
         **kwargs: Any,
     ) -> str:
+        # Fire-and-forget, like send_async to the queue service: schedule the
+        # delivery as a task and return the message id without awaiting it.
         message_id = f"msg_{next(self._ids)}"
         task = asyncio.create_task(
             self._deliver(queue_name, message, delay_seconds or 0, message_id)
@@ -129,8 +141,20 @@ async def wait_for_lifecycle(
     await asyncio.wait_for(watch(), timeout)
 
 
-async def resume_session(token: str, payload: proto.ResumePayload) -> None:
-    hook = proto.SessionHook(payload=payload)
+async def resume_session(token: str, payload: proto.NewUserMessage) -> None:
+    await _resume_hook(token, proto.SessionHook(payload=payload))
+
+
+async def resume_approval(
+    session_id: str, response: proto.ToolApprovalResponse
+) -> None:
+    await _resume_hook(
+        proto.approval_hook_token(session_id, response.tool_call_id),
+        proto.ApprovalHook(response=response),
+    )
+
+
+async def _resume_hook(token: str, hook: vercel.workflow.BaseHook) -> None:
     for attempt in range(100):
         try:
             await hook.resume(token)

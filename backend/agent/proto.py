@@ -9,12 +9,6 @@ import vercel.workflow
 # Session inputs / outputs
 
 
-class ToolApprovalRequest(pydantic.BaseModel):
-    tool_call_id: str
-    tool_name: str = ""
-    args: dict[str, Any] = pydantic.Field(default_factory=dict)
-
-
 # external decision for a single gated tool call.
 class ToolApprovalResponse(pydantic.BaseModel):
     tool_call_id: str
@@ -24,6 +18,12 @@ class ToolApprovalResponse(pydantic.BaseModel):
 
 # ai SDK gates a tool behind a hook labelled ``approve_{tool_call_id}``.
 TOOL_APPROVAL_HOOK_PREFIX = "approve_"
+
+
+# the durable hook a gated call parks on; its trailing segment is exactly the ai
+# ``HookPart.hook_id``. tokens are global, so the session id keeps them unique.
+def approval_hook_token(session_id: str, tool_call_id: str) -> str:
+    return f"seal-approval:{session_id}:{TOOL_APPROVAL_HOOK_PREFIX}{tool_call_id}"
 
 
 class SessionInput(pydantic.BaseModel):
@@ -37,48 +37,25 @@ class SessionOutput(pydantic.BaseModel):
     is_error: bool = False
 
 
-class ToolApprovals(pydantic.BaseModel):
-    kind: Literal["tool_approvals"] = "tool_approvals"
-    tool_approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
-
-
 class NewUserMessage(pydantic.BaseModel):
     kind: Literal["new_user_message"] = "new_user_message"
     prompt: str | None = None
     close: bool = False
 
 
-type ResumePayload = ToolApprovals | NewUserMessage
-
-RESUME_PAYLOAD_ADAPTER: pydantic.TypeAdapter[ResumePayload] = pydantic.TypeAdapter(
-    ResumePayload
-)
-
-
+# carries the next user message (or a close) to a session parked in ``suspend``.
 class SessionHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    payload: ResumePayload = pydantic.Field(discriminator="kind")
+    payload: NewUserMessage
 
 
-# in-flight out-of-loop work for the session. session uses this to keep track
-# of which scheduled jobs have been completed and accumulate results.
-class PendingState(pydantic.BaseModel):
-    turn_index: int
-    tool_approval_requests: list[ToolApprovalRequest] = pydantic.Field(
-        default_factory=list
-    )
-    # side effects (lifecycle events) fired exactly once.
-    dispatched: bool = False
-    # human decision once resolved; None until then.
-    tool_approvals: list[ToolApprovalResponse] | None = None
+# one gated call's decision, delivered on its own per-approval hook.
+class ApprovalHook(pydantic.BaseModel, vercel.workflow.BaseHook):
+    response: ToolApprovalResponse
 
 
 class SessionState(pydantic.BaseModel):
     session_id: str
     messages: list[ai.messages.Message]
-    # decisions to pre-register on the next turn replay.
-    tool_approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
-    # in-flight pending-request collection for the current turn, if any.
-    pending: PendingState | None = None
 
 
 # Turn inputs / outputs
@@ -91,15 +68,11 @@ class TurnInput(pydantic.BaseModel):
     # children) run bash directly and cannot delegate further.
     gated: bool = True
     turn_hook_token: str
-    # decisions to pre-register before the interrupted turn replays.
-    tool_approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
 
 
 class TurnOutput(pydantic.BaseModel):
-    kind: Literal["suspend", "pending_requests", "error"]
+    kind: Literal["suspend", "error"]
     messages: list[ai.messages.Message]
-    # gated tool calls awaiting a human decision.
-    pending_requests: list[ToolApprovalRequest] = pydantic.Field(default_factory=list)
     error: str | None = None
 
 
@@ -120,7 +93,6 @@ TURN_COMPLETED = "turn.completed"
 SUBAGENT_CALLED = "subagent.called"
 SUBAGENT_COMPLETED = "subagent.completed"
 TOOL_APPROVAL_REQUESTED = "tool_approval.requested"
-TOOL_APPROVAL_RESOLVED = "tool_approval.resolved"
 DEFAULT_STREAM_NAMESPACE = "default"
 DEFAULT_STREAM_POLL_INTERVAL = 0.05
 WRITABLE_STREAM_HANDLE_TYPE = "seal.durable_agent.writable_stream"

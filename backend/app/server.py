@@ -46,7 +46,7 @@ import fastapi.responses  # noqa: E402
 import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
-from agent import proto, stream  # noqa: E402
+from agent import proto  # noqa: E402
 from app import attachments, chat, sessions  # noqa: E402
 
 
@@ -93,7 +93,7 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
     )
 
     if is_approval_resume:
-        await chat.submit_approvals(
+        start_index = await chat.submit_approvals(
             request.session_id,
             [
                 proto.ToolApprovalResponse(
@@ -104,7 +104,6 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
                 for approval in approvals
             ],
         )
-        start_index = await stream.tail_index(request.session_id) + 1
     else:
         prompt = next(
             (m.text for m in reversed(messages) if m.role == "user" and m.text), None
@@ -157,6 +156,8 @@ async def get_session(session_id: str) -> dict[str, object]:
     meta = await sessions.get_session(session_id)
     if meta is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
+    # committed turns only; a turn still parked on an approval is in flight (not
+    # persisted) and the UI rebuilds it from the resumed stream (GET /chat/.../stream).
     ui_messages = ai_sdk.to_ui_messages(await sessions.history(session_id))
     serialized = [
         message.model_dump(mode="json", by_alias=True) for message in ui_messages

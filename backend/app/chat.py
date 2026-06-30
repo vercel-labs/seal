@@ -36,28 +36,23 @@ from agent import driver, proto, session, stream
 
 _TERMINAL = {proto.SESSION_WAITING, proto.SESSION_COMPLETED, proto.SESSION_FAILED}
 
-# events at which a run stops reaching the client (see ``_turn_events``): the
-# session parks on a human decision or reaches a terminal state.
-_RUN_BOUNDARY = _TERMINAL | {proto.TOOL_APPROVAL_REQUESTED}
-
 
 async def active_run_start_index(session_id: str) -> int | None:
     """Return the stream index to resume the in-flight run from, else ``None``.
 
-    A *run* is everything one ``POST /chat`` streams: it spans the driver's
-    internal turns (subagents, tool loops) and ends only at a run boundary
-    (``session.waiting`` / terminal / a parked approval). The SDK adapter folds
-    a whole run into a *single* UI message (one ``UIStartEvent``), so resume has
-    to start where the live POST did — the run start, not an inner turn.
+    A *run* is the whole agent turn the SDK adapter folds into a single UI
+    message (one ``UIStartEvent``). It begins at its opener (``session.started``
+    / ``turn.started``) and ends only at a *terminal* boundary (``session.*``) —
+    a ``tool_approval.requested`` park is mid-run, not the end of one, because the
+    same ``run_turn`` resumes in place once the approval lands.
 
-    Matching that boundary is what keeps reload from duplicating: ``useChat``
-    seeds its streaming message from the last persisted assistant message
-    (history is saved at run boundaries, so that is this run's message); when we
-    resume from the run start the replayed stream carries the same message id, so
-    the SDK reconciles in place instead of pushing a second copy.
+    Used only by the cold-reload path (``GET /chat/{id}/stream``): there is no
+    submitted message to continue, so re-tailing from the opener replays the
+    assistant message's stable id and the SDK rebuilds the same UI message. (The
+    live approval POST doesn't need this — its resubmit already carries the
+    assistant message, so its continuation folds in; see :func:`submit_approvals`.)
 
-    The run is in flight (resumable) when its opening event has no run-boundary
-    event after it. ``start.index`` is the event index of that opener.
+    The run is in flight (resumable) when its opener has no terminal after it.
     """
     run_start: int | None = None
     seen_boundary = True
@@ -70,7 +65,7 @@ async def active_run_start_index(session_id: str) -> int | None:
             # first opener after a boundary marks where the next run begins.
             run_start = index
             seen_boundary = False
-        elif event.type in _RUN_BOUNDARY:
+        elif event.type in _TERMINAL:
             seen_boundary = True
     return None if seen_boundary else run_start
 
@@ -94,22 +89,28 @@ async def start_or_resume(session_id: str, prompt: str) -> int:
         turn_index = await _waiting_turn_index(session_id)
         await _resume(
             f"seal-session:{session_id}:{turn_index}",
-            proto.NewUserMessage(prompt=prompt),
+            proto.SessionHook(payload=proto.NewUserMessage(prompt=prompt)),
         )
     return start_index
 
 
 async def submit_approvals(
     session_id: str, approvals: list[proto.ToolApprovalResponse]
-) -> None:
-    """Forward UI approval decisions into the parked session hook."""
-    if not approvals:
-        return
-    turn_index = await _waiting_turn_index(session_id)
-    await _resume(
-        f"seal-session:{session_id}:{turn_index}",
-        proto.ToolApprovals(tool_approvals=approvals),
-    )
+) -> int:
+    """Forward each UI approval decision into its own parked hook.
+
+    Returns the stream index to tail the continuation from: the next index after
+    the park, computed *before* resuming so the continuation can't outrun it. The
+    resubmit carries the parked assistant message, so the client keeps streaming
+    into it and the continuation (tool output + answer) folds in.
+    """
+    start_index = await stream.tail_index(session_id) + 1
+    for approval in approvals:
+        await _resume(
+            proto.approval_hook_token(session_id, approval.tool_call_id),
+            proto.ApprovalHook(response=approval),
+        )
+    return start_index
 
 
 async def to_sse(
@@ -156,7 +157,11 @@ async def _turn_events(
     Lifecycle events stay server-side: ``subagent.called`` spins up a concurrent
     tail of the child stream (collected in ``children`` so the caller can cancel
     it; its progress lines go straight onto ``queue``), and the loop returns once
-    the session parks (waiting on a user message or a tool approval) or finishes.
+    the turn parks on an approval or finishes.
+
+    An approval resume just tails the continuation from after the park; its first
+    event is a tool result (no ``turn_id`` → id-less ``start``), so the client
+    folds it into the assistant message it resubmitted.
     """
     async for event in stream.get_readable(session_id, start_index=start_index):
         if not isinstance(event, proto.LifecycleEvent):
@@ -245,9 +250,8 @@ def _upsert(messages: list[ai.messages.Message], message: ai.messages.Message) -
     messages.append(message)
 
 
-async def _resume(token: str, payload: proto.ResumePayload) -> None:
-    """Resolve a session hook, retrying while the driver registers it."""
-    hook = proto.SessionHook(payload=payload)
+async def _resume(token: str, hook: vercel.workflow.BaseHook) -> None:
+    """Resolve a workflow hook, retrying while the driver registers it."""
     for attempt in range(40):
         try:
             await hook.resume(token)
@@ -261,8 +265,8 @@ async def _resume(token: str, payload: proto.ResumePayload) -> None:
 async def _waiting_turn_index(session_id: str) -> int:
     """The turn the session is currently parked on (latest ``session.waiting``).
 
-    Falls back to the latest ``tool_approval.requested`` turn, since a session
-    parked on a gated tool emits that rather than ``session.waiting``.
+    Falls back to the latest ``tool_approval.requested`` turn, since a turn parked
+    on a gated tool emits that rather than ``session.waiting``.
     """
     turn_index = 0
     async for event in stream.replay(session_id):
