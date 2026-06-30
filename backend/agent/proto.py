@@ -8,14 +8,6 @@ import vercel.workflow
 
 # Session inputs / outputs
 
-type SessionMode = Literal["infinite", "task"]
-
-
-class SubagentRequest(pydantic.BaseModel):
-    tool_call_id: str
-    name: str = "subagent"
-    prompt: str
-
 
 class ToolApprovalRequest(pydantic.BaseModel):
     tool_call_id: str
@@ -37,26 +29,12 @@ TOOL_APPROVAL_HOOK_PREFIX = "approve_"
 class SessionInput(pydantic.BaseModel):
     session_id: str
     prompt: str
-    mode: SessionMode = "infinite"
-
-    # subagent-specific inputs
-    session_hook_token: str | None = None  # hook id for parent's suspension hook
-    tool_call_id: str = ""  # return along with outputs to identify itself
 
 
 class SessionOutput(pydantic.BaseModel):
-    tool_call_id: str = ""  # subagent-specific
     session_id: str
-    # a subagent session returns its full transcript (MessageBundle) so reload and
-    # live render the same nested UIMessage; the model still sees the summary via
-    # the subagent tool's MessageAggregator
-    output: str | ai.agents.MessageBundle
+    output: str
     is_error: bool = False
-
-
-class SubagentResult(pydantic.BaseModel):
-    kind: Literal["subagent_result"] = "subagent_result"
-    output: SessionOutput
 
 
 class ToolApprovals(pydantic.BaseModel):
@@ -70,7 +48,7 @@ class NewUserMessage(pydantic.BaseModel):
     close: bool = False
 
 
-type ResumePayload = SubagentResult | ToolApprovals | NewUserMessage
+type ResumePayload = ToolApprovals | NewUserMessage
 
 RESUME_PAYLOAD_ADAPTER: pydantic.TypeAdapter[ResumePayload] = pydantic.TypeAdapter(
     ResumePayload
@@ -85,21 +63,17 @@ class SessionHook(pydantic.BaseModel, vercel.workflow.BaseHook):
 # of which scheduled jobs have been completed and accumulate results.
 class PendingState(pydantic.BaseModel):
     turn_index: int
-    subagents: list[SubagentRequest] = pydantic.Field(default_factory=list)
     tool_approval_requests: list[ToolApprovalRequest] = pydantic.Field(
         default_factory=list
     )
-    # side effects (child spawns + lifecycle events) fired exactly once.
+    # side effects (lifecycle events) fired exactly once.
     dispatched: bool = False
-    # tool_call_id -> finished subagent output.
-    subagent_outputs: dict[str, SessionOutput] = pydantic.Field(default_factory=dict)
     # human decision once resolved; None until then.
     tool_approvals: list[ToolApprovalResponse] | None = None
 
 
 class SessionState(pydantic.BaseModel):
     session_id: str
-    mode: SessionMode
     messages: list[ai.messages.Message]
     # decisions to pre-register on the next turn replay.
     tool_approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
@@ -113,19 +87,19 @@ class SessionState(pydantic.BaseModel):
 class TurnInput(pydantic.BaseModel):
     session_id: str
     messages: list[ai.messages.Message]
-    mode: SessionMode = "infinite"
+    # gated turns expose bash behind approval + subagent; ungated (subagent
+    # children) run bash directly and cannot delegate further.
+    gated: bool = True
     turn_hook_token: str
     # decisions to pre-register before the interrupted turn replays.
     tool_approvals: list[ToolApprovalResponse] = pydantic.Field(default_factory=list)
 
 
 class TurnOutput(pydantic.BaseModel):
-    kind: Literal["done", "suspend", "pending_requests", "error"]
+    kind: Literal["suspend", "pending_requests", "error"]
     messages: list[ai.messages.Message]
-    # subagents to dispatch and/or gated tool calls awaiting a human decision.
-    pending_requests: list[SubagentRequest | ToolApprovalRequest] = pydantic.Field(
-        default_factory=list
-    )
+    # gated tool calls awaiting a human decision.
+    pending_requests: list[ToolApprovalRequest] = pydantic.Field(default_factory=list)
     error: str | None = None
 
 

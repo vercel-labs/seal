@@ -139,8 +139,8 @@ async def resume_session(token: str, payload: proto.ResumePayload) -> None:
         try:
             await hook.resume(token)
             return
-        except RuntimeError as error:
-            if attempt == 99 or "not found" not in str(error).lower():
+        except vercel.workflow.HookNotFoundError:
+            if attempt == 99:
                 raise
             await asyncio.sleep(0.05)
 

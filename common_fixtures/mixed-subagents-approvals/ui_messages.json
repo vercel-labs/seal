@@ -68,14 +68,18 @@
       ]
      },
      {
-      "id": "msg_ff37dab583b0",
+      "id": "msg_9ffce182ac80",
       "role": "tool",
       "turnId": null,
       "partIds": [
-       "part_87b67c08351e"
+       "part_87b67c08351e",
+       "part_ff37dab583b0"
       ]
      }
-    ]
+    ],
+    "toolResultKinds": {
+     "tc-sub": "messages"
+    }
    }
   },
   "parts": [
@@ -88,12 +92,37 @@
    {
     "type": "tool-subagent",
     "toolCallId": "tc-sub",
-    "state": "input-available",
+    "state": "output-available",
     "input": {
      "prompt": "task-gamma",
      "name": "gamma"
     },
-    "output": null,
+    "output": {
+     "id": "msg_d76ae3e5aa3b",
+     "role": "assistant",
+     "metadata": {
+      "aiPython": {
+       "sourceMessages": [
+        {
+         "id": "msg_d76ae3e5aa3b",
+         "role": "assistant",
+         "turnId": null,
+         "partIds": [
+          "text-0"
+         ]
+        }
+       ]
+      }
+     },
+     "parts": [
+      {
+       "type": "text",
+       "text": "gamma report",
+       "state": null,
+       "provider_metadata": null
+      }
+     ]
+    },
     "rawInput": null,
     "errorText": null,
     "approval": null,

@@ -1,14 +1,15 @@
 import asyncio
+import contextvars
 import dataclasses
-import json
 import random
 import traceback
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any, ClassVar, cast
 
 import ai
+import vercel.workflow
 
-from agent import proto, stream, workflow
+from agent import proto, stream, util, workflow
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
@@ -131,19 +132,65 @@ async def web_fetch(
     return "\n".join(parts)
 
 
-# we only need schema off of this tool
-@ai.tool
-async def subagent(prompt: str, name: str | None = None) -> str:
+@workflow.step
+async def spawn_subagent_turn(turn_input: dict[str, object]) -> dict[str, object]:
+    # a subagent is just one ungated turn writing to its own stream.
+    started = await vercel.workflow.start(run_turn, turn_input)
+    return {"run_id": started.run_id}
+
+
+# the running tool call's session and id, set by the loop around each schedule so
+# a tool can reach them without smuggling args. tasks copy the context at
+# creation, so each tool sees its own call.
+tool_call_context: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
+    "tool_call_context"
+)
+
+
+# hack: the only way the library currently supports transforming a
+# tool result before sending it to the model is by using an
+# aggregator, so we use MessageAggregator without actually being a
+# generator.
+@ai.tool(aggregator=ai.agents.MessageAggregator)  # type: ignore
+@util.print_traceback
+async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
     """Delegate a focused task to a child agent and return its answer."""
-    raise RuntimeError("subagent is dispatched by the durable driver")
-
-
-# the driver stores the child's full transcript (a MessageBundle) as this tool's
-# result for rich UI rendering. declaring MessageAggregator lets Agent.run reduce
-# that bundle to the summary string the model sees: _populate_model_inputs looks
-# up this aggregator by tool name and calls to_model_input(result) each turn,
-# since the model-facing value is not serialized across the durable boundary.
-subagent = dataclasses.replace(subagent, aggregator=ai.agents.MessageAggregator)
+    session_id, tool_call_id = tool_call_context.get()
+    name = name or "subagent"
+    child_session_id = f"{session_id}:child:{tool_call_id}"
+    token = f"seal-turn:{child_session_id}:0"
+    await write_event(
+        session_id,
+        stream.subagent_called(
+            tool_call_id=tool_call_id, child_session_id=child_session_id, name=name
+        ),
+    )
+    hook = proto.TurnHook.wait(token=token)
+    await spawn_subagent_turn(
+        proto.TurnInput(
+            session_id=child_session_id,
+            messages=[
+                ai.system_message(SUBAGENT_SYSTEM_PROMPT),
+                ai.user_message(prompt),
+            ],
+            gated=False,
+            turn_hook_token=token,
+        ).model_dump(mode="json")
+    )
+    resolution = await hook
+    hook.dispose()
+    assert resolution is not None
+    output = resolution.output
+    await write_event(
+        session_id,
+        stream.subagent_completed(
+            tool_call_id=tool_call_id, is_error=output.kind == "error"
+        ),
+    )
+    await close_stream(child_session_id)
+    return ai.agents.MessageBundle(
+        messages=tuple(m for m in output.messages if m.role in ("assistant", "tool"))
+    )
 
 
 class DurableAgent(ai.Agent):
@@ -160,8 +207,6 @@ class DurableAgent(ai.Agent):
     ) -> None:
         super().__init__(tools=tools)
         self.session_id = session_id
-        # side-channel for exfiltrating subagent requests out of the loop
-        self.pending_subagents: list[dict[str, object]] = []
 
     async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
         model_id = context.model.id
@@ -178,47 +223,21 @@ class DurableAgent(ai.Agent):
             assistant_message = ai.messages.Message.model_validate(result)
             context.add(assistant_message)
 
-            pending_subagents: list[proto.SubagentRequest] = []
-            tool_message: ai.messages.Message | None = None
-
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
-                    if (
-                        tool_call.tool_name == "subagent"
-                        and not tool_call.cached_result
-                    ):
-                        # we're not processing this inside the loop
-                        # we'll return that and have session driver dispatch
-                        # a separate agent session for this
-                        args = json.loads(tool_call.tool_args or "{}")
-                        pending_subagents.append(
-                            proto.SubagentRequest(
-                                tool_call_id=tool_call.tool_call_id,
-                                name=str(args.get("name") or "subagent"),
-                                prompt=str(args["prompt"]),
-                            )
-                        )
-                    else:
-                        runner.schedule(context.resolve(tool_call))
+                    token = tool_call_context.set(
+                        (session_id or "", tool_call.tool_call_id)
+                    )
+                    runner.schedule(context.resolve(tool_call))
+                    tool_call_context.reset(token)
 
                 async for event in runner.events():
-                    if session_id is not None:
-                        await write_event(session_id, event.model_dump(mode="json"))
                     yield event
 
                 tool_message = runner.get_tool_message()
 
             if tool_message is not None:
                 context.add(tool_message)
-            elif pending_subagents:
-                # guarantee a trailing tool message for the driver to extend
-                context.add(ai.messages.Message(role="tool", parts=[]))
-
-            if pending_subagents:
-                self.pending_subagents = [
-                    request.model_dump(mode="json") for request in pending_subagents
-                ]
-                break
 
 
 @workflow.step(max_retries=0)
@@ -230,14 +249,13 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
         try:
             await hook.resume(token)
             return
-        except RuntimeError as error:
-            message = str(error).lower()
-            if attempt == 39 or "not found" not in message:
+        except vercel.workflow.HookNotFoundError:
+            if attempt == 39:
                 raise
             await asyncio.sleep(0.05)
 
 
-# runs one agent turn, maybe requests subagents
+# runs one agent turn, maybe parks on a tool approval
 @workflow.workflow
 # HACK: workflow sets up `random` as a custom seeded thing...
 # We ought to make it have something explicit instead
@@ -249,7 +267,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     # messages should already contain either the user message
     # or the tool result message, so no need to do anything
 
-    extra_tools = [bash_ungated] if _turn_input.mode == "task" else [bash, subagent]
+    extra_tools = [bash, subagent] if _turn_input.gated else [bash_ungated]
     agent = DurableAgent(
         tools=extra_tools,
         session_id=_turn_input.session_id,
@@ -269,6 +287,12 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
         model = ai.get_model(MODEL_ID)
         async with agent.run(model, messages) as run:
             async for event in run:
+                # N.B: DurableAgent.run filters out most events -- we
+                # will only get tool running events and hooks.
+                await write_event(
+                    _turn_input.session_id,
+                    event.model_dump(mode="json"),
+                )
                 # monitor the stream for hook events and interrupt on them.
                 if (
                     isinstance(event, ai.events.HookEvent)
@@ -276,15 +300,6 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
                 ):
                     hook = event.hook
                     if hook.hook_id.startswith(proto.TOOL_APPROVAL_HOOK_PREFIX):
-                        # HookEvents ride the runtime queue, not runner.events(),
-                        # so the loop never wrote this to the durable stream. write
-                        # it here so the AI SDK UI adapter emits the approval
-                        # request part (it skips the is_hook_pending tool result
-                        # and waits for the pending HookEvent to drive the UI).
-                        await write_event(
-                            _turn_input.session_id,
-                            event.model_dump(mode="json"),
-                        )
                         tool_approval_requests.append(
                             proto.ToolApprovalRequest(
                                 tool_call_id=hook.hook_id[
@@ -310,23 +325,11 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             flush=True,
         )
     else:
-        # create normal output if the run has completed successfully
-        subagent_requests = [
-            proto.SubagentRequest.model_validate(item)
-            for item in agent.pending_subagents
-        ]
-
-        has_pending = bool(subagent_requests or tool_approval_requests)
-        if _turn_input.mode == "infinite":
-            output_kind = "pending_requests" if has_pending else "suspend"
-        else:
-            # task (subagent) sessions never gate; pending requests would deadlock.
-            output_kind = "done"
-
+        # ungated turns never raise approvals, so they fall through to suspend.
         output = proto.TurnOutput(
-            kind=output_kind,
+            kind="pending_requests" if tool_approval_requests else "suspend",
             messages=messages,
-            pending_requests=[*subagent_requests, *tool_approval_requests],
+            pending_requests=tool_approval_requests,
         )
 
     # notify session that the turn is complete

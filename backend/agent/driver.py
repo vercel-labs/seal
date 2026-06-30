@@ -1,4 +1,3 @@
-import asyncio
 import random
 from typing import Any
 
@@ -30,15 +29,6 @@ async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object
 
 
 @workflow.step(max_retries=0)
-async def spawn_task_session_workflow(
-    session_input: dict[str, object],
-) -> dict[str, object]:
-    # fires child workflow for subagent session
-    started = await vercel.workflow.start(run_session, session_input)
-    return {"run_id": started.run_id}
-
-
-@workflow.step(max_retries=0)
 async def load_session(session_id: str) -> dict[str, Any] | None:
     # restores the latest persisted session snapshot, if any
     state = await session.read_session(session_id)
@@ -49,23 +39,6 @@ async def load_session(session_id: str) -> dict[str, Any] | None:
 async def save_session(state_data: dict[str, Any]) -> None:
     # appends the current session state as the latest snapshot
     await session.write_session(proto.SessionState.model_validate(state_data))
-
-
-@workflow.step(max_retries=0)
-async def resume_session_hook(token: str, payload_data: dict[str, Any]) -> None:
-    # resume() is a side effect, so it must run in a step. the session may not
-    # have parked on the hook yet, so retry while it is missing.
-    payload = proto.RESUME_PAYLOAD_ADAPTER.validate_python(payload_data)
-    hook = proto.SessionHook(payload=payload)
-    for attempt in range(40):
-        try:
-            await hook.resume(token)
-            return
-        except RuntimeError as error:
-            message = str(error).lower()
-            if attempt == 39 or "not found" not in message:
-                raise
-            await asyncio.sleep(0.05)
 
 
 def _last_text(messages: list[ai.messages.Message]) -> str:
@@ -90,21 +63,15 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         state = proto.SessionState.model_validate(restored)
         state.messages.append(ai.user_message(_session_input.prompt))
     else:
-        system = (
-            turn.SUBAGENT_SYSTEM_PROMPT
-            if _session_input.mode == "task"
-            else turn.SYSTEM_PROMPT
-        )
         state = proto.SessionState(
             session_id=session_id,
-            mode=_session_input.mode,
             messages=[
-                ai.system_message(system),
+                ai.system_message(turn.SYSTEM_PROMPT),
                 ai.user_message(_session_input.prompt),
             ],
         )
     await save_session(state.model_dump(mode="json"))
-    await write_event(session_id, stream.session_started(mode=state.mode))
+    await write_event(session_id, stream.session_started())
 
     turn_index = 0
     while True:
@@ -115,7 +82,6 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         turn_input = proto.TurnInput(
             session_id=session_id,
             messages=state.messages,
-            mode=state.mode,
             turn_hook_token=turn_hook_token,
             tool_approvals=state.tool_approvals,
         )
@@ -135,32 +101,6 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
         )
 
         match turn_result.kind:
-            case "done":
-                # we're currently in a subagent session; return output and quit.
-                # we're returning all assistant and tool messages in the bundle
-                output = proto.SessionOutput(
-                    tool_call_id=_session_input.tool_call_id,
-                    session_id=session_id,
-                    output=ai.agents.MessageBundle(
-                        messages=tuple(
-                            msg
-                            for msg in state.messages
-                            if msg.role in ("assistant", "tool")
-                        )
-                    ),
-                )
-
-                # notify the parent session. output carries the tool_call_id
-                # so parent knows which subagent this is
-                if _session_input.session_hook_token is not None:
-                    await resume_session_hook(
-                        _session_input.session_hook_token,
-                        proto.SubagentResult(output=output).model_dump(mode="json"),
-                    )
-                await write_event(session_id, stream.session_completed())
-                await turn.close_stream(session_id)
-                return output.model_dump(mode="json")
-
             case "suspend":
                 # we are currently in the main session. wait for the next user message.
                 await write_event(
@@ -184,80 +124,36 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                 state.messages.append(ai.user_message(message.prompt or ""))
 
             case "pending_requests":
-                # we are currently in the main session. the turn has requested
-                # out-of-session work (subagents or human-in-the-loop).
-                # dispatch work, suspend on the hook and wait.
+                # we are currently in the main session. the turn parked on gated
+                # tool calls awaiting a human decision. surface them, suspend on
+                # the hook and wait.
                 if state.pending is None:
                     state.pending = proto.PendingState(
                         turn_index=turn_index,
-                        subagents=[
-                            request
-                            for request in turn_result.pending_requests
-                            if isinstance(request, proto.SubagentRequest)
-                        ],
-                        tool_approval_requests=[
-                            request
-                            for request in turn_result.pending_requests
-                            if isinstance(request, proto.ToolApprovalRequest)
-                        ],
+                        tool_approval_requests=turn_result.pending_requests,
                     )
                     await save_session(state.model_dump(mode="json"))
                 pending = state.pending
                 token = f"seal-session:{session_id}:{turn_index}"
 
-                # process all requests
                 if not pending.dispatched:
-                    for request in pending.subagents:
-                        child_input = proto.SessionInput(
-                            session_id=f"{session_id}:child:{request.tool_call_id}",
-                            prompt=request.prompt,
-                            mode="task",
-                            session_hook_token=token,
-                            tool_call_id=request.tool_call_id,
-                        )
-                        await spawn_task_session_workflow(
-                            child_input.model_dump(mode="json")
-                        )
-                        await write_event(
-                            session_id,
-                            stream.subagent_called(
-                                tool_call_id=request.tool_call_id,
-                                child_session_id=child_input.session_id,
-                                name=request.name,
-                            ),
-                        )
-                    if pending.tool_approval_requests:
-                        await write_event(
-                            session_id,
-                            stream.tool_approval_requested(
-                                turn_index=turn_index,
-                                requests=pending.tool_approval_requests,
-                            ),
-                        )
+                    await write_event(
+                        session_id,
+                        stream.tool_approval_requested(
+                            turn_index=turn_index,
+                            requests=pending.tool_approval_requests,
+                        ),
+                    )
                     pending.dispatched = True
                     await save_session(state.model_dump(mode="json"))
 
-                # suspend on the same hook repeatedly until we collect results
-                # from all out-of-loop work.
+                # suspend on the hook until the human resolves the approvals.
                 hook = proto.SessionHook.wait(token=token)
-                while pending.subagent_outputs.keys() != {
-                    request.tool_call_id for request in pending.subagents
-                } or (
-                    pending.tool_approval_requests and pending.tool_approvals is None
-                ):
+                while pending.tool_approvals is None:
                     resolution = await hook
                     payload = resolution.payload if resolution is not None else None
 
                     match payload:
-                        case proto.SubagentResult(output=output):
-                            pending.subagent_outputs[output.tool_call_id] = output
-                            await write_event(
-                                session_id,
-                                stream.subagent_completed(
-                                    tool_call_id=output.tool_call_id,
-                                    is_error=output.is_error,
-                                ),
-                            )
                         case proto.ToolApprovals(tool_approvals=tool_approvals):
                             pending.tool_approvals = tool_approvals
                             await write_event(
@@ -269,7 +165,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                             )
                         case _:
                             # a close (or no payload) tears the session down even
-                            # with work outstanding; the child runs are orphaned.
+                            # with work outstanding.
                             hook.dispose()
                             await write_event(session_id, stream.session_completed())
                             await turn.close_stream(session_id)
@@ -281,24 +177,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
                     await save_session(state.model_dump(mode="json"))
                 hook.dispose()
 
-                # the turn always leaves a trailing tool message; extend it with
-                # the subagent results.
-                if pending.subagents:
-                    tool_message = state.messages[-1]
-                    assert tool_message.role == "tool"
-                    for request in pending.subagents:
-                        completed = pending.subagent_outputs[request.tool_call_id]
-                        # the result is the child's MessageBundle
-                        tool_message.parts.append(
-                            ai.tool_result_part(
-                                request.tool_call_id,
-                                tool_name="subagent",
-                                result=completed.output,
-                                is_error=completed.is_error,
-                            )
-                        )
-
-                # every tool call must now have a result.
+                # every tool call must have a result
                 tool_calls = {
                     part.tool_call_id
                     for message in state.messages

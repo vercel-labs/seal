@@ -74,7 +74,7 @@ async def test_negative_start_index_reads_the_tail() -> None:
 async def test_lifecycle_events_are_stamped_on_write() -> None:
     # workflow bodies can't call datetime.now(); the write seam stamps ``at``.
     writer = await stream.get_writable("s1")
-    await writer.write(stream.session_started(mode="infinite"))
+    await writer.write(stream.session_started())
     await writer.close()
 
     [event] = await _collect("s1")
