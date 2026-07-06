@@ -15,10 +15,8 @@ __all__ = ["get_readable", "get_writable"]
 # lifecycle event constructors
 
 
-def session_started(*, mode: str) -> dict[str, Any]:
-    return proto.LifecycleEvent(
-        type=proto.SESSION_STARTED, data={"mode": mode}
-    ).model_dump(mode="json")
+def session_started() -> dict[str, Any]:
+    return proto.LifecycleEvent(type=proto.SESSION_STARTED).model_dump(mode="json")
 
 
 def session_waiting(*, turn_index: int) -> dict[str, Any]:

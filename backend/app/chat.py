@@ -252,8 +252,8 @@ async def _resume(token: str, payload: proto.ResumePayload) -> None:
         try:
             await hook.resume(token)
             return
-        except RuntimeError as error:
-            if attempt == 39 or "not found" not in str(error).lower():
+        except vercel.workflow.HookNotFoundError:
+            if attempt == 39:
                 raise
             await asyncio.sleep(0.05)
 

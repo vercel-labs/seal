@@ -12,12 +12,12 @@
    "role": "user"
   },
   {
-   "id": "msg_d0eb546182af",
+   "id": "msg_03c8af0bb67a",
    "metadata": {
     "aiPython": {
      "sourceMessages": [
       {
-       "id": "msg_d0eb546182af",
+       "id": "msg_03c8af0bb67a",
        "role": "assistant",
        "turnId": null,
        "partIds": [
@@ -27,22 +27,33 @@
        ]
       },
       {
-       "id": "msg_782630bc3744",
+       "id": "msg_7b27178e9775",
        "role": "internal",
        "turnId": null,
        "partIds": [
-        "part_05954010e668"
+        "part_66fd369019d9"
        ]
       },
       {
-       "id": "msg_bbb7f97d3478",
+       "id": "msg_6cbbede91606",
        "role": "tool",
        "turnId": null,
        "partIds": [
-        "part_8e5740f688f6"
+        "part_87b67c08351e"
+       ]
+      },
+      {
+       "id": "msg_19f8cf370af0",
+       "role": "tool",
+       "turnId": null,
+       "partIds": [
+        "part_ff37dab583b0"
        ]
       }
-     ]
+     ],
+     "toolResultKinds": {
+      "tc-sub": "messages"
+     }
     }
    },
    "role": "assistant",
@@ -58,10 +69,36 @@
     {
      "type": "tool-subagent",
      "toolCallId": "tc-sub",
-     "state": "input-streaming",
+     "state": "output-available",
      "input": {
       "prompt": "task-gamma",
       "name": "gamma"
+     },
+     "output": {
+      "id": "msg_d76ae3e5aa3b",
+      "role": "assistant",
+      "metadata": {
+       "aiPython": {
+        "sourceMessages": [
+         {
+          "id": "msg_d76ae3e5aa3b",
+          "role": "assistant",
+          "turnId": null,
+          "partIds": [
+           "text-0"
+          ]
+         }
+        ]
+       }
+      },
+      "parts": [
+       {
+        "type": "text",
+        "text": "gamma report",
+        "state": null,
+        "provider_metadata": null
+       }
+      ]
      }
     },
     {

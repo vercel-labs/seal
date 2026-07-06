@@ -33,20 +33,7 @@ def _hook_event() -> events_.HookEvent:
 
 
 def test_resume_payloads_round_trip() -> None:
-    bundle = ai.agents.MessageBundle(
-        messages=(
-            ai.user_message("delegated task"),
-            ai.messages.Message(
-                role="assistant", parts=[messages_.TextPart(text="child answer")]
-            ),
-        )
-    )
     payloads: list[proto.ResumePayload] = [
-        proto.SubagentResult(
-            output=proto.SessionOutput(
-                tool_call_id="tc-1", session_id="s:child:tc-1", output=bundle
-            )
-        ),
         proto.ToolApprovals(
             tool_approvals=[
                 proto.ToolApprovalResponse(
@@ -62,21 +49,6 @@ def test_resume_payloads_round_trip() -> None:
         )
         assert type(restored) is type(payload)
         assert restored.model_dump(mode="json") == payload.model_dump(mode="json")
-
-
-def test_subagent_result_restores_message_bundle() -> None:
-    bundle = ai.agents.MessageBundle(messages=(ai.user_message("task"),))
-    payload = proto.SubagentResult(
-        output=proto.SessionOutput(
-            tool_call_id="tc-1", session_id="child", output=bundle
-        )
-    )
-    restored = proto.RESUME_PAYLOAD_ADAPTER.validate_python(
-        payload.model_dump(mode="json")
-    )
-    assert isinstance(restored, proto.SubagentResult)
-    assert isinstance(restored.output.output, ai.agents.MessageBundle)
-    assert restored.output.output.messages[0].text == "task"
 
 
 # --- stream events ---------------------------------------------------------------
@@ -156,18 +128,12 @@ def test_session_state_round_trip_is_dump_stable() -> None:
     ]
     state = proto.SessionState(
         session_id="s1",
-        mode="infinite",
         messages=messages,
         tool_approvals=[proto.ToolApprovalResponse(tool_call_id="tc-2", granted=True)],
         pending=proto.PendingState(
             turn_index=3,
-            subagents=[proto.SubagentRequest(tool_call_id="tc-9", prompt="go")],
+            tool_approval_requests=[proto.ToolApprovalRequest(tool_call_id="tc-2")],
             dispatched=True,
-            subagent_outputs={
-                "tc-9": proto.SessionOutput(
-                    tool_call_id="tc-9", session_id="s1:child:tc-9", output=bundle
-                )
-            },
         ),
     )
 

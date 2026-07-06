@@ -18,9 +18,21 @@ data: {"toolCallId": "tc-cmd", "inputTextDelta": "{\"command\": \"echo gamma-out
 
 data: {"approvalId": "approve_tc-cmd", "toolCallId": "tc-cmd", "type": "tool-approval-request"}
 
+data: {"toolCallId": "tc-sub", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sub", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sub", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "gamma report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sub", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "gamma report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sub", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "gamma report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sub", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "gamma report", "state": null, "provider_metadata": null}]}, "type": "tool-output-available"}
+
 data: {"type": "finish-step"}
 
-data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_03c8af0bb67a", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sub", "tc-cmd"]}, {"id": "msg_7b27178e9775", "role": "internal", "turnId": null, "partIds": ["part_66fd369019d9"]}, {"id": "msg_6cbbede91606", "role": "tool", "turnId": null, "partIds": ["part_87b67c08351e"]}]}}}
+data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_03c8af0bb67a", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sub", "tc-cmd"]}, {"id": "msg_7b27178e9775", "role": "internal", "turnId": null, "partIds": ["part_66fd369019d9"]}, {"id": "msg_6cbbede91606", "role": "tool", "turnId": null, "partIds": ["part_87b67c08351e"]}, {"id": "msg_19f8cf370af0", "role": "tool", "turnId": null, "partIds": ["part_ff37dab583b0"]}], "toolResultKinds": {"tc-sub": "messages"}}}}
 
 data: [DONE]
 

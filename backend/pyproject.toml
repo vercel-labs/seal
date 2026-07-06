@@ -39,7 +39,7 @@ exclude-newer = "2 days"
 
 [tool.uv.sources]
 ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
-vercel = { git = "https://github.com/vercel/vercel-py", branch = "seal-workflow-dev" }
+vercel = { git = "https://github.com/vercel/vercel-py", branch = "seal-workflow-dev", subdirectory = "src/vercel" }
 
 [dependency-groups]
 dev = [
