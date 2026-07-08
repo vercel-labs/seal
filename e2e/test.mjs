@@ -201,6 +201,13 @@ function chatLog(page) {
   return page.getByTestId("chat-log");
 }
 
+// The chat pane (SidebarInset's <main>). The sidebar lists sessions titled with
+// LLM-generated text, so locators for app chrome must never search page-wide:
+// a title containing e.g. "submit" makes getByRole ambiguous (substring match).
+function mainPane(page) {
+  return page.getByRole("main");
+}
+
 function toolCards(page) {
   return chatLog(page).locator(
     '[data-testid="tool-card"][data-tool-depth="0"]',
@@ -253,7 +260,7 @@ async function snapshot(page) {
     toolState(page, "output-available").count(),
     toolState(page, "output-denied").count(),
     toolState(page, "output-error").count(),
-    page.getByRole("button", { name: "Stop" }).count(),
+    mainPane(page).getByRole("button", { name: "Stop", exact: true }).count(),
     chat.innerText().catch(() => ""),
     finalAnswerPresent(page),
   ]);
@@ -310,7 +317,7 @@ async function openFreshChat(page) {
     timeout: TIMEOUT_MS.navigation,
   });
 
-  const textarea = page.getByPlaceholder("Ask me anything...");
+  const textarea = mainPane(page).getByPlaceholder("Ask me anything...");
   await textarea.waitFor({ state: "visible", timeout: TIMEOUT_MS.appReady });
   await chatLog(page)
     .getByText("Start a conversation")
@@ -527,7 +534,9 @@ async function runScenario(browser, scenario) {
     const textarea = await openFreshChat(page);
 
     await textarea.fill(scenario.prompt);
-    await page.getByRole("button", { name: "Submit" }).click();
+    await mainPane(page)
+      .getByRole("button", { name: "Submit", exact: true })
+      .click();
     log(`sent prompt: "${scenario.prompt}"`);
 
     await chatLog(page)
