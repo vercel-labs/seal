@@ -14,11 +14,6 @@ import random
 from typing import Any
 
 import ai
-import vercel._internal.workflow.py_sandbox as py_sandbox
-
-# mirror worker.py: these modules must come from the host inside the sandbox.
-py_sandbox._PASSTHROUGHS.update({"rich", "modelsdotdev"})
-
 import vercel._internal.workflow.runtime as wf_runtime  # noqa: E402
 import vercel._internal.workflow.worlds.local as wf_local  # noqa: E402
 import vercel.workflow  # noqa: E402
@@ -87,17 +82,18 @@ class InProcessWorld(wf_local.LocalWorld):
             run_id = getattr(message, "run_id", None) or message.workflow_run_id
             lock = self._locks.setdefault(run_id, asyncio.Lock())
             # Install a seeded RNG for steps so they get deterministic IDs also.
-            rng_ctx = ai.messages.use_random_async(self._step_rng)
+            rng_ctx = ai.messages.use_random(self._step_rng)
             attempt = 1
             while True:
-                async with lock, rng_ctx:
-                    retry = await handler(
-                        message.model_dump(),
-                        attempt=attempt,
-                        queue_name=queue_name,
-                        message_id=message_id,
-                        registry=self._registry,
-                    )
+                async with lock:
+                    with rng_ctx:
+                        retry = await handler(
+                            message.model_dump(),
+                            attempt=attempt,
+                            queue_name=queue_name,
+                            message_id=message_id,
+                            registry=self._registry,
+                        )
                 if retry is None:
                     return
                 attempt += 1

@@ -31,11 +31,6 @@ os.environ.setdefault(
     os.path.join(_BACKEND_DIR, ".seal"),
 )
 
-import vercel._internal.workflow.py_sandbox  # noqa: E402
-
-# See `worker.py` for why these are served from the host inside the sandbox.
-vercel._internal.workflow.py_sandbox._PASSTHROUGHS.update({"rich", "modelsdotdev"})
-
 import contextlib  # noqa: E402
 
 import ai.agents.ui.ai_sdk as ai_sdk  # noqa: E402

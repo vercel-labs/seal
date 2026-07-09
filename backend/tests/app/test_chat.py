@@ -209,11 +209,12 @@ async def test_to_sse_streams_one_turn_and_terminates_at_waiting() -> None:
     assert "[DONE]" in lines[-1]
 
 
-async def test_to_sse_parks_at_a_pending_approval() -> None:
+async def test_to_sse_parks_at_a_deferred_approval() -> None:
     hook: messages_.HookPart[Any] = messages_.HookPart(
         hook_id="approve_tc-1",
         hook_type="ToolApproval",
-        status="pending",
+        tool_call_id="tc-1",
+        status="deferred",
         metadata={"tool": "bash", "kwargs": {"command": "rm -rf /tmp/x"}},
     )
     tool_call = ai.messages.Message(

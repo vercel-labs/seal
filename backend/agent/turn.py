@@ -259,7 +259,7 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
 @workflow.workflow
 # HACK: workflow sets up `random` as a custom seeded thing...
 # We ought to make it have something explicit instead
-@ai.messages.use_random_async(lambda: random)  # type: ignore
+@ai.messages.use_random(lambda: random)  # type: ignore
 async def run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
     messages = _turn_input.messages
@@ -296,7 +296,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
                 # monitor the stream for hook events and interrupt on them.
                 if (
                     isinstance(event, ai.events.HookEvent)
-                    and event.hook.status == "pending"
+                    and event.hook.status == "deferred"
                 ):
                     hook = event.hook
                     if hook.hook_id.startswith(proto.TOOL_APPROVAL_HOOK_PREFIX):
@@ -311,7 +311,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
                                 ),
                             )
                         )
-                    ai.abort_pending_hook(hook)
+                    ai.defer_hook(hook)
 
             messages = run.messages
     except Exception as error:
