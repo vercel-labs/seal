@@ -12,8 +12,8 @@ exclude-newer-span = "P2D"
 
 [[package]]
 name = "ai"
-version = "0.2.2.dev3+f07e50a"
-source = { git = "https://github.com/vercel-labs/ai-python?branch=main#f07e50ac1600e0fbaccc520f807d55c467313abc" }
+version = "0.2.2.dev18+b082d70"
+source = { git = "https://github.com/vercel-labs/ai-python?branch=main#b082d707d6d1d6b1cbf60f59055f909ebd066750" }
 dependencies = [
     { name = "httpx" },
     { name = "modelsdotdev" },
@@ -1091,28 +1091,49 @@ wheels = [
 [[package]]
 name = "vercel"
 version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel&branch=seal-workflow-dev#24f844512c8c44503ff053ee934a41f2dc31695a" }
+source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
 dependencies = [
     { name = "anyio" },
     { name = "cbor2" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "vercel-cache" },
     { name = "vercel-headers" },
+    { name = "vercel-internal-telemetry" },
     { name = "vercel-oidc" },
     { name = "vercel-workers" },
     { name = "websockets" },
 ]
 
 [[package]]
+name = "vercel-cache"
+version = "0.6.0"
+source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-cache&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+dependencies = [
+    { name = "httpx" },
+    { name = "vercel-headers" },
+    { name = "vercel-internal-telemetry" },
+]
+
+[[package]]
 name = "vercel-headers"
 version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-headers&branch=seal-workflow-dev#24f844512c8c44503ff053ee934a41f2dc31695a" }
+source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-headers&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+
+[[package]]
+name = "vercel-internal-telemetry"
+version = "0.6.0"
+source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-internal-telemetry&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+dependencies = [
+    { name = "httpx" },
+    { name = "vercel-oidc" },
+]
 
 [[package]]
 name = "vercel-oidc"
 version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-oidc&branch=seal-workflow-dev#24f844512c8c44503ff053ee934a41f2dc31695a" }
+source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-oidc&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
 dependencies = [
     { name = "httpx" },
     { name = "vercel-headers" },

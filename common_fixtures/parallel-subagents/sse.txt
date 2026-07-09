@@ -1,4 +1,4 @@
-data: {"type": "start", "messageId": "msg_03c8af0bb67a"}
+data: {"type": "start", "messageId": "msg_51e28f79d13c"}
 
 data: {"type": "start-step"}
 
@@ -16,25 +16,27 @@ data: {"toolCallId": "tc-sb", "toolName": "subagent", "type": "tool-input-start"
 
 data: {"toolCallId": "tc-sb", "inputTextDelta": "{\"prompt\": \"task-beta\", \"name\": \"beta\"}", "type": "tool-input-delta"}
 
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_5d542e18ea84", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_5d542e18ea84", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_5d542e18ea84", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_5d542e18ea84", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_5d542e18ea84", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_5d542e18ea84", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_5d542e18ea84", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_5d542e18ea84", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_5d542e18ea84", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_5d542e18ea84", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_f8a0c4f02b38", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_f8a0c4f02b38", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_f8a0c4f02b38", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_f8a0c4f02b38", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_f8a0c4f02b38", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_f8a0c4f02b38", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_f8a0c4f02b38", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_f8a0c4f02b38", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
 
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_f8a0c4f02b38", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_f8a0c4f02b38", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "providerMetadata": null}]}, "type": "tool-output-available", "preliminary": true}
+
+data: {"toolCallId": "tc-sa", "output": {"id": "msg_5d542e18ea84", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_5d542e18ea84", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "provider_metadata": null}]}, "type": "tool-output-available"}
 
 data: {"id": "text-0", "type": "text-start"}
 
@@ -42,13 +44,11 @@ data: {"id": "text-0", "delta": "combined findings", "type": "text-delta"}
 
 data: {"id": "text-0", "type": "text-end"}
 
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report", "state": null, "provider_metadata": null}]}, "type": "tool-output-available"}
-
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "provider_metadata": null}]}, "type": "tool-output-available"}
+data: {"toolCallId": "tc-sb", "output": {"id": "msg_f8a0c4f02b38", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_f8a0c4f02b38", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report", "state": null, "provider_metadata": null}]}, "type": "tool-output-available"}
 
 data: {"type": "finish-step"}
 
-data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_03c8af0bb67a", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sa", "tc-sb"]}, {"id": "msg_b00478d372db", "role": "assistant", "turnId": null, "partIds": ["text-0"]}, {"id": "msg_fe5d6205ae06", "role": "tool", "turnId": null, "partIds": ["part_fbdfd2d76df2"]}, {"id": "msg_3bb218f5deb1", "role": "tool", "turnId": null, "partIds": ["part_b7060574586f"]}], "toolResultKinds": {"tc-sa": "messages", "tc-sb": "messages"}}}}
+data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sa", "tc-sb"]}, {"id": "msg_fe5d6205ae06", "role": "tool", "turnId": null, "partIds": ["part_fbdfd2d76df2"]}, {"id": "msg_52878e3930ff", "role": "assistant", "turnId": null, "partIds": ["text-0"]}, {"id": "msg_3bb218f5deb1", "role": "tool", "turnId": null, "partIds": ["part_b7060574586f"]}], "toolResultKinds": {"tc-sa": "messages", "tc-sb": "messages"}}}}
 
 data: [DONE]
 
