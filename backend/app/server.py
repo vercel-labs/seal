@@ -19,7 +19,13 @@ workflow modules, so the preamble mirrors ``worker.py``.
 from __future__ import annotations
 
 import collections.abc
+import logging
 import os
+
+# uvicorn's reloader passes watch_filter=None to watchfiles and applies its
+# *.py filter only afterward, so every .workflow-data/.seal write logs an INFO
+# "N changes detected" without causing a reload; drop those count lines.
+logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
 os.environ.setdefault(
