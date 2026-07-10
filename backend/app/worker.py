@@ -16,6 +16,15 @@ import os
 # the vercel runtime forces the root logger to INFO, and httpx logs every
 # request at INFO; the worker's constant HTTP traffic makes that unreadable.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# every queue delivery is an HTTP POST to this worker, so uvicorn's access log
+# prints a line per step. the dev runtime applies its uvicorn dictConfig *after*
+# importing this module, resetting the logger's level — but dictConfig never
+# removes attached filters, so a filter is what survives.
+logging.getLogger("uvicorn.access").addFilter(lambda record: False)
+# uvicorn's reloader passes watch_filter=None to watchfiles and applies its
+# *.py filter only afterward, so every .workflow-data/.seal write logs an INFO
+# "N changes detected" without causing a reload; drop those count lines.
+logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
