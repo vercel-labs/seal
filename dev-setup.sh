@@ -9,4 +9,5 @@ rm -rf .vercel/python/ .venv
 uv sync
 mkdir -p .vercel/python
 cd .vercel/python/
-cp -r ../../.venv/lib/python$VERSION/site-packages/vercel-*.dist-info/ .
+cp -r ../../.venv/lib/python$VERSION/site-packages/vercel*.dist-info/ .
+sed -i '/\.\./d' vercel*.dist-info/RECORD
