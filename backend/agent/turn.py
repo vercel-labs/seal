@@ -296,7 +296,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
                 # monitor the stream for hook events and interrupt on them.
                 if (
                     isinstance(event, ai.events.HookEvent)
-                    and event.hook.status == "deferred"
+                    and event.hook.status == "pending"
                 ):
                     hook = event.hook
                     if hook.hook_id.startswith(proto.TOOL_APPROVAL_HOOK_PREFIX):

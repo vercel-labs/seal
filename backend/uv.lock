@@ -12,8 +12,8 @@ exclude-newer-span = "P2D"
 
 [[package]]
 name = "ai"
-version = "0.2.2.dev18+b082d70"
-source = { git = "https://github.com/vercel-labs/ai-python?branch=main#b082d707d6d1d6b1cbf60f59055f909ebd066750" }
+version = "0.2.2.dev19+ff1fc29"
+source = { git = "https://github.com/vercel-labs/ai-python?branch=main#ff1fc29561f338841887bd934899ad2ccb6a3a7a" }
 dependencies = [
     { name = "httpx" },
     { name = "modelsdotdev" },

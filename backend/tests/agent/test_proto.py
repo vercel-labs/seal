@@ -21,7 +21,7 @@ def _hook_event() -> events_.HookEvent:
     hook: messages_.HookPart[Any] = messages_.HookPart(
         hook_id="approve_tc-1",
         hook_type="ToolApproval",
-        status="deferred",
+        status="pending",
         metadata={"tool": "bash", "kwargs": {"command": "ls"}},
     )
     return events_.HookEvent(
@@ -89,7 +89,7 @@ def test_hook_event_round_trip_keeps_approval_fields() -> None:
     )
     assert isinstance(restored, events_.HookEvent)
     assert restored.hook.hook_id == "approve_tc-1"
-    assert restored.hook.status == "deferred"
+    assert restored.hook.status == "pending"
     assert restored.hook.metadata["tool"] == "bash"
     assert restored.hook.metadata["kwargs"] == {"command": "ls"}
 
