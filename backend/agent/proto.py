@@ -61,6 +61,22 @@ class SessionState(pydantic.BaseModel):
 # Turn inputs / outputs
 
 
+# a serialized otel span context (hex ids), carried across workflow
+# boundaries as plain journaled data. minted host-side by ``spawn_turn``, so
+# it is identical on every replay of the body that threads it; the span it
+# names only exports at turn completion (``resume_turn_hook``), once the
+# turn's outcome and true duration are known.
+class TraceContext(pydantic.BaseModel):
+    trace_id: str
+    span_id: str
+    trace_flags: int = 1
+    # the caller's span id (same trace) for subagent turns; None for a
+    # session turn, whose span roots its own trace.
+    parent_span_id: str | None = None
+    # wall-clock start of the turn, for the retroactive export.
+    started_at_ns: int | None = None
+
+
 class TurnInput(pydantic.BaseModel):
     session_id: str
     messages: list[ai.messages.Message]
@@ -68,6 +84,9 @@ class TurnInput(pydantic.BaseModel):
     # children) run bash directly and cannot delegate further.
     gated: bool = True
     turn_hook_token: str
+    # the turn's own root span context, minted by ``spawn_turn`` at the
+    # callsite and injected here; llm_steps and child turns nest under it.
+    trace_context: TraceContext | None = None
 
 
 class TurnOutput(pydantic.BaseModel):

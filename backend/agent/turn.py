@@ -1,8 +1,11 @@
 import asyncio
+import contextlib
 import contextvars
 import dataclasses
+import os
+import time
 import traceback
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Iterator, Sequence
 from typing import Any, ClassVar
 
 import ai
@@ -21,12 +24,43 @@ SUBAGENT_SYSTEM_PROMPT = (
 )
 
 
+@contextlib.contextmanager
+def _trace_parent(context_data: dict[str, object] | None) -> Iterator[None]:
+    # sets a journaled span context as the ambient otel parent for the block,
+    # so the live spans opened inside continue that trace. steps run
+    # host-side; this is how a trace crosses the (span-free) workflow body.
+    if not context_data:
+        yield
+        return
+    import opentelemetry.context as otel_context
+    import opentelemetry.trace as otel_trace
+
+    parent = proto.TraceContext.model_validate(context_data)
+    token = otel_context.attach(
+        otel_trace.set_span_in_context(
+            otel_trace.NonRecordingSpan(
+                otel_trace.SpanContext(
+                    trace_id=int(parent.trace_id, 16),
+                    span_id=int(parent.span_id, 16),
+                    is_remote=True,
+                    trace_flags=otel_trace.TraceFlags(parent.trace_flags),
+                )
+            )
+        )
+    )
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
+
+
 @workflow.step(max_retries=0)
 async def llm_step(
     model_id: str,
     messages_data: list[dict[str, object]],
     tools_data: list[dict[str, object]],
     session_id: str | None,
+    trace_context_data: dict[str, object] | None = None,
 ) -> dict[str, object]:
     model = ai.get_model(model_id)
     messages = [
@@ -37,15 +71,18 @@ async def llm_step(
     writer = await stream.get_writable(session_id) if session_id else None
     message: ai.messages.Message | None = None
 
-    async with ai.stream(model, messages, tools=tools) as model_stream:
-        async for e in model_stream:
-            if writer is not None and not getattr(e, "replay", False):
-                await writer.write(e)
-            if isinstance(e, ai.events.StreamEnd):
-                message = e.message
+    # parent this step's spans under the turn's root span (minted by
+    # spawn_turn at the callsite).
+    with _trace_parent(trace_context_data):
+        async with ai.stream(model, messages, tools=tools) as model_stream:
+            async for e in model_stream:
+                if writer is not None and not e.replay:
+                    await writer.write(e)
+                if isinstance(e, ai.events.StreamEnd):
+                    message = e.message
 
-        if message is None:
-            message = model_stream.message
+            if message is None:
+                message = model_stream.message
 
     assert message is not None
     return message.model_dump(mode="json")
@@ -131,18 +168,35 @@ async def web_fetch(
     return "\n".join(parts)
 
 
-@workflow.step
-async def spawn_subagent_turn(turn_input: dict[str, object]) -> dict[str, object]:
-    # a subagent is just one ungated turn writing to its own stream.
-    started = await vercel.workflow.start(run_turn, turn_input)
+@workflow.step(max_retries=0)
+async def spawn_turn(
+    turn_input: dict[str, object],
+    parent_context_data: dict[str, object] | None = None,
+) -> dict[str, object]:
+    parent = (
+        proto.TraceContext.model_validate(parent_context_data)
+        if parent_context_data
+        else None
+    )
+    trace_context = proto.TraceContext(
+        trace_id=parent.trace_id if parent else os.urandom(16).hex(),
+        span_id=os.urandom(8).hex(),
+        trace_flags=parent.trace_flags if parent else 1,
+        parent_span_id=parent.span_id if parent else None,
+        started_at_ns=time.time_ns(),
+    )
+    started = await vercel.workflow.start(
+        run_turn,
+        {**turn_input, "trace_context": trace_context.model_dump(mode="json")},
+    )
     return {"run_id": started.run_id}
 
 
-# the running tool call's session and id, set by the loop around each schedule so
-# a tool can reach them without smuggling args. tasks copy the context at
-# creation, so each tool sees its own call.
-tool_call_context: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
-    "tool_call_context"
+# the running tool call's session, id, and turn trace context, set by the loop
+# around each schedule so a tool can reach them without smuggling args. tasks
+# copy the context at creation, so each tool sees its own call.
+tool_call_context: contextvars.ContextVar[tuple[str, str, dict[str, object] | None]] = (
+    contextvars.ContextVar("tool_call_context")
 )
 
 
@@ -154,7 +208,7 @@ tool_call_context: contextvars.ContextVar[tuple[str, str]] = contextvars.Context
 @util.print_traceback
 async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
     """Delegate a focused task to a child agent and return its answer."""
-    session_id, tool_call_id = tool_call_context.get()
+    session_id, tool_call_id, trace_context = tool_call_context.get()
     name = name or "subagent"
     child_session_id = f"{session_id}:child:{tool_call_id}"
     token = f"seal-turn:{child_session_id}:0"
@@ -165,7 +219,7 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
         ),
     )
     hook = proto.TurnHook.wait(token=token)
-    await spawn_subagent_turn(
+    await spawn_turn(
         proto.TurnInput(
             session_id=child_session_id,
             messages=[
@@ -174,7 +228,9 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
             ],
             gated=False,
             turn_hook_token=token,
-        ).model_dump(mode="json")
+        ).model_dump(mode="json"),
+        # the child turn's root span nests under this turn's root span.
+        trace_context,
     )
     resolution = await hook
     hook.dispose()
@@ -203,13 +259,20 @@ class DurableAgent(ai.Agent):
         *,
         tools: Sequence[ai.AgentTool | ai.Tool] | None = None,
         session_id: str | None = None,
+        trace_context: proto.TraceContext | None = None,
     ) -> None:
         super().__init__(tools=tools)
         self.session_id = session_id
+        self.trace_context = trace_context
 
     async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
         model_id = context.model.id
         session_id = self.session_id
+        # the turn's root span context, minted by spawn_turn at the callsite;
+        # every llm_step and spawned subagent continues the trace from it.
+        turn_context = (
+            self.trace_context.model_dump(mode="json") if self.trace_context else None
+        )
 
         while context.keep_running():
             result = await llm_step(
@@ -217,6 +280,7 @@ class DurableAgent(ai.Agent):
                 [message.model_dump(mode="json") for message in context.messages],
                 [tool.model_dump(mode="json") for tool in context.tools],
                 session_id,
+                turn_context,
             )
 
             assistant_message = ai.messages.Message.model_validate(result)
@@ -229,7 +293,7 @@ class DurableAgent(ai.Agent):
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
                     token = tool_call_context.set(
-                        (session_id or "", tool_call.tool_call_id)
+                        (session_id or "", tool_call.tool_call_id, turn_context)
                     )
                     runner.schedule(context.resolve(tool_call))
                     tool_call_context.reset(token)
@@ -249,13 +313,46 @@ class DurableAgent(ai.Agent):
 
 
 @workflow.step(max_retries=0)
-async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
-    # resume() is a side effect, so it must run in a step. the driver may not
-    # have parked on the hook yet, so retry while it is missing.
-    hook = proto.TurnHook(output=proto.TurnOutput.model_validate(output_data))
+async def resume_turn_hook(
+    turn_input_data: dict[str, Any], output_data: dict[str, Any]
+) -> None:
+    # resume() is a side effect, so it must run in a step. the turn's outcome
+    # and true duration are also first known here, so this is where the span
+    # minted by spawn_turn finally exports.
+    from agent import telemetry  # local: keeps otel out of the sandboxed body copy
+
+    _turn_input = proto.TurnInput.model_validate(turn_input_data)
+    output = proto.TurnOutput.model_validate(output_data)
+
+    if _turn_input.trace_context is not None:
+        # ``session.id`` groups turns into Phoenix's Sessions view;
+        # ``{input,output}.value`` are what trace lists preview.
+        attrs: dict[str, Any] = {
+            "session.id": _turn_input.session_id,
+            "turn_index": int(_turn_input.turn_hook_token.rsplit(":", 1)[-1]),
+        }
+        for m in reversed(_turn_input.messages):
+            if m.role == "user" and m.text:
+                attrs["input.value"] = m.text
+                break
+        for m in reversed(output.messages):
+            if m.role == "assistant" and m.text:
+                attrs["output.value"] = m.text
+                break
+        telemetry.export_span(
+            "turn",
+            _turn_input.trace_context,
+            end_ns=time.time_ns(),
+            attributes=attrs,
+            error=output.error if output.kind == "error" else None,
+        )
+
+    # the driver may not have parked on the hook yet, so retry while it is
+    # missing.
+    hook = proto.TurnHook(output=output)
     for attempt in range(40):
         try:
-            await hook.resume(token)
+            await hook.resume(_turn_input.turn_hook_token)
             return
         except vercel.workflow.HookNotFoundError:
             if attempt == 39:
@@ -280,7 +377,11 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     # or the tool result message, so no need to do anything
 
     extra_tools = [bash, subagent] if _turn_input.gated else [bash_ungated]
-    agent = DurableAgent(tools=extra_tools, session_id=session_id)
+    agent = DurableAgent(
+        tools=extra_tools,
+        session_id=session_id,
+        trace_context=_turn_input.trace_context,
+    )
 
     async def mediate(approval_event: Any, hook_id: str) -> None:
         # bridge a durable ApprovalHook back into the ai-library approval hook so
@@ -341,5 +442,5 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     else:
         output = proto.TurnOutput(kind="suspend", messages=messages)
 
-    # notify session that the turn is complete
-    await resume_turn_hook(_turn_input.turn_hook_token, output.model_dump(mode="json"))
+    # notify session that the turn is complete (and export its span)
+    await resume_turn_hook(turn_input, output.model_dump(mode="json"))
