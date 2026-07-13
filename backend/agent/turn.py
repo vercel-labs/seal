@@ -4,7 +4,7 @@ import dataclasses
 import random
 import traceback
 from collections.abc import AsyncGenerator, Sequence
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import ai
 import vercel.workflow
@@ -222,6 +222,10 @@ class DurableAgent(ai.Agent):
 
             assistant_message = ai.messages.Message.model_validate(result)
             context.add(assistant_message)
+            # llm_step streamed this turn out-of-band (straight to the durable
+            # stream), so yield the final StreamEnd here for run-blocked
+            # tracking, which counts the turn's tool calls from it.
+            yield ai.events.StreamEnd(message=assistant_message)
 
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
@@ -232,6 +236,11 @@ class DurableAgent(ai.Agent):
                     tool_call_context.reset(token)
 
                 async for event in runner.events():
+                    # write tool-running events from the producer side so they land
+                    # in loop order (results before the next turn's answer); run_turn
+                    # only writes HookEvents, which ride the runtime queue instead.
+                    if session_id is not None:
+                        await write_event(session_id, event.model_dump(mode="json"))
                     yield event
 
                 tool_message = runner.get_tool_message()
@@ -255,7 +264,7 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
             await asyncio.sleep(0.05)
 
 
-# runs one agent turn, maybe parks on a tool approval
+# runs one agent turn, parking on a durable hook per gated tool call
 @workflow.workflow
 # HACK: workflow sets up `random` as a custom seeded thing...
 # We ought to make it have something explicit instead
@@ -263,55 +272,59 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
 async def run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
     messages = _turn_input.messages
+    session_id = _turn_input.session_id
+    turn_index = int(_turn_input.turn_hook_token.rsplit(":", 1)[-1])
 
     # messages should already contain either the user message
     # or the tool result message, so no need to do anything
 
     extra_tools = [bash, subagent] if _turn_input.gated else [bash_ungated]
-    agent = DurableAgent(
-        tools=extra_tools,
-        session_id=_turn_input.session_id,
-    )
+    agent = DurableAgent(tools=extra_tools, session_id=session_id)
 
-    # pre-register tool approvals
-    for tool_approval in _turn_input.tool_approvals:
-        ai.resolve_hook(
-            f"{proto.TOOL_APPROVAL_HOOK_PREFIX}{tool_approval.tool_call_id}",
-            {"granted": tool_approval.granted, "reason": tool_approval.reason},
-        )
-
-    # new tool approval requests to send to session
-    tool_approval_requests: list[proto.ToolApprovalRequest] = []
+    async def mediate(approval_event: Any, hook_id: str) -> None:
+        # bridge a durable ApprovalHook back into the ai-library approval hook so
+        # the gated tool proceeds in this same agent run.
+        decision = await approval_event
+        if decision is not None:
+            ai.resolve_hook(
+                hook_id,
+                {
+                    "granted": decision.response.granted,
+                    "reason": decision.response.reason,
+                },
+            )
 
     try:
         model = ai.get_model(MODEL_ID)
-        async with agent.run(model, messages) as run:
+        async with agent.run(model, messages) as run, asyncio.TaskGroup() as tg:
             async for event in run:
-                # N.B: DurableAgent.run filters out most events -- we
-                # will only get tool running events and hooks.
-                await write_event(
-                    _turn_input.session_id,
-                    event.model_dump(mode="json"),
-                )
-                # monitor the stream for hook events and interrupt on them.
                 if (
                     isinstance(event, ai.events.HookEvent)
                     and event.hook.status == "pending"
+                    and event.hook.hook_type == ai.agents.TOOL_APPROVAL_HOOK_TYPE
+                    and (tool_call_id := event.hook.tool_call_id) is not None
                 ):
-                    hook = event.hook
-                    if hook.hook_id.startswith(proto.TOOL_APPROVAL_HOOK_PREFIX):
-                        tool_approval_requests.append(
-                            proto.ToolApprovalRequest(
-                                tool_call_id=hook.hook_id[
-                                    len(proto.TOOL_APPROVAL_HOOK_PREFIX) :
-                                ],
-                                tool_name=str(hook.metadata.get("tool", "")),
-                                args=cast(
-                                    dict[str, Any], hook.metadata.get("kwargs", {})
-                                ),
-                            )
+                    # HookEvents ride the runtime queue, not runner.events(), so
+                    # the loop never wrote this; write it here so the UI gets the
+                    # approval request part.
+                    await write_event(session_id, event.model_dump(mode="json"))
+                    tg.create_task(
+                        mediate(
+                            proto.ApprovalHook.wait(
+                                token=proto.approval_hook_token(
+                                    session_id, tool_call_id
+                                )
+                            ),
+                            event.hook.hook_id,
                         )
-                    ai.defer_hook(hook)
+                    )
+                elif isinstance(event, ai.events.RunBlocked):
+                    # the run is blocked on approvals; tell the client we're
+                    # waiting on a human.
+                    await write_event(
+                        session_id,
+                        stream.tool_approval_requested(turn_index=turn_index),
+                    )
 
             messages = run.messages
     except Exception as error:
@@ -325,12 +338,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             flush=True,
         )
     else:
-        # ungated turns never raise approvals, so they fall through to suspend.
-        output = proto.TurnOutput(
-            kind="pending_requests" if tool_approval_requests else "suspend",
-            messages=messages,
-            pending_requests=tool_approval_requests,
-        )
+        output = proto.TurnOutput(kind="suspend", messages=messages)
 
     # notify session that the turn is complete
     await resume_turn_hook(_turn_input.turn_hook_token, output.model_dump(mode="json"))

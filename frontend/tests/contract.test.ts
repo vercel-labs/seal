@@ -186,11 +186,18 @@ describe.each(ALL_SCENARIOS)("%s: consume", (scenario) => {
     expect(assistant.role).toBe("assistant");
 
     const fixture = loadUiMessages(scenario);
+    if (APPROVAL_SCENARIOS.includes(scenario)) {
+      // a turn parked on an approval is still in flight, so GET /sessions returns
+      // only the committed prefix; the assistant is rebuilt from the resumed
+      // stream (see the resume test), not persisted here.
+      expect(fixture.map((m) => m.role)).toEqual(["system", "user"]);
+      return;
+    }
+
+    // a completed turn is persisted: live and reload renderings must agree on the
+    // message identity (reload reconciliation keys on it) and the tool structure.
     const reload = fixture[fixture.length - 1];
     expect(reload.role).toBe("assistant");
-
-    // live and reload renderings must agree on the message identity (this is
-    // what reload reconciliation keys on) and on the tool-call structure.
     expect(assistant.id).toBe(reload.id);
     const toolParts = (m: UIMessage) =>
       m.parts
@@ -234,13 +241,9 @@ describe.each(APPROVAL_SCENARIOS)("%s: consume approvals", (scenario) => {
 // --- resume ------------------------------------------------------------------
 
 describe.each(ALL_SCENARIOS)("%s: resume", (scenario) => {
-  it("replaying the in-flight stream reconciles instead of duplicating", async () => {
+  it("rebuilds the in-flight run from the resumed stream", async () => {
     const seed = loadUiMessages(scenario);
     const { chat, requests } = makeChat(scenario, structuredClone(seed));
-
-    const seedTexts = seed[seed.length - 1].parts
-      .filter((part) => part.type === "text")
-      .map((part) => (part as { text: string }).text);
 
     await chat.resumeStream();
     await until(() => chat.status === "ready");
@@ -249,6 +252,22 @@ describe.each(ALL_SCENARIOS)("%s: resume", (scenario) => {
     expect(requests[0].method).toBe("GET");
     expect(requests[0].url).toBe("/api/chat/s1/stream");
 
+    if (APPROVAL_SCENARIOS.includes(scenario)) {
+      // the parked turn isn't persisted, so GET /sessions seeded only the prefix;
+      // the resumed stream appends the assistant with its pending approvals. The
+      // step-start must precede the tool parts (else answering them won't auto-
+      // send — see the "approve after reload" test).
+      const assistant = chat.messages[chat.messages.length - 1];
+      expect(assistant.role).toBe("assistant");
+      const approvals = assistant.parts
+        .filter((part) => part.type.startsWith("tool-"))
+        .map((part) => (part as { approval?: { id: string } }).approval?.id)
+        .filter(Boolean);
+      expect(approvals).toEqual(APPROVAL_ANSWERS[scenario].map((a) => a.id));
+      return;
+    }
+
+    // a completed turn is already in the seed; the replay reconciles in place.
     // no message duplication: same number of messages, same ids, in order
     expect(chat.messages.map((m) => m.id)).toEqual(seed.map((m) => m.id));
 
@@ -266,10 +285,41 @@ describe.each(ALL_SCENARIOS)("%s: resume", (scenario) => {
     // reloads during a multi-turn run. If this assertion starts failing
     // because the texts are no longer doubled, the SDK or backend fixed
     // part-level reconciliation — update this test to assert equality.
+    const seedTexts = seed[seed.length - 1].parts
+      .filter((part) => part.type === "text")
+      .map((part) => (part as { text: string }).text);
     const texts = last.parts
       .filter((part) => part.type === "text")
       .map((part) => (part as { text: string }).text);
     expect(texts).toEqual([...seedTexts, ...seedTexts]);
+  });
+});
+
+// --- approve after reload (regression) ---------------------------------------
+
+describe.each(APPROVAL_SCENARIOS)("%s: approve after reload", (scenario) => {
+  it("answering a resumed approval still auto-sends the resubmit", async () => {
+    const seed = loadUiMessages(scenario);
+    const { chat, requests } = makeChat(scenario, structuredClone(seed));
+
+    // reload: GET /sessions seeded the committed prefix; the resumed stream
+    // rebuilds the parked assistant with its pending approvals.
+    await chat.resumeStream();
+    await until(() => chat.status === "ready");
+
+    for (const answer of APPROVAL_ANSWERS[scenario]) {
+      await chat.addToolApprovalResponse(answer);
+    }
+
+    // Regression: if the rebuilt assistant mis-orders its parts (step-start after
+    // the tool calls), `sendAutomaticallyWhen` never matches and no resubmit is
+    // sent — the approval looks answered but nothing happens.
+    await until(
+      () => requests.filter((r) => r.method === "POST").length >= 1,
+    ).catch(() => undefined);
+    expect(
+      requests.filter((r) => r.method === "POST").length,
+    ).toBeGreaterThanOrEqual(1);
   });
 });
 

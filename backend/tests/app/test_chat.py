@@ -83,7 +83,7 @@ async def test_multi_turn_run_resumes_from_run_start_not_inner_turn() -> None:
         stream.session_started(),  # 0 ← run opens here
         stream.turn_started(turn_index=0),  # 1
         *_text_events("delegating"),  # 2-6
-        stream.turn_completed(turn_index=0, kind="pending_requests"),  # 7
+        stream.turn_completed(turn_index=0, kind="suspend"),  # 7
         stream.subagent_called(
             tool_call_id="tc-1", child_session_id="s1:child:tc-1", name="helper"
         ),  # 8
@@ -94,18 +94,17 @@ async def test_multi_turn_run_resumes_from_run_start_not_inner_turn() -> None:
     assert await chat.active_run_start_index("s1") == 0
 
 
-async def test_run_parked_on_approval_is_not_resumable() -> None:
+async def test_run_parked_on_approval_is_resumable_from_run_start() -> None:
+    # a turn parked on an approval is mid-run, so a cold reload re-tails from the
+    # opener to rebuild the same UI message (the live POST resume folds instead).
     await _write(
         "s1",
         stream.session_started(),
         stream.turn_started(turn_index=0),
         *_text_events("need approval"),
-        stream.tool_approval_requested(
-            turn_index=0,
-            requests=[proto.ToolApprovalRequest(tool_call_id="tc-1", tool_name="bash")],
-        ),
+        stream.tool_approval_requested(turn_index=0),
     )
-    assert await chat.active_run_start_index("s1") is None
+    assert await chat.active_run_start_index("s1") == 0
 
 
 # --- _waiting_turn_index ----------------------------------------------------------
@@ -121,15 +120,12 @@ async def test_waiting_turn_index_takes_the_latest_waiting_event() -> None:
     assert await chat._waiting_turn_index("s1") == 1
 
 
-async def test_waiting_turn_index_falls_back_to_approval_requests() -> None:
-    # a session parked on a gated tool emits tool_approval.requested, not waiting.
+async def test_waiting_turn_index_falls_back_to_approval_park() -> None:
+    # a turn parked on a gated tool emits tool_approval.requested, not session.waiting.
     await _write(
         "s1",
         stream.session_waiting(turn_index=0),
-        stream.tool_approval_requested(
-            turn_index=1,
-            requests=[proto.ToolApprovalRequest(tool_call_id="tc-1", tool_name="bash")],
-        ),
+        stream.tool_approval_requested(turn_index=1),
     )
     assert await chat._waiting_turn_index("s1") == 1
 
@@ -238,16 +234,33 @@ async def test_to_sse_parks_at_a_deferred_approval() -> None:
         events_.HookEvent(
             message=ai.messages.Message(role="internal", parts=[hook]), hook=hook
         ),
-        stream.tool_approval_requested(
-            turn_index=0,
-            requests=[proto.ToolApprovalRequest(tool_call_id="tc-1", tool_name="bash")],
-        ),
+        stream.tool_approval_requested(turn_index=0),
     )
     lines = await _collect_sse("s1")
 
     kinds = [payload.get("type") for payload in _sse_payloads(lines)]
     assert "tool-approval-request" in kinds
     assert "[DONE]" in lines[-1]
+
+
+async def test_approval_resume_continuation_opens_id_less() -> None:
+    # an approval resume tails the continuation, which opens with the tool result
+    # (run_turn writes results before the answer). Its message has no turn_id, so
+    # the adapter emits an id-less ``start`` and the client folds the output +
+    # answer into the assistant message it resubmitted (no new message).
+    tool_msg = ai.tool_message(tool_call_id="tc-1", tool_name="bash", result="out")
+    await _write(
+        "s1",
+        events_.ToolCallResult(message=tool_msg, results=tool_msg.tool_results),
+        *_text_events("done"),
+        stream.session_waiting(turn_index=0),
+    )
+
+    payloads = _sse_payloads(await _collect_sse("s1"))
+    starts = [p for p in payloads if p.get("type") == "start"]
+    assert starts and "messageId" not in starts[0]
+    assert any(p.get("type") == "tool-output-available" for p in payloads)
+    assert any(p.get("type") == "text-delta" for p in payloads)
 
 
 async def test_to_sse_interleaves_live_subagent_progress() -> None:
@@ -276,7 +289,7 @@ async def test_to_sse_interleaves_live_subagent_progress() -> None:
         events_.StreamEnd(
             message=ai.messages.Message(role="assistant", parts=[parent_call])
         ),
-        stream.turn_completed(turn_index=0, kind="pending_requests"),
+        stream.turn_completed(turn_index=0, kind="suspend"),
         stream.subagent_called(
             tool_call_id="tc-1", child_session_id=child_id, name="helper"
         ),

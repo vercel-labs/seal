@@ -63,30 +63,10 @@ def subagent_completed(*, tool_call_id: str, is_error: bool) -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
-def tool_approval_requested(
-    *, turn_index: int, requests: list[proto.ToolApprovalRequest]
-) -> dict[str, Any]:
+def tool_approval_requested(*, turn_index: int) -> dict[str, Any]:
+    # the turn parked: every scheduled tool has finished or is awaiting approval.
     return proto.LifecycleEvent(
-        type=proto.TOOL_APPROVAL_REQUESTED,
-        data={
-            "turn_index": turn_index,
-            "requests": [request.model_dump(mode="json") for request in requests],
-        },
-    ).model_dump(mode="json")
-
-
-def tool_approval_resolved(
-    *, turn_index: int, tool_approvals: list[proto.ToolApprovalResponse]
-) -> dict[str, Any]:
-    return proto.LifecycleEvent(
-        type=proto.TOOL_APPROVAL_RESOLVED,
-        data={
-            "turn_index": turn_index,
-            "tool_approvals": [
-                tool_approval.model_dump(mode="json")
-                for tool_approval in tool_approvals
-            ],
-        },
+        type=proto.TOOL_APPROVAL_REQUESTED, data={"turn_index": turn_index}
     ).model_dump(mode="json")
 
 

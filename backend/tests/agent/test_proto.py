@@ -29,26 +29,22 @@ def _hook_event() -> events_.HookEvent:
     )
 
 
-# --- resume payloads (session hook) --------------------------------------------
+# --- hook payloads ---------------------------------------------------------------
 
 
-def test_resume_payloads_round_trip() -> None:
-    payloads: list[proto.ResumePayload] = [
-        proto.ToolApprovals(
-            tool_approvals=[
-                proto.ToolApprovalResponse(
-                    tool_call_id="tc-1", granted=False, reason="nope"
-                )
-            ]
-        ),
-        proto.NewUserMessage(prompt="hi", close=False),
-    ]
-    for payload in payloads:
-        restored = proto.RESUME_PAYLOAD_ADAPTER.validate_python(
-            payload.model_dump(mode="json")
+def test_hook_payloads_round_trip() -> None:
+    """Each hook's payload survives the resume serialize -> validate round trip."""
+    message = proto.NewUserMessage(prompt="hi", close=False)
+    restored = proto.NewUserMessage.model_validate(message.model_dump(mode="json"))
+    assert restored == message
+
+    approval = proto.ApprovalHook(
+        response=proto.ToolApprovalResponse(
+            tool_call_id="tc-1", granted=False, reason="nope"
         )
-        assert type(restored) is type(payload)
-        assert restored.model_dump(mode="json") == payload.model_dump(mode="json")
+    )
+    restored_hook = proto.ApprovalHook.model_validate(approval.model_dump(mode="json"))
+    assert restored_hook == approval
 
 
 # --- stream events ---------------------------------------------------------------
@@ -126,16 +122,7 @@ def test_session_state_round_trip_is_dump_stable() -> None:
             parts=[ai.tool_result_part("tc-1", tool_name="subagent", result=bundle)],
         ),
     ]
-    state = proto.SessionState(
-        session_id="s1",
-        messages=messages,
-        tool_approvals=[proto.ToolApprovalResponse(tool_call_id="tc-2", granted=True)],
-        pending=proto.PendingState(
-            turn_index=3,
-            tool_approval_requests=[proto.ToolApprovalRequest(tool_call_id="tc-2")],
-            dispatched=True,
-        ),
-    )
+    state = proto.SessionState(session_id="s1", messages=messages)
 
     once = state.model_dump(mode="json")
     restored = proto.SessionState.model_validate(once)
