@@ -21,13 +21,6 @@ async def write_event(
 
 
 @workflow.step(max_retries=0)
-async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object]:
-    # fires child workflow for an agent turn
-    started = await vercel.workflow.start(turn.run_turn, turn_input)
-    return {"run_id": started.run_id}
-
-
-@workflow.step(max_retries=0)
 async def load_session(session_id: str) -> dict[str, Any] | None:
     # restores the latest persisted session snapshot, if any
     state = await session.read_session(session_id)
@@ -84,7 +77,7 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
             messages=state.messages,
             turn_hook_token=turn_hook_token,
         )
-        await spawn_turn_workflow(turn_input.model_dump(mode="json"))
+        await turn.spawn_turn(turn_input.model_dump(mode="json"))
         turn_resolution = await turn_hook
         turn_hook.dispose()
         assert turn_resolution is not None
