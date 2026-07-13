@@ -36,6 +36,12 @@ os.environ.setdefault(
     os.path.join(_BACKEND_DIR, ".seal"),
 )
 
+from agent import telemetry  # noqa: E402
+
+# no lifespan surface here to flush from explicitly; the provider's atexit
+# hook flushes the batch exporter when uvicorn exits gracefully.
+telemetry.install("seal-agent")
+
 # Importing the driver pulls in turn/session/stream.
 import agent.driver  # noqa: E402, F401
 import agent.turn  # noqa: E402, F401

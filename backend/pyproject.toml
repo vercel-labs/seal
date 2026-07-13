@@ -2,14 +2,15 @@
 name = "backend"
 version = "0.1.0"
 description = "Seal – personal AI assistant backend"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi[standard]>=0.115.0",
     "vercel>=0.5.9",
     "asyncpg>=0.29.0",
     "httpx>=0.28.1",
-    "ai>=0.3.0",
-    "vercel>=0.7.0",
+    "ai[otel]",
+    "vercel",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
 ]
 
 [tool.vercel]
@@ -44,9 +45,14 @@ timeout = 30
 exclude-newer = "2 days"
 exclude-newer-package = { ai = false, vercel = false, vercel-cache = false, vercel-headers = false, vercel-internal-telemetry = false, vercel-oidc = false }
 
-# [tool.uv.sources]
-# ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
-# vercel = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel" }
+[tool.uv.sources]
+# the reworked telemetry (serializable spans + push + sinks), not yet on main.
+ai = { git = "https://github.com/vercel-labs/ai-python.git", branch = "durable-telemetry-2" }
+vercel = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel" }
+vercel-cache = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-cache" }
+vercel-headers = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-headers" }
+vercel-oidc = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-oidc" }
+vercel-internal-telemetry = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-internal-telemetry" }
 
 [dependency-groups]
 dev = [
