@@ -6,6 +6,48 @@
       "sourceType": "github",
       "skillPath": "skills/ai-python-basics/SKILL.md",
       "computedHash": "3d7e4f768cb4d390b9cf468c33b0253dee6e8832cdde07f83e331daa1d6e77d1"
+    },
+    "ai-python-custom-loop": {
+      "source": "vercel-labs/ai-python",
+      "sourceType": "github",
+      "skillPath": "skills/ai-python-custom-loop/SKILL.md",
+      "computedHash": "b93078c4aac4d1fb891cb4b27984808ab6ef1d6956001353f632d8e7b3290377"
+    },
+    "ai-python-custom-provider": {
+      "source": "vercel-labs/ai-python",
+      "sourceType": "github",
+      "skillPath": "skills/ai-python-custom-provider/SKILL.md",
+      "computedHash": "65fca5a8864c907674ca6dca5fe70f3d8c3bc8478027b1c3e4a28c59d404232c"
+    },
+    "ai-python-durable-execution": {
+      "source": "vercel-labs/ai-python",
+      "sourceType": "github",
+      "skillPath": "skills/ai-python-durable-execution/SKILL.md",
+      "computedHash": "a3eb14356d21554ae4e1451f29c9416cd8160ef6267954f77a1fe2048acdefef"
+    },
+    "ai-python-serverless-execution": {
+      "source": "vercel-labs/ai-python",
+      "sourceType": "github",
+      "skillPath": "skills/ai-python-serverless-execution/SKILL.md",
+      "computedHash": "9e4300dcd970e318e31566dc9e0b3d8c9f8ca49bc099c6286469f1dc563639d0"
+    },
+    "ai-python-streaming-tools": {
+      "source": "vercel-labs/ai-python",
+      "sourceType": "github",
+      "skillPath": "skills/ai-python-streaming-tools/SKILL.md",
+      "computedHash": "1a00d047691e7b30372a5e6f656cf4dadcf75b864e7819e1bb8af8d56b1522c5"
+    },
+    "ai-python-subagents": {
+      "source": "vercel-labs/ai-python",
+      "sourceType": "github",
+      "skillPath": "skills/ai-python-subagents/SKILL.md",
+      "computedHash": "aa8ad8c6b176d46787dd404430333791886709294f5fc8971c894fac4c023d4f"
+    },
+    "ai-python-ui-adapter": {
+      "source": "vercel-labs/ai-python",
+      "sourceType": "github",
+      "skillPath": "skills/ai-python-ui-adapter/SKILL.md",
+      "computedHash": "1c15418a8ffb8efefac914150ef7c1caff4dabd879b7a7ee0c96c319c9bc6f6e"
     }
   }
 }
