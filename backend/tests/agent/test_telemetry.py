@@ -89,6 +89,30 @@ async def test_workflow_body_spans_are_dropped(
     assert len(exporter.get_finished_spans()) == 1
 
 
+async def test_parent_carries_a_minted_context(
+    exporter: in_memory.InMemorySpanExporter,
+) -> None:
+    context = proto.TraceContext(
+        trace_id="0af7651916cd43dd8448eb211c80319c",
+        span_id="b7ad6b7169203331",
+    )
+    with telemetry.parent(context):
+        async with ai.telemetry.span("span_a"):
+            pass
+    (span,) = exporter.get_finished_spans()
+    assert span.context is not None and span.parent is not None
+    assert format(span.context.trace_id, "032x") == context.trace_id
+    assert format(span.parent.span_id, "016x") == context.span_id
+
+    # without a context the block is a no-op and the span roots itself.
+    exporter.clear()
+    with telemetry.parent(None):
+        async with ai.telemetry.span("span_b"):
+            pass
+    (span,) = exporter.get_finished_spans()
+    assert span.parent is None
+
+
 async def test_real_error_is_recorded(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:

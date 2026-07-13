@@ -1,3 +1,5 @@
+import os
+import time
 from typing import Any
 
 import ai
@@ -18,6 +20,23 @@ async def write_event(
 ) -> None:
     writer = await stream.get_writable(session_id)
     await writer.write(event_data)
+
+
+@workflow.step(max_retries=0)
+async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object]:
+    # fires child workflow for an agent turn. the turn's root span context is
+    # minted here, host-side, so it is journaled and identical on every
+    # replay (minting duplicated in ``turn.spawn_subagent_turn``).
+    trace_context = proto.TraceContext(
+        trace_id=os.urandom(16).hex(),
+        span_id=os.urandom(8).hex(),
+        started_at_ns=time.time_ns(),
+    )
+    started = await vercel.workflow.start(
+        turn.run_turn,
+        {**turn_input, "trace_context": trace_context.model_dump(mode="json")},
+    )
+    return {"run_id": started.run_id}
 
 
 @workflow.step(max_retries=0)
@@ -76,8 +95,9 @@ async def run_session(session_input: dict[str, Any]) -> dict[str, Any]:
             session_id=session_id,
             messages=state.messages,
             turn_hook_token=turn_hook_token,
+            turn_index=turn_index,
         )
-        await turn.spawn_turn(turn_input.model_dump(mode="json"))
+        await spawn_turn_workflow(turn_input.model_dump(mode="json"))
         turn_resolution = await turn_hook
         turn_hook.dispose()
         assert turn_resolution is not None

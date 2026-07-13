@@ -1,17 +1,19 @@
 import asyncio
-import contextlib
 import contextvars
 import dataclasses
 import os
 import time
 import traceback
-from collections.abc import AsyncGenerator, Iterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any, ClassVar
 
 import ai
 import vercel.workflow
 
 from agent import proto, stream, util, workflow
+
+# the workflow body runs a sandboxed copy of this module, which must not pull
+# in otel; steps that need telemetry import ``agent.telemetry`` locally.
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
@@ -22,36 +24,6 @@ SUBAGENT_SYSTEM_PROMPT = (
     "You are a focused Seal subagent. Use bash and web_fetch when useful, then "
     "answer the delegated task directly."
 )
-
-
-@contextlib.contextmanager
-def _trace_parent(context_data: dict[str, object] | None) -> Iterator[None]:
-    # sets a journaled span context as the ambient otel parent for the block,
-    # so the live spans opened inside continue that trace. steps run
-    # host-side; this is how a trace crosses the (span-free) workflow body.
-    if not context_data:
-        yield
-        return
-    import opentelemetry.context as otel_context
-    import opentelemetry.trace as otel_trace
-
-    parent = proto.TraceContext.model_validate(context_data)
-    token = otel_context.attach(
-        otel_trace.set_span_in_context(
-            otel_trace.NonRecordingSpan(
-                otel_trace.SpanContext(
-                    trace_id=int(parent.trace_id, 16),
-                    span_id=int(parent.span_id, 16),
-                    is_remote=True,
-                    trace_flags=otel_trace.TraceFlags(parent.trace_flags),
-                )
-            )
-        )
-    )
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
 
 
 @workflow.step(max_retries=0)
@@ -71,9 +43,16 @@ async def llm_step(
     writer = await stream.get_writable(session_id) if session_id else None
     message: ai.messages.Message | None = None
 
-    # parent this step's spans under the turn's root span (minted by
-    # spawn_turn at the callsite).
-    with _trace_parent(trace_context_data):
+    from agent import telemetry
+
+    trace_context = (
+        proto.TraceContext.model_validate(trace_context_data)
+        if trace_context_data
+        else None
+    )
+    # parent this step's spans under the turn's root span (minted by the
+    # spawn step at the callsite).
+    with telemetry.parent(trace_context):
         async with ai.stream(model, messages, tools=tools) as model_stream:
             async for e in model_stream:
                 if writer is not None and not e.replay:
@@ -169,10 +148,13 @@ async def web_fetch(
 
 
 @workflow.step(max_retries=0)
-async def spawn_turn(
+async def spawn_subagent_turn(
     turn_input: dict[str, object],
     parent_context_data: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    # a subagent is just one ungated turn writing to its own stream. its span
+    # context is minted here, host-side, so it is journaled and identical on
+    # every replay (minting duplicated in ``driver.spawn_turn_workflow``).
     parent = (
         proto.TraceContext.model_validate(parent_context_data)
         if parent_context_data
@@ -192,10 +174,10 @@ async def spawn_turn(
     return {"run_id": started.run_id}
 
 
-# the running tool call's session, id, and turn trace context, set by the loop
-# around each schedule so a tool can reach them without smuggling args. tasks
-# copy the context at creation, so each tool sees its own call.
-tool_call_context: contextvars.ContextVar[tuple[str, str, dict[str, object] | None]] = (
+# the running tool call's context, set by the loop around each schedule so a
+# tool can reach it without smuggling args. tasks copy the contextvars at
+# creation, so each tool sees its own call.
+tool_call_context: contextvars.ContextVar[proto.ToolCallContext] = (
     contextvars.ContextVar("tool_call_context")
 )
 
@@ -208,7 +190,8 @@ tool_call_context: contextvars.ContextVar[tuple[str, str, dict[str, object] | No
 @util.print_traceback
 async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
     """Delegate a focused task to a child agent and return its answer."""
-    session_id, tool_call_id, trace_context = tool_call_context.get()
+    call = tool_call_context.get()
+    session_id, tool_call_id = call.session_id, call.tool_call_id
     name = name or "subagent"
     child_session_id = f"{session_id}:child:{tool_call_id}"
     token = f"seal-turn:{child_session_id}:0"
@@ -219,7 +202,7 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
         ),
     )
     hook = proto.TurnHook.wait(token=token)
-    await spawn_turn(
+    await spawn_subagent_turn(
         proto.TurnInput(
             session_id=child_session_id,
             messages=[
@@ -230,7 +213,7 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
             turn_hook_token=token,
         ).model_dump(mode="json"),
         # the child turn's root span nests under this turn's root span.
-        trace_context,
+        call.trace_context.model_dump(mode="json") if call.trace_context else None,
     )
     resolution = await hook
     hook.dispose()
@@ -268,8 +251,9 @@ class DurableAgent(ai.Agent):
     async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
         model_id = context.model.id
         session_id = self.session_id
-        # the turn's root span context, minted by spawn_turn at the callsite;
-        # every llm_step and spawned subagent continues the trace from it.
+        # the turn's root span context, minted by the spawn step at the
+        # callsite; every llm_step and spawned subagent continues the trace
+        # from it.
         turn_context = (
             self.trace_context.model_dump(mode="json") if self.trace_context else None
         )
@@ -293,7 +277,11 @@ class DurableAgent(ai.Agent):
             async with ai.ToolRunner() as runner:
                 for tool_call in assistant_message.tool_calls:
                     token = tool_call_context.set(
-                        (session_id or "", tool_call.tool_call_id, turn_context)
+                        proto.ToolCallContext(
+                            session_id=session_id or "",
+                            tool_call_id=tool_call.tool_call_id,
+                            trace_context=self.trace_context,
+                        )
                     )
                     runner.schedule(context.resolve(tool_call))
                     tool_call_context.reset(token)
@@ -314,36 +302,24 @@ class DurableAgent(ai.Agent):
 
 @workflow.step(max_retries=0)
 async def resume_turn_hook(
-    turn_input_data: dict[str, Any], output_data: dict[str, Any]
+    token: str,
+    output_data: dict[str, Any],
+    trace_context_data: dict[str, Any] | None = None,
+    span_attributes: dict[str, Any] | None = None,
 ) -> None:
     # resume() is a side effect, so it must run in a step. the turn's outcome
     # and true duration are also first known here, so this is where the span
-    # minted by spawn_turn finally exports.
-    from agent import telemetry  # local: keeps otel out of the sandboxed body copy
-
-    _turn_input = proto.TurnInput.model_validate(turn_input_data)
+    # minted at spawn finally exports.
     output = proto.TurnOutput.model_validate(output_data)
 
-    if _turn_input.trace_context is not None:
-        # ``session.id`` groups turns into Phoenix's Sessions view;
-        # ``{input,output}.value`` are what trace lists preview.
-        attrs: dict[str, Any] = {
-            "session.id": _turn_input.session_id,
-            "turn_index": int(_turn_input.turn_hook_token.rsplit(":", 1)[-1]),
-        }
-        for m in reversed(_turn_input.messages):
-            if m.role == "user" and m.text:
-                attrs["input.value"] = m.text
-                break
-        for m in reversed(output.messages):
-            if m.role == "assistant" and m.text:
-                attrs["output.value"] = m.text
-                break
+    if trace_context_data is not None:
+        from agent import telemetry
+
         telemetry.export_span(
             "turn",
-            _turn_input.trace_context,
+            proto.TraceContext.model_validate(trace_context_data),
             end_ns=time.time_ns(),
-            attributes=attrs,
+            attributes=span_attributes,
             error=output.error if output.kind == "error" else None,
         )
 
@@ -352,7 +328,7 @@ async def resume_turn_hook(
     hook = proto.TurnHook(output=output)
     for attempt in range(40):
         try:
-            await hook.resume(_turn_input.turn_hook_token)
+            await hook.resume(token)
             return
         except vercel.workflow.HookNotFoundError:
             if attempt == 39:
@@ -371,7 +347,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
     messages = _turn_input.messages
     session_id = _turn_input.session_id
-    turn_index = int(_turn_input.turn_hook_token.rsplit(":", 1)[-1])
+    turn_index = _turn_input.turn_index
 
     # messages should already contain either the user message
     # or the tool result message, so no need to do anything
@@ -442,5 +418,25 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     else:
         output = proto.TurnOutput(kind="suspend", messages=messages)
 
-    # notify session that the turn is complete (and export its span)
-    await resume_turn_hook(turn_input, output.model_dump(mode="json"))
+    # notify session that the turn is complete (and export its span).
+    # ``session.id`` groups turns into Phoenix's Sessions view;
+    # ``{input,output}.value`` are what trace lists preview.
+    span_attrs: dict[str, Any] | None = None
+    if _turn_input.trace_context is not None:
+        span_attrs = {"session.id": session_id, "turn_index": turn_index}
+        for m in reversed(_turn_input.messages):
+            if m.role == "user" and m.text:
+                span_attrs["input.value"] = m.text
+                break
+        for m in reversed(output.messages):
+            if m.role == "assistant" and m.text:
+                span_attrs["output.value"] = m.text
+                break
+    await resume_turn_hook(
+        _turn_input.turn_hook_token,
+        output.model_dump(mode="json"),
+        _turn_input.trace_context.model_dump(mode="json")
+        if _turn_input.trace_context
+        else None,
+        span_attrs,
+    )

@@ -16,9 +16,10 @@ seal-specific behaviors on top:
   noise, never live work. Real work happens host-side — in workflow
   steps and the server — and only those spans export. Trace continuity
   across the body is carried as plain journaled data instead
-  (``proto.TraceContext``, minted by ``turn.spawn_turn``); the turn span
-  it names exports retroactively through ``export_span`` at turn
-  completion, under its minted ids and with its true duration.
+  (``proto.TraceContext``, minted by the spawn steps); steps re-enter
+  the trace via ``parent``, and the turn span exports retroactively
+  through ``export_span`` at turn completion, under its minted ids and
+  with its true duration.
 - attributes are enriched over the stock mapping: the span kinds for
   seal's custom spans (OpenInference, so Phoenix classifies them), the
   provider name, sampling params, time-to-first-token as a plain
@@ -33,11 +34,12 @@ seal-specific behaviors on top:
 Must run in each process that opens spans (server and worker).
 """
 
+import contextlib
 import contextvars
 import dataclasses
 import json
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from typing import Any
 
 import ai.telemetry
@@ -89,6 +91,39 @@ def install(service: str) -> "LiveOtelAdapter | None":
     ai.telemetry.register(adapter)
     _installed = adapter
     return adapter
+
+
+def _span_context(context: proto.TraceContext, span_id: str) -> otel_trace.SpanContext:
+    # rebuilds an otel SpanContext from a journaled ``proto.TraceContext``,
+    # under the given span id (its own, or its parent's).
+    return otel_trace.SpanContext(
+        trace_id=int(context.trace_id, 16),
+        span_id=int(span_id, 16),
+        is_remote=True,
+        trace_flags=otel_trace.TraceFlags(context.trace_flags),
+    )
+
+
+@contextlib.contextmanager
+def parent(context: proto.TraceContext | None) -> Iterator[None]:
+    """Set a journaled span context as the ambient otel parent for the block.
+
+    Live spans opened inside continue that trace: this is how a trace
+    crosses the (span-free) workflow body into host-side steps. No-op
+    without a context.
+    """
+    if context is None:
+        yield
+        return
+    token = otel_context.attach(
+        otel_trace.set_span_in_context(
+            otel_trace.NonRecordingSpan(_span_context(context, context.span_id))
+        )
+    )
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
 
 
 def export_span(
@@ -308,12 +343,7 @@ class LiveOtelAdapter(ai.telemetry.Adapter):
         if context.parent_span_id is not None:
             parent_ctx = otel_trace.set_span_in_context(
                 otel_trace.NonRecordingSpan(
-                    otel_trace.SpanContext(
-                        trace_id=int(context.trace_id, 16),
-                        span_id=int(context.parent_span_id, 16),
-                        is_remote=True,
-                        trace_flags=otel_trace.TraceFlags(context.trace_flags),
-                    )
+                    _span_context(context, context.parent_span_id)
                 ),
                 parent_ctx,
             )
