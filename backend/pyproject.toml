@@ -8,8 +8,8 @@ dependencies = [
     "vercel>=0.5.9",
     "asyncpg>=0.29.0",
     "httpx>=0.28.1",
-    "ai",
-    "vercel",
+    "ai>=0.3.0",
+    "vercel>=0.7.0",
 ]
 
 [tool.mypy]
@@ -36,10 +36,11 @@ timeout = 30
 
 [tool.uv]
 exclude-newer = "2 days"
+exclude-newer-package = { ai = false, vercel = false, vercel-cache = false, vercel-headers = false, vercel-internal-telemetry = false, vercel-oidc = false }
 
-[tool.uv.sources]
-ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
-vercel = { git = "https://github.com/vercel/vercel-py", branch = "seal-workflow-dev", subdirectory = "src/vercel" }
+# [tool.uv.sources]
+# ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
+# vercel = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel" }
 
 [dependency-groups]
 dev = [

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import ai.agents.ui.ai_sdk as ai_sdk
+import ai.ui.ai_sdk as ai_sdk
 
 
 def _ui(role: str, *parts: dict[str, Any], id: str = "m1") -> ai_sdk.UIMessage:

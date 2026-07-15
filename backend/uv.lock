@@ -10,15 +10,27 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
+[options.exclude-newer-package]
+ai = false
+vercel = false
+vercel-headers = false
+vercel-internal-telemetry = false
+vercel-oidc = false
+vercel-cache = false
+
 [[package]]
 name = "ai"
-version = "0.2.2.dev19+ff1fc29"
-source = { git = "https://github.com/vercel-labs/ai-python?branch=main#ff1fc29561f338841887bd934899ad2ccb6a3a7a" }
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "modelsdotdev" },
     { name = "pydantic" },
     { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/f3/4c20af62872ebc5c7b444f36627ec2ba93990d884b1f7a19291d07dff54d/ai-0.3.0.tar.gz", hash = "sha256:ff89ec2885d95146713be9afe282f478eaafbff01b6f919b3f03bccb9ba08e22", size = 1188224, upload-time = "2026-07-15T07:31:11.828Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/4b/d97e19cba3886cb690ae92b314db2ed714a53acc2d1c858ffd9f2a80340f/ai-0.3.0-py3-none-any.whl", hash = "sha256:5198f14612fef5ed08cc3f84bb723127a653e7a5645ee7ad7ff465e75c95a8e1", size = 170183, upload-time = "2026-07-15T07:31:10.626Z" },
 ]
 
 [[package]]
@@ -108,11 +120,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai", git = "https://github.com/vercel-labs/ai-python?branch=main" },
+    { name = "ai", specifier = ">=0.3.0" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "vercel", git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel&branch=seal-workflow-dev" },
+    { name = "vercel", specifier = ">=0.5.9" },
+    { name = "vercel", specifier = ">=0.7.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1090,8 +1103,8 @@ wheels = [
 
 [[package]]
 name = "vercel"
-version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "cbor2" },
@@ -1105,38 +1118,58 @@ dependencies = [
     { name = "vercel-workers" },
     { name = "websockets" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/04/0e/34820af4da3e8f0bb5e0ae3b237b4bfa216f4f151cf95ea56b7d61aab304/vercel-0.7.0.tar.gz", hash = "sha256:8e29b401d717bfe0b85dbc5a3dcdd7bf125165d34adab3a937f28573a4e98418", size = 185390, upload-time = "2026-07-14T04:43:09.655Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/bf/5c8e93b784f3d12a3f033d0676b2dac1b0ab33457b69af83f2eaf145eb72/vercel-0.7.0-py3-none-any.whl", hash = "sha256:197749cc3fe08545e8ca6153003cb64f3d2910416081afbc4ed87d62b3656c7a", size = 211807, upload-time = "2026-07-14T04:43:08.56Z" },
+]
 
 [[package]]
 name = "vercel-cache"
-version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-cache&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "vercel-headers" },
     { name = "vercel-internal-telemetry" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/bd/d1555ae4dd9f8951b90173d83a54ba0e587901b7c0b56e944daab2530bcc/vercel_cache-0.7.0.tar.gz", hash = "sha256:20a8d1e3cef9956902dac7e8d9caa8cae7a807b94a148d08b175c80caa93f275", size = 8910, upload-time = "2026-07-14T04:43:06.335Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/31/0f3154850d98dee369b183da7ce14f2c4efdc971efc6a5aeb6e502b9f400/vercel_cache-0.7.0-py3-none-any.whl", hash = "sha256:776da280a959a1df903ecc03c764704dc5335d969a0a06785e928aadbb01d677", size = 10027, upload-time = "2026-07-14T04:43:05.599Z" },
+]
 
 [[package]]
 name = "vercel-headers"
-version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-headers&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/86/f4/04c9a608c9f5b4308020ec87850916b331595678294de0e3b4bea0a83020/vercel_headers-0.7.0.tar.gz", hash = "sha256:6bf37cd3d06f00f8b8650766da016c1ba08927d09a11cf1babb34fcead3d04cb", size = 5410, upload-time = "2026-07-14T04:40:06.153Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/a8/db8e2272adde7655d603c20c96c313ef7409fdcf8b2d1bd30c9f3293dd14/vercel_headers-0.7.0-py3-none-any.whl", hash = "sha256:39bc00801d3618ef27ff9d5cf3ff526778d90e6ab900205aa584070fce33f7ce", size = 3907, upload-time = "2026-07-14T04:40:05.357Z" },
+]
 
 [[package]]
 name = "vercel-internal-telemetry"
-version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-internal-telemetry&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "vercel-oidc" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/83/1a1edb8e691f10042382a2a2b3e241194e1a61e60222f5e342df24b00183/vercel_internal_telemetry-0.7.0.tar.gz", hash = "sha256:6a12f99ffdca67712bf38dbc37dd9b2c406c21c005cdd4775a1b748c5f646f34", size = 8468, upload-time = "2026-07-14T04:40:11.44Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/71/3549bc06eb13f89c8e95ed6311116242b4e1fcad7777b73023292c8b29ea/vercel_internal_telemetry-0.7.0-py3-none-any.whl", hash = "sha256:5cfc0156db9c66283da95c039b668afa00973169a16f6e23920f4005000c84c7", size = 8254, upload-time = "2026-07-14T04:40:10.727Z" },
+]
 
 [[package]]
 name = "vercel-oidc"
-version = "0.6.0"
-source = { git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel-oidc&branch=seal-workflow-dev#ad0c7fe392d059a7a1084dc2c02c49ad7dcea36f" }
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "vercel-headers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/b7/484f099376dbef869779e5fa2b94ee62e5b770721a6014b153c7f4602eb9/vercel_oidc-0.7.0.tar.gz", hash = "sha256:a5fd3d20c3e53029cab850d0f1cf821888900520fa1237c9a4811000335f9191", size = 8062, upload-time = "2026-07-14T04:40:08.591Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/83/9e96c5e4158e0f1e8c5e84f5bf51fd167c41cb0fab3c9d9a0b9e12f5bb5a/vercel_oidc-0.7.0-py3-none-any.whl", hash = "sha256:cfdf85ffd6894bf8f0c2a78be4a9808900ad21272eafe7ce6f1f8f09e4b9887f", size = 8052, upload-time = "2026-07-14T04:40:07.866Z" },
 ]
 
 [[package]]
