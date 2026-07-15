@@ -1,7 +1,6 @@
 import asyncio
 import contextvars
 import dataclasses
-import random
 import traceback
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any, ClassVar
@@ -266,9 +265,11 @@ async def resume_turn_hook(token: str, output_data: dict[str, Any]) -> None:
 
 # runs one agent turn, parking on a durable hook per gated tool call
 @workflow.workflow
-# HACK: workflow sets up `random` as a custom seeded thing...
-# We ought to make it have something explicit instead
-@ai.messages.use_random(lambda: random)  # type: ignore
+# Draw message/part ids from the workflow's deterministic RNG so they're
+# stable across replay. ``vercel.workflow.random`` is a factory resolved on
+# entry (only valid inside the workflow).
+@ai.messages.use_random(vercel.workflow.random)
+@ai.experimental_telemetry.use_clock(vercel.workflow.time_ns)
 async def run_turn(turn_input: dict[str, Any]) -> None:
     _turn_input = proto.TurnInput.model_validate(turn_input)
     messages = _turn_input.messages

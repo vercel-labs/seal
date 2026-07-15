@@ -33,8 +33,8 @@ import re
 from typing import Any
 
 import ai
-import ai.agents.ui.ai_sdk as ai_sdk
 import ai.types.messages as messages_
+import ai.ui.ai_sdk as ai_sdk
 import httpx
 import pytest
 from conftest import MockProvider, assert_message_invariants, text_msg

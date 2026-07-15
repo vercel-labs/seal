@@ -27,9 +27,9 @@ import asyncio
 import collections.abc
 
 import ai
-import ai.agents.ui.ai_sdk as ai_sdk
-import ai.agents.ui.ai_sdk.outbound_stream as outbound_stream
-import ai.agents.ui.ai_sdk.ui_events as ui_events
+import ai.ui.ai_sdk as ai_sdk
+import ai.ui.ai_sdk.outbound_stream as outbound_stream
+import ai.ui.ai_sdk.ui_events as ui_events
 import vercel.workflow
 
 from agent import driver, proto, session, stream
