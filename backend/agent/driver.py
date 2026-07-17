@@ -22,13 +22,11 @@ async def write_event(
 
 @workflow.step(max_retries=0)
 async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object]:
-    # fires child workflow for an agent turn. the turn's root span is minted
-    # here, host-side, so it is journaled and identical on every replay
-    # (minting duplicated in ``turn.spawn_subagent_turn``). it is deliberately
-    # not pushed: nothing exports until the completed record is pushed at
-    # turn completion (``turn.resume_turn_hook``).
+    # fires child workflow for an agent turn. 
     payload = dict(turn_input)
     if ai.experimental_telemetry.enabled():
+        # mint the span for the turn and pass it in. this way
+        # whatever is going on inside will be able to nest under it.
         payload["turn_span"] = (
             ai.experimental_telemetry.create_span("turn")
             .stamp_start()
