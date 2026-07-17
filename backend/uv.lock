@@ -6,6 +6,14 @@ requires-python = "==3.13.*"
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
+[options.exclude-newer-package]
+ai = false
+vercel = false
+vercel-headers = false
+vercel-internal-telemetry = false
+vercel-oidc = false
+vercel-cache = false
+
 [[package]]
 name = "ai"
 version = "0.3.1.dev4+582e993"
