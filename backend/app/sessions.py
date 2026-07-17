@@ -234,16 +234,15 @@ async def generate_title(session_id: str, first_message: str) -> str:
     messages = [ai.system_message(_TITLE_PROMPT), ai.user_message(first_message)]
     # the named root span keeps this call out of the trace list as an
     # anonymous chat and groups it with its session (``session.id``).
-    title_attrs: dict[str, Any] = {
-        "session.id": session_id,
-        "input.value": first_message,
-    }
     async with (
-        ai.telemetry.span("generate_title", **title_attrs) as span,
+        ai.experimental_telemetry.span(
+            "generate_title",
+            {"session.id": session_id, "input.value": first_message},
+        ) as span,
         ai.stream(ai.get_model(_TITLE_MODEL), messages) as stream,
     ):
         async for _ in stream:
             pass
         title = stream.text.strip()
-        span.set(**{"output.value": title})
+        span.set({"output.value": title})
         return title

@@ -1,43 +1,53 @@
-"""The live otel adapter: host-side spans export as they happen, workflow-body
-spans are dropped, attributes are enriched over the SDK's stock mapping, and
-turn spans export retroactively under their minted (journaled) context.
+"""The seal otel adapter: stock SDK adapter + seal attribute enrichment,
+spans as serializable records (mint in one step, continue in another,
+export the completed record at turn completion), and the collect-then-ship
+pattern for workflow-body spans.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from typing import Any, cast
 
+import ai.experimental_telemetry
 import ai.models.core.params as params_
-import ai.telemetry
 import ai.types.messages as messages_
 import opentelemetry.sdk.trace as sdk_trace
 import opentelemetry.sdk.trace.export as sdk_export
 import opentelemetry.sdk.trace.export.in_memory_span_exporter as in_memory
 import pytest
-import vercel._internal.workflow.runtime as workflow_runtime
+from conftest import MockProvider, text_msg, tool_call_msg
+from harness import (
+    InProcessWorld,
+    resume_approval,
+    resume_session,
+    start_session,
+    wait_for_lifecycle,
+    wait_run,
+)
 
-from agent import proto, telemetry
+from agent import proto, session, telemetry
 
 
 def test_install_is_noop_without_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     assert telemetry.install("seal-test") is None
+    assert not ai.experimental_telemetry.enabled()
 
 
 def test_install_registers_the_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:6006")
     adapter = telemetry.install("seal-test")
-    assert isinstance(adapter, telemetry.LiveOtelAdapter)
+    assert isinstance(adapter, telemetry.SealOtelAdapter)
     try:
-        assert telemetry._installed is adapter
-        ai.telemetry.unregister(adapter)  # raises if it was not registered
+        # the spawn steps gate turn-span minting on this
+        assert ai.experimental_telemetry.enabled()
+        ai.experimental_telemetry.unregister(adapter)  # raises if not registered
+        assert not ai.experimental_telemetry.enabled()
     finally:
         # stop the batch worker now: left alive, the provider's atexit hook
         # would stall interpreter exit flushing to the dead endpoint.
         adapter.shutdown()
-        telemetry._installed = None
 
 
 @pytest.fixture
@@ -45,18 +55,18 @@ def exporter() -> Iterator[in_memory.InMemorySpanExporter]:
     exporter = in_memory.InMemorySpanExporter()
     provider = sdk_trace.TracerProvider()
     provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
-    adapter = telemetry.LiveOtelAdapter(provider)
-    ai.telemetry.register(adapter)
+    adapter = telemetry.SealOtelAdapter(tracer_provider=provider)
+    ai.experimental_telemetry.register(adapter)
     yield exporter
-    ai.telemetry.unregister(adapter)
+    ai.experimental_telemetry.unregister(adapter)
 
 
 async def test_spans_nest_via_ambient_context(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
     async with (
-        ai.telemetry.span("span_outer", source="test"),
-        ai.telemetry.span("span_inner"),
+        ai.experimental_telemetry.span("span_outer", source="test"),
+        ai.experimental_telemetry.span("span_inner"),
     ):
         pass
 
@@ -69,124 +79,110 @@ async def test_spans_nest_via_ambient_context(
     assert outer.attributes["source"] == "test"
 
 
-async def test_workflow_body_spans_are_dropped(
+async def test_body_spans_collect_then_ship(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
-    # the runtime sets this context while a workflow body runs; its spans
-    # replay on every delivery, so the adapter must skip them wholesale.
-    body_ctx = workflow_runtime.WorkflowOrchestratorContext._ctx  # type: ignore[misc]
-    token = body_ctx.set(cast(Any, object()))
-    try:
-        async with ai.telemetry.span("turn"):
+    # the run_turn pattern: the workflow body re-runs on every delivery, so
+    # its spans are diverted into a collector instead of live adapters...
+    collector = ai.experimental_telemetry.Collector()
+    with ai.experimental_telemetry.use_sink(collector):
+        async with ai.experimental_telemetry.span("body_work"):
             pass
-    finally:
-        body_ctx.reset(token)
     assert exporter.get_finished_spans() == ()
 
-    # the same span host-side exports fine.
-    async with ai.telemetry.span("turn"):
-        pass
-    assert len(exporter.get_finished_spans()) == 1
+    # ...and a step re-pushes them to the real adapters, exactly once.
+    await ai.experimental_telemetry.push_all(
+        [s.model_dump(mode="json") for s in collector.finished]
+    )
+    (span,) = exporter.get_finished_spans()
+    assert span.name == "body_work"
 
 
-async def test_parent_carries_a_minted_context(
+async def test_turn_span_continues_across_steps_and_exports(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
-    context = proto.TraceContext(
-        trace_id="0af7651916cd43dd8448eb211c80319c",
-        span_id="b7ad6b7169203331",
-    )
-    with telemetry.parent(context):
-        async with ai.telemetry.span("span_a"):
-            pass
-    (span,) = exporter.get_finished_spans()
-    assert span.context is not None and span.parent is not None
-    assert format(span.context.trace_id, "032x") == context.trace_id
-    assert format(span.parent.span_id, "016x") == context.span_id
+    # "spawn step": mint the turn span as journaled data; nothing exports.
+    turn_span = ai.experimental_telemetry.create_span("turn").stamp_start()
+    payload = turn_span.model_dump(mode="json")
+    assert exporter.get_finished_spans() == ()
 
-    # without a context the block is a no-op and the span roots itself.
-    exporter.clear()
-    with telemetry.parent(None):
-        async with ai.telemetry.span("span_b"):
+    # "llm step": children nest under the restored span.
+    restored = ai.experimental_telemetry.Span.model_validate(payload)
+    with ai.experimental_telemetry.use_span(restored):
+        async with ai.experimental_telemetry.span("span_a"):
             pass
-    (span,) = exporter.get_finished_spans()
-    assert span.parent is None
+
+    # "resume step": the completed record exports with attributes and outcome.
+    done = ai.experimental_telemetry.Span.model_validate(payload)
+    done.stamp_end(
+        error=ai.experimental_telemetry.SpanError(type="TurnError", message="boom")
+    )
+    done.set({"session.id": "s1"})
+    await done.push()
+
+    child, turn = exporter.get_finished_spans()  # child ended first
+    assert child.context is not None and turn.context is not None
+    # the child parented on ids derived from the journaled span before the
+    # turn existed anywhere in otel; the record exports under those same ids.
+    assert child.parent is not None
+    assert child.parent.span_id == turn.context.span_id
+    assert child.context.trace_id == turn.context.trace_id
+    assert turn.parent is None  # a session turn roots its own trace
+    assert (turn.start_time, turn.end_time) == (turn_span.started_at, done.ended_at)
+    assert turn.attributes is not None
+    assert turn.attributes["session.id"] == "s1"
+    assert turn.attributes["openinference.span.kind"] == "AGENT"
+    assert turn.status.status_code.name == "ERROR"
+    assert "boom" in (turn.status.description or "")
+
+
+async def test_subagent_turn_nests_under_parent_turn(
+    exporter: in_memory.InMemorySpanExporter,
+) -> None:
+    # the spawn_subagent_turn pattern: the child turn's span is minted under
+    # the calling turn's journaled span.
+    parent_span = ai.experimental_telemetry.create_span("turn").stamp_start()
+    parent_data = parent_span.model_dump(mode="json")
+
+    parent = ai.experimental_telemetry.Span.model_validate(parent_data)
+    child_span = ai.experimental_telemetry.create_span(
+        "turn", parent=parent
+    ).stamp_start()
+    assert child_span.trace_id == parent_span.trace_id
+    assert child_span.parent_id == parent_span.id
+
+    await child_span.stamp_end().push()
+    await parent.stamp_end().push()
+
+    child, root = exporter.get_finished_spans()
+    assert child.context is not None and root.context is not None
+    assert child.parent is not None
+    assert child.parent.span_id == root.context.span_id
+    assert child.context.trace_id == root.context.trace_id
 
 
 async def test_real_error_is_recorded(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
     with pytest.raises(ValueError, match="boom"):
-        async with ai.telemetry.span("span_a"):
+        async with ai.experimental_telemetry.span("span_a"):
             raise ValueError("boom")
     (span,) = exporter.get_finished_spans()
     assert span.status.status_code.name == "ERROR"
     assert "boom" in (span.status.description or "")
 
 
-def test_export_span_reuses_the_minted_context() -> None:
-    exporter = in_memory.InMemorySpanExporter()
-    provider = sdk_trace.TracerProvider()
-    provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
-    adapter = telemetry.LiveOtelAdapter(provider)
-
-    context = proto.TraceContext(
-        trace_id="0af7651916cd43dd8448eb211c80319c",
-        span_id="b7ad6b7169203331",
-        parent_span_id="00f067aa0ba902b7",
-        started_at_ns=1_000,
-    )
-    adapter.export_span(
-        "turn", context, end_ns=2_500, attributes={"session.id": "s1"}, error="boom"
-    )
-    (span,) = exporter.get_finished_spans()
-    assert span.context is not None and span.parent is not None
-    assert format(span.context.trace_id, "032x") == context.trace_id
-    assert format(span.context.span_id, "016x") == context.span_id
-    assert format(span.parent.span_id, "016x") == context.parent_span_id
-    assert (span.start_time, span.end_time) == (1_000, 2_500)
-    assert span.attributes is not None
-    assert span.attributes["session.id"] == "s1"
-    assert span.attributes["openinference.span.kind"] == "AGENT"
-    assert span.status.status_code.name == "ERROR"
-
-    # without a parent the span roots its own trace; without an error it
-    # stays unset. a context minted without a start time is unexportable.
-    exporter.clear()
-    root = proto.TraceContext(
-        trace_id="0af7651916cd43dd8448eb211c80319d",
-        span_id="b7ad6b7169203332",
-        started_at_ns=1_000,
-    )
-    adapter.export_span("turn", root, end_ns=2_000)
-    (span,) = exporter.get_finished_spans()
-    assert span.parent is None
-    assert span.status.status_code.name == "UNSET"
-    adapter.export_span(
-        "turn", proto.TraceContext(trace_id="00" * 16, span_id="00" * 8), end_ns=2_000
-    )
-    assert len(exporter.get_finished_spans()) == 1
-
-
-def test_export_span_is_noop_when_uninstalled() -> None:
-    assert telemetry._installed is None
-    telemetry.export_span(
-        "turn",
-        proto.TraceContext(trace_id="00" * 16, span_id="00" * 8, started_at_ns=1),
-        end_ns=2,
-    )
-
-
 async def _chat_attributes(
     exporter: in_memory.InMemorySpanExporter,
-    data: ai.telemetry.SpanData,
+    data: ai.experimental_telemetry.SpanData,
     first_token_after_ns: int | None = None,
 ) -> dict[str, object]:
-    async with ai.telemetry.span(data) as span_:
+    async with ai.experimental_telemetry.span(data) as span_:
         if first_token_after_ns is not None:
-            span_.span_events.append(
-                ai.telemetry.SpanEvent(
-                    name=ai.telemetry.FIRST_TOKEN,
+            assert span_.started_at is not None
+            span_.events.append(
+                ai.experimental_telemetry.SpanEvent(
+                    name=ai.experimental_telemetry.FIRST_TOKEN,
                     time_ns=span_.started_at + first_token_after_ns,
                     attributes={},
                 )
@@ -199,7 +195,7 @@ async def _chat_attributes(
 async def test_chat_messages_are_semconv_shaped(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
-    data = ai.telemetry.AiStreamSpanData(
+    data = ai.experimental_telemetry.AiStreamSpanData(
         model="anthropic/claude",
         messages=[
             messages_.Message(
@@ -258,7 +254,7 @@ async def test_chat_messages_are_semconv_shaped(
 async def test_output_with_tool_calls_finishes_as_tool_call(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
-    data = ai.telemetry.AiStreamSpanData(
+    data = ai.experimental_telemetry.AiStreamSpanData(
         model="anthropic/claude",
         messages=[],
         message=messages_.Message(
@@ -278,7 +274,7 @@ async def test_output_with_tool_calls_finishes_as_tool_call(
 async def test_file_parts_map_to_uri_or_blob(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
-    data = ai.telemetry.AiGenerateSpanData(
+    data = ai.experimental_telemetry.AiGenerateSpanData(
         model="anthropic/claude",
         messages=[
             messages_.Message(
@@ -308,11 +304,11 @@ async def test_file_parts_map_to_uri_or_blob(
 async def test_seal_spans_get_openinference_kinds(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
-    async with ai.telemetry.span("turn"):
+    async with ai.experimental_telemetry.span("turn"):
         pass
-    async with ai.telemetry.span("generate_title"):
+    async with ai.experimental_telemetry.span("generate_title"):
         pass
-    async with ai.telemetry.span("unclassified"):
+    async with ai.experimental_telemetry.span("unclassified"):
         pass
     turn, title, unclassified = exporter.get_finished_spans()
     assert turn.attributes is not None and title.attributes is not None
@@ -325,7 +321,7 @@ async def test_seal_spans_get_openinference_kinds(
 async def test_chat_span_gets_provider_params_and_ttft(
     exporter: in_memory.InMemorySpanExporter,
 ) -> None:
-    data = ai.telemetry.AiStreamSpanData(
+    data = ai.experimental_telemetry.AiStreamSpanData(
         model="anthropic/claude",
         messages=[],
         params=params_.InferenceRequestParams(
@@ -340,3 +336,93 @@ async def test_chat_span_gets_provider_params_and_ttft(
     assert attrs["gen_ai.provider.name"] == "anthropic"
     assert attrs["gen_ai.request.temperature"] == 0.2
     assert attrs["ai.time_to_first_token_ms"] == pytest.approx(0.0005)
+
+
+# --- telemetry enabled end-to-end on the real engine -------------------------
+#
+# the driver tests run with telemetry off (no turn span minted); these
+# re-run the critical flows with the adapter installed, covering the
+# mint -> sandbox-validate -> collect -> ship -> export path.
+
+
+@pytest.fixture
+def telemetry_on() -> Iterator[in_memory.InMemorySpanExporter]:
+    # registering the adapter is all it takes: the spawn steps gate on
+    # ``ai.experimental_telemetry.enabled()``.
+    exporter = in_memory.InMemorySpanExporter()
+    provider = sdk_trace.TracerProvider()
+    provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
+    adapter = telemetry.SealOtelAdapter(tracer_provider=provider)
+    ai.experimental_telemetry.register(adapter)
+    yield exporter
+    ai.experimental_telemetry.unregister(adapter)
+
+
+async def test_turn_with_telemetry_suspends_then_closes(
+    telemetry_on: in_memory.InMemorySpanExporter,
+    world: InProcessWorld,
+    scripted_model: MockProvider,
+) -> None:
+    scripted_model.responses = [[text_msg("hello there")]]
+
+    run = await start_session("s1", "hi")
+    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await resume_session("seal-session:s1:0", proto.NewUserMessage(close=True))
+    output = proto.SessionOutput.model_validate(await wait_run(run))
+    assert not output.is_error
+
+    spans = {s.name: s for s in telemetry_on.get_finished_spans()}
+    # the turn root exported at completion; the model call and the agent run
+    # hang under it in one trace.
+    assert "turn" in spans, f"exported: {list(spans)}"
+    turn = spans["turn"]
+    chat = spans["chat mock-model"]
+    agent_run = spans["invoke_agent DurableAgent"]
+    assert turn.context is not None
+    assert chat.context is not None and agent_run.context is not None
+    assert chat.context.trace_id == turn.context.trace_id
+    assert agent_run.context.trace_id == turn.context.trace_id
+    assert agent_run.parent is not None
+    assert agent_run.parent.span_id == turn.context.span_id
+    assert turn.attributes is not None
+    assert turn.attributes["session.id"] == "s1"
+
+
+async def test_gated_tool_approval_with_telemetry(
+    telemetry_on: in_memory.InMemorySpanExporter,
+    world: InProcessWorld,
+    scripted_model: MockProvider,
+) -> None:
+    scripted_model.responses = [
+        [
+            tool_call_msg(
+                tc_id="tc-1",
+                name="bash",
+                args='{"command": "echo approved-run"}',
+                text="running it",
+            )
+        ],
+        [text_msg("done")],
+    ]
+
+    await start_session("s1", "run it")
+    # the approval request must still reach the stream with telemetry on.
+    await wait_for_lifecycle("s1", proto.TOOL_APPROVAL_REQUESTED)
+
+    await resume_approval(
+        "s1", proto.ToolApprovalResponse(tool_call_id="tc-1", granted=True)
+    )
+    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
+
+    state = await session.read_session("s1")
+    assert state is not None
+    [tool_message] = [m for m in state.messages if m.role == "tool"]
+    [result] = tool_message.tool_results
+    assert result.result == "approved-run\n"
+
+    spans = {s.name: s for s in telemetry_on.get_finished_spans()}
+    assert "turn" in spans, f"exported: {list(spans)}"
+    tool = spans["execute_tool bash"]
+    turn = spans["turn"]
+    assert tool.context is not None and turn.context is not None
+    assert tool.context.trace_id == turn.context.trace_id

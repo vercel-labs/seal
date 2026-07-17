@@ -61,21 +61,19 @@ class SessionState(pydantic.BaseModel):
 # Turn inputs / outputs
 
 
-# a serialized otel span context (hex ids), carried across workflow
-# boundaries as plain journaled data. minted host-side by the spawn steps
-# (``driver.spawn_turn_workflow``, ``turn.spawn_subagent_turn``), so it is
-# identical on every replay of the body that threads it; the span it names
-# only exports at turn completion (``resume_turn_hook``), once the turn's
-# outcome and true duration are known.
-class TraceContext(pydantic.BaseModel):
-    trace_id: str
-    span_id: str
-    trace_flags: int = 1
-    # the caller's span id (same trace) for subagent turns; None for a
-    # session turn, whose span roots its own trace.
-    parent_span_id: str | None = None
-    # wall-clock start of the turn, for the retroactive export.
-    started_at_ns: int | None = None
+# the turn's root telemetry span, carried across workflow boundaries as plain
+# journaled data (an ``ai`` span is a serializable record). minted, without
+# being pushed, by the spawn steps (``driver.spawn_turn_workflow``,
+# ``turn.spawn_subagent_turn``), so it is identical on every replay of the
+# body that threads it; it only exports at turn completion
+# (``resume_turn_hook``), once the turn's outcome and true duration are known.
+#
+# fields stay the *bare* ``Span``: this module is imported inside the
+# workflow sandbox, where pydantic's generic parametrization
+# (``Span[CustomSpanData]``) trips over the sandbox's sys.modules proxy.
+# bare restores rehydrate the typed data anyway (the SDK matches it by the
+# ``kind`` tag serialized in the data), so nothing needs the parametrized
+# form.
 
 
 class TurnInput(pydantic.BaseModel):
@@ -87,9 +85,9 @@ class TurnInput(pydantic.BaseModel):
     turn_hook_token: str
     # index of this turn within its session (always 0 for subagent turns).
     turn_index: int = 0
-    # the turn's own root span context, minted by the spawn step at the
-    # callsite and injected here; llm_steps and child turns nest under it.
-    trace_context: TraceContext | None = None
+    # the turn's own root span, minted by the spawn step at the callsite and
+    # injected here; llm_steps and child turns nest under it.
+    turn_span: ai.experimental_telemetry.Span | None = None
 
 
 # in-process context of the running tool call, set by the agent loop around
@@ -97,9 +95,8 @@ class TurnInput(pydantic.BaseModel):
 class ToolCallContext(pydantic.BaseModel):
     session_id: str
     tool_call_id: str
-    # the enclosing turn's root span context; a spawned child turn nests
-    # under it.
-    trace_context: TraceContext | None = None
+    # the enclosing turn's root span; a spawned child turn nests under it.
+    turn_span: ai.experimental_telemetry.Span | None = None
 
 
 class TurnOutput(pydantic.BaseModel):

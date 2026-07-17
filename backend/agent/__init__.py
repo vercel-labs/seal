@@ -11,6 +11,7 @@ workflow = vercel.workflow.Workflows(
     sandbox_policy=vercel.workflow.SandboxPolicy(
         passthrough_modules=frozenset(
             {
+                "ai.experimental_telemetry",  # needs the time
                 "rich",  # annoying terminal detection stuff
                 "modelsdotdev",  # sqlite database
             }

@@ -8,8 +8,8 @@ exclude-newer-span = "P2D"
 
 [[package]]
 name = "ai"
-version = "0.2.2.dev28+6f28f56"
-source = { git = "https://github.com/vercel-labs/ai-python?branch=main#6f28f56654312a54c7e883a5fe1dcc9b82ed6ab4" }
+version = "0.3.1.dev4+582e993"
+source = { git = "https://github.com/vercel-labs/ai-python.git?branch=durable-telemetry-2#582e9931642d641cab9fe52460ca47b2485934b6" }
 dependencies = [
     { name = "httpx" },
     { name = "modelsdotdev" },
@@ -94,7 +94,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai", extras = ["otel"], git = "https://github.com/vercel-labs/ai-python?branch=main" },
+    { name = "ai", extras = ["otel"], git = "https://github.com/vercel-labs/ai-python.git?branch=durable-telemetry-2" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },

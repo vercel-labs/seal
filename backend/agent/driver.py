@@ -1,5 +1,3 @@
-import os
-import time
 from typing import Any
 
 import ai
@@ -24,18 +22,19 @@ async def write_event(
 
 @workflow.step(max_retries=0)
 async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object]:
-    # fires child workflow for an agent turn. the turn's root span context is
-    # minted here, host-side, so it is journaled and identical on every
-    # replay (minting duplicated in ``turn.spawn_subagent_turn``).
-    trace_context = proto.TraceContext(
-        trace_id=os.urandom(16).hex(),
-        span_id=os.urandom(8).hex(),
-        started_at_ns=time.time_ns(),
-    )
-    started = await vercel.workflow.start(
-        turn.run_turn,
-        {**turn_input, "trace_context": trace_context.model_dump(mode="json")},
-    )
+    # fires child workflow for an agent turn. the turn's root span is minted
+    # here, host-side, so it is journaled and identical on every replay
+    # (minting duplicated in ``turn.spawn_subagent_turn``). it is deliberately
+    # not pushed: nothing exports until the completed record is pushed at
+    # turn completion (``turn.resume_turn_hook``).
+    payload = dict(turn_input)
+    if ai.experimental_telemetry.enabled():
+        payload["turn_span"] = (
+            ai.experimental_telemetry.create_span("turn")
+            .stamp_start()
+            .model_dump(mode="json")
+        )
+    started = await vercel.workflow.start(turn.run_turn, payload)
     return {"run_id": started.run_id}
 
 

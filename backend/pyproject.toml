@@ -46,7 +46,8 @@ exclude-newer = "2 days"
 exclude-newer-package = { ai = false, vercel = false, vercel-cache = false, vercel-headers = false, vercel-internal-telemetry = false, vercel-oidc = false }
 
 [tool.uv.sources]
-ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
+# the reworked telemetry (serializable spans + push + sinks), not yet on main.
+ai = { git = "https://github.com/vercel-labs/ai-python.git", branch = "durable-telemetry-2" }
 vercel = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel" }
 vercel-cache = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-cache" }
 vercel-headers = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-headers" }
