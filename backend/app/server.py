@@ -1,19 +1,17 @@
 """FastAPI app for the seal durable agent — the UI-facing surface.
 
-Endpoints (mounted under ``/api`` by ``vercel.json``):
+Endpoints:
 
-  POST /chat                     run a turn, stream the AI SDK UI message stream
-  GET  /chat/{id}/stream         resume an in-flight stream
-  GET  /sessions                 list sessions
-  POST /sessions                 create a session
-  GET  /sessions/{id}            session metadata + UI message history
-  POST /sessions/{id}/title      generate a title from the first user message
-  DELETE /sessions/{id}          delete a session
-  POST /upload, GET /files/{p}   private blob upload + proxy
+  POST /api/chat                     run a turn, stream the AI SDK UI message stream
+  GET  /api/chat/{id}/stream         resume an in-flight stream
+  GET  /api/sessions                 list sessions
+  POST /api/sessions                 create a session
+  GET  /api/sessions/{id}            session metadata + UI message history
+  POST /api/sessions/{id}/title      generate a title from the first user message
+  DELETE /api/sessions/{id}          delete a session
+  POST /api/upload, GET /api/files/{p}   private blob upload + proxy
 
-`vercel dev` serves this app; the workflow worker (`worker.py`) drives the run.
-This process also calls ``vercel.workflow.start``, which imports and replays the
-workflow modules, so the preamble mirrors ``worker.py``.
+The workflow worker (``worker.py``) drives the run.
 """
 
 from __future__ import annotations
@@ -66,7 +64,7 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
@@ -79,7 +77,7 @@ class ChatRequest(pydantic.BaseModel):
     messages: list[ai_sdk.UIMessage]
 
 
-@app.post("/chat")
+@app.post("/api/chat")
 async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     messages, approvals = ai_sdk.to_messages(request.messages)
     await sessions.touch(request.session_id)
@@ -120,7 +118,7 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
     )
 
 
-@app.get("/chat/{session_id}/stream")
+@app.get("/api/chat/{session_id}/stream")
 async def resume_chat(session_id: str) -> fastapi.responses.Response:
     # ``useChat({ resume: true })`` GETs this on mount. Re-tail the durable
     # stream from the in-flight run's start; 204 when nothing is running.
@@ -141,17 +139,17 @@ class CreateSessionRequest(pydantic.BaseModel):
     title: str | None = None
 
 
-@app.get("/sessions")
+@app.get("/api/sessions")
 async def list_sessions() -> list[sessions.SessionMeta]:
     return await sessions.list_sessions()
 
 
-@app.post("/sessions", status_code=201)
+@app.post("/api/sessions", status_code=201)
 async def create_session(body: CreateSessionRequest) -> sessions.SessionMeta:
     return await sessions.create_session(body.id, title=body.title)
 
 
-@app.get("/sessions/{session_id}")
+@app.get("/api/sessions/{session_id}")
 async def get_session(session_id: str) -> dict[str, object]:
     meta = await sessions.get_session(session_id)
     if meta is None:
@@ -165,7 +163,7 @@ async def get_session(session_id: str) -> dict[str, object]:
     return {**meta.model_dump(), "messages": serialized}
 
 
-@app.post("/sessions/{session_id}/title")
+@app.post("/api/sessions/{session_id}/title")
 async def generate_title(session_id: str) -> sessions.SessionMeta:
     meta = await sessions.get_session(session_id)
     if meta is None:
@@ -186,7 +184,7 @@ async def generate_title(session_id: str) -> sessions.SessionMeta:
     return updated
 
 
-@app.delete("/sessions/{session_id}")
+@app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str) -> dict[str, str]:
     if not await sessions.delete_session(session_id):
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
@@ -202,7 +200,7 @@ class UploadResponse(pydantic.BaseModel):
     filename: str
 
 
-@app.post("/upload")
+@app.post("/api/upload")
 async def upload(file: fastapi.UploadFile) -> UploadResponse:
     content = await file.read()
     media_type = file.content_type or "application/octet-stream"
@@ -222,7 +220,7 @@ async def upload(file: fastapi.UploadFile) -> UploadResponse:
     )
 
 
-@app.get("/files/{pathname:path}")
+@app.get("/api/files/{pathname:path}")
 async def get_file(pathname: str) -> fastapi.responses.Response:
     async with AsyncBlobClient() as client:
         result = await client.get(pathname, access="private")

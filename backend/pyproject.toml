@@ -12,6 +12,12 @@ dependencies = [
     "vercel>=0.7.0",
 ]
 
+[tool.vercel]
+entrypoint = "app.server:app"
+
+[[tool.vercel.workflows]]
+entrypoint = "app.worker:workflow"
+
 [tool.mypy]
 python_version = "3.13"
 strict = true

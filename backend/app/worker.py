@@ -1,10 +1,9 @@
 """Worker entrypoint for the durable agent.
 
-`vercel dev` runs this as the `__wkf_*` queue consumer. Importing the workflow
-modules constructs their `Workflows()` registries, which registers the queue
+Importing `agent` constructs the `Workflows()` registry, which registers the queue
 handlers that actually drive `run_session` / `run_turn` to completion.
 
-The preamble (env defaults + the `ai` sandbox passthrough) must run before the
+The preamble (env defaults, log settup) must run before the
 workflow libraries are imported, so it lives at module top.
 """
 
@@ -37,7 +36,7 @@ os.environ.setdefault(
     os.path.join(_BACKEND_DIR, ".seal"),
 )
 
-# Importing the driver pulls in turn/session/stream; constructing each module's
-# `Workflows()` registers its queue handlers.
+# Importing the driver pulls in turn/session/stream.
 import agent.driver  # noqa: E402, F401
 import agent.turn  # noqa: E402, F401
+from agent import workflow as workflow  # noqa: E402, F401

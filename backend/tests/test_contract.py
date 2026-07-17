@@ -116,7 +116,7 @@ async def _capture_run(
     await sessions.create_session(session_id)
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(f"/sessions/{session_id}")
+        response = await client.get(f"/api/sessions/{session_id}")
     assert response.status_code == 200
     ui_messages: list[dict[str, Any]] = response.json()["messages"]
     return sse, ui_messages
