@@ -10,10 +10,6 @@ import vercel.workflow
 
 from agent import proto, stream, util, workflow
 
-# the workflow body runs a sandboxed copy of this module, which must not pull
-# in otel; steps gate telemetry work on ``ai.experimental_telemetry.enabled()``
-# and never import ``agent.telemetry``.
-
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
     "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to "
@@ -42,8 +38,7 @@ async def llm_step(
     writer = await stream.get_writable(session_id) if session_id else None
     message: ai.messages.Message | None = None
 
-    # parent this step's spans under the turn's root span (minted by the
-    # spawn step at the callsite; the span is just journaled data here).
+    # parent this step's spans under the turn's span
     turn_span = (
         ai.experimental_telemetry.Span.model_validate(turn_span_data)
         if turn_span_data
@@ -150,12 +145,9 @@ async def spawn_subagent_turn(
     parent_span_data: dict[str, object] | None = None,
 ) -> dict[str, object]:
     # a subagent is just one ungated turn writing to its own stream. its span
-    # is minted here, host-side, so it is journaled and identical on every
-    # replay (minting duplicated in ``driver.spawn_turn_workflow``). it nests
-    # under the calling turn's span when one is given, and is not pushed:
-    # it exports as a complete record at turn completion.
     payload = dict(turn_input)
     if ai.experimental_telemetry.enabled():
+        # create and nest the span for the subagent turn
         parent = (
             ai.experimental_telemetry.Span.model_validate(parent_span_data)
             if parent_span_data
@@ -246,8 +238,6 @@ class DurableAgent(ai.Agent):
     async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
         model_id = context.model.id
         session_id = self.session_id
-        # the turn's root span, minted by the spawn step at the callsite;
-        # every llm_step and spawned subagent continues the trace from it.
         turn_span_data = (
             self.turn_span.model_dump(mode="json") if self.turn_span else None
         )
@@ -296,9 +286,7 @@ class DurableAgent(ai.Agent):
 
 @workflow.step(max_retries=0)
 async def ship_spans(spans_data: list[dict[str, Any]]) -> None:
-    # re-deliver spans collected in the (adapter-less, replayed) workflow
-    # body to the real adapters. a step runs host-side and exactly once per
-    # journal, which is what makes the delivery exactly-once.
+    # re-deliver spans collected in the workflow body to the real adapters. 
     await ai.experimental_telemetry.push_all(spans_data)
 
 
@@ -309,15 +297,12 @@ async def resume_turn_hook(
     turn_span_data: dict[str, Any] | None = None,
     span_attributes: dict[str, Any] | None = None,
 ) -> None:
-    # resume() is a side effect, so it must run in a step. the turn's outcome
-    # and true duration are also first known here, so this is where the span
-    # minted at spawn finally exports: its completed record is pushed, and
-    # the otel adapter emits it under ids derived from the span's own — the
-    # same ids its children already parented to from other steps.
+    # resume() is a side effect, so it must run in a step
     output = proto.TurnOutput.model_validate(output_data)
 
     if turn_span_data is not None:
         turn_span = ai.experimental_telemetry.Span.model_validate(turn_span_data)
+        # complete and push the turn span
         turn_span.stamp_end(
             error=ai.experimental_telemetry.SpanError(
                 type="TurnError", message=output.error
@@ -378,15 +363,8 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
                 },
             )
 
-    # the body is journal-replayed code: every delivery re-runs it, so its
-    # spans (run, tool executions, hooks) must not reach live adapters from
-    # here. they are collected as data instead and shipped through a step
-    # below — the journal skips the completed step on replay, which makes
-    # the delivery exactly-once. the collected spans feed step arguments, so
-    # they must be byte-identical on every replay: span ids already are
-    # (``use_random`` drives ``generate_id``), and ``use_clock`` pins their
-    # timestamps to the journal-derived workflow clock — wall-clock stamps
-    # here would diverge on replay and trip the engine's determinism check.
+    # collect spans that happen inside the workflow body, and send them
+    # once in a separate step.
     collector = ai.experimental_telemetry.Collector()
     try:
         model = ai.get_model(MODEL_ID)
@@ -450,8 +428,6 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             await ship_spans(finished)
 
     # notify session that the turn is complete (and export its span).
-    # ``session.id`` groups turns into Phoenix's Sessions view;
-    # ``{input,output}.value`` are what trace lists preview.
     span_attrs: dict[str, Any] | None = None
     if _turn_input.turn_span is not None:
         span_attrs = {"session.id": session_id, "turn_index": turn_index}
