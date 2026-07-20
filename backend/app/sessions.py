@@ -237,12 +237,13 @@ async def generate_title(session_id: str, first_message: str) -> str:
     async with (
         ai.experimental_telemetry.span(
             "generate_title",
-            {"session.id": session_id, "input.value": first_message},
-        ) as span,
+            {
+                "session.id": session_id,
+                "openinference.span.kind": "CHAIN",
+            },
+        ),
         ai.stream(ai.get_model(_TITLE_MODEL), messages) as stream,
     ):
         async for _ in stream:
             pass
-        title = stream.text.strip()
-        span.set({"output.value": title})
-        return title
+        return stream.text.strip()

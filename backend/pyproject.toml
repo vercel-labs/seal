@@ -47,7 +47,7 @@ exclude-newer-package = { ai = false, vercel = false, vercel-cache = false, verc
 
 [tool.uv.sources]
 # the reworked telemetry (serializable spans + push + sinks), not yet on main.
-ai = { git = "https://github.com/vercel-labs/ai-python.git", branch = "durable-telemetry-2" }
+ai = { git = "https://github.com/vercel-labs/ai-python.git", branch = "improve-gen-ai-spec" }
 vercel = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel" }
 vercel-cache = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-cache" }
 vercel-headers = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-headers" }

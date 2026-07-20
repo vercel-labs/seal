@@ -28,7 +28,9 @@ async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object
         # mint the span for the turn and pass it in. this way
         # whatever is going on inside will be able to nest under it.
         payload["turn_span"] = (
-            ai.experimental_telemetry.create_span("turn")
+            ai.experimental_telemetry.create_span(
+                "turn", {"openinference.span.kind": "AGENT"}
+            )
             .stamp_start()
             .model_dump(mode="json")
         )
