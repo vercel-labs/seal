@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import traceback
@@ -154,7 +155,9 @@ async def spawn_subagent_turn(
             else None
         )
         turn_span = ai.experimental_telemetry.create_span(
-            "turn", parent=parent
+            "turn",
+            {"openinference.span.kind": "AGENT"},
+            parent=parent,
         ).stamp_start()
         payload["turn_span"] = turn_span.model_dump(mode="json")
     started = await vercel.workflow.start(run_turn, payload)
@@ -365,12 +368,17 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
 
     # collect spans that happen inside the workflow body, and send them
     # once in a separate step.
-    collector = ai.experimental_telemetry.Collector()
+    collector = (
+        ai.experimental_telemetry.Collector()
+        if _turn_input.turn_span is not None
+        else None
+    )
     try:
         model = ai.get_model(MODEL_ID)
         with (
-            ai.experimental_telemetry.use_clock(vercel.workflow.time_ns),
-            ai.experimental_telemetry.use_sink(collector),
+            ai.experimental_telemetry.use_sink(collector)
+            if collector is not None
+            else contextlib.nullcontext(),
             ai.experimental_telemetry.use_span(_turn_input.turn_span),
         ):
             async with (
@@ -422,7 +430,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
 
     # deliver the body's collected spans. only complete records ship: a span
     # still open here would dangle in the shipping process's adapter.
-    if _turn_input.turn_span is not None:
+    if collector is not None:
         finished = [s.model_dump(mode="json") for s in collector.finished]
         if finished:
             await ship_spans(finished)
@@ -431,14 +439,6 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     span_attrs: dict[str, Any] | None = None
     if _turn_input.turn_span is not None:
         span_attrs = {"session.id": session_id, "turn_index": turn_index}
-        for m in reversed(_turn_input.messages):
-            if m.role == "user" and m.text:
-                span_attrs["input.value"] = m.text
-                break
-        for m in reversed(output.messages):
-            if m.role == "assistant" and m.text:
-                span_attrs["output.value"] = m.text
-                break
     await resume_turn_hook(
         _turn_input.turn_hook_token,
         output.model_dump(mode="json"),
