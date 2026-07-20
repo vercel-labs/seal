@@ -16,8 +16,8 @@ vercel-cache = false
 
 [[package]]
 name = "ai"
-version = "0.3.1.dev9+f49364f"
-source = { git = "https://github.com/vercel-labs/ai-python.git?branch=improve-gen-ai-spec#f49364f5a59930cf9813ec8703b499ba79c6b467" }
+version = "0.3.1.dev10+a1930e3"
+source = { git = "https://github.com/vercel-labs/ai-python.git?branch=improve-gen-ai-spec#a1930e3edfe3f09656db74754845b95904de4dd8" }
 dependencies = [
     { name = "httpx" },
     { name = "modelsdotdev" },
