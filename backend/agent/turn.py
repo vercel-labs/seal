@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import contextvars
 import dataclasses
 import traceback
@@ -376,9 +375,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     try:
         model = ai.get_model(MODEL_ID)
         with (
-            ai.experimental_telemetry.use_sink(collector)
-            if collector is not None
-            else contextlib.nullcontext(),
+            ai.experimental_telemetry.use_sink(collector),
             ai.experimental_telemetry.use_span(_turn_input.turn_span),
         ):
             async with (
