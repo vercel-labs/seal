@@ -39,6 +39,7 @@ import opentelemetry.sdk.resources as resources
 import opentelemetry.sdk.trace as sdk_trace
 import opentelemetry.sdk.trace.export as sdk_export
 
+
 def install(service: str) -> "SealOtelAdapter | None":
     """Register the otel adapter exporting to OTLP as ``service``.
 

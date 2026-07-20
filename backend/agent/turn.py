@@ -286,7 +286,7 @@ class DurableAgent(ai.Agent):
 
 @workflow.step(max_retries=0)
 async def ship_spans(spans_data: list[dict[str, Any]]) -> None:
-    # re-deliver spans collected in the workflow body to the real adapters. 
+    # re-deliver spans collected in the workflow body to the real adapters.
     await ai.experimental_telemetry.push_all(spans_data)
 
 

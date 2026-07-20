@@ -60,6 +60,7 @@ class SessionState(pydantic.BaseModel):
 
 # Turn inputs / outputs
 
+
 class TurnInput(pydantic.BaseModel):
     session_id: str
     messages: list[ai.messages.Message]
