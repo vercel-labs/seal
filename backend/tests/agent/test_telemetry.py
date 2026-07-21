@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import unittest.mock
 from collections.abc import Iterator
 
 import ai.experimental_telemetry
 import ai.experimental_telemetry.otel as otel_adapter
+import opentelemetry.exporter.otlp.proto.http.trace_exporter as otlp
 import opentelemetry.sdk.trace as sdk_trace
 import opentelemetry.sdk.trace.export as sdk_export
 import opentelemetry.sdk.trace.export.in_memory_span_exporter as in_memory
@@ -23,61 +25,47 @@ from harness import (
 from agent import proto, session, telemetry
 
 
-def test_install_is_noop_without_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+def test_install_is_noop_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
     assert telemetry.install("seal-test") is None
     assert not ai.experimental_telemetry.enabled()
 
 
-def test_install_registers_the_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:6006")
+def test_install_configures_langfuse_exporter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com/")
+    exporter_factory = unittest.mock.Mock(
+        return_value=in_memory.InMemorySpanExporter()
+    )
+    monkeypatch.setattr(otlp, "OTLPSpanExporter", exporter_factory)
+
     adapter = telemetry.install("seal-test")
-    assert type(adapter) is otel_adapter.OtelAdapter
+    assert isinstance(adapter, otel_adapter.OtelAdapter)
     try:
+        exporter_factory.assert_called_once_with(
+            endpoint="https://us.cloud.langfuse.com/api/public/otel/v1/traces",
+            headers={
+                "Authorization": "Basic cGstdGVzdDpzay10ZXN0",
+                "x-langfuse-ingestion-version": "4",
+            },
+        )
         # the spawn steps gate turn-span minting on this
         assert ai.experimental_telemetry.enabled()
         ai.experimental_telemetry.unregister(adapter)  # raises if not registered
         assert not ai.experimental_telemetry.enabled()
     finally:
-        # stop the batch worker now: left alive, the provider's atexit hook
-        # would stall interpreter exit flushing to the dead endpoint.
         adapter.shutdown()
 
 
-def test_install_accepts_trace_specific_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    monkeypatch.setenv(
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        "http://127.0.0.1:6006/v1/traces",
-    )
-    adapter = telemetry.install("seal-test")
-    assert type(adapter) is otel_adapter.OtelAdapter
-    assert adapter is not None
-    ai.experimental_telemetry.unregister(adapter)
-    adapter.shutdown()
-
-
-@pytest.mark.parametrize(
-    ("capture", "expected"),
-    [(None, False), ("true", True)],
-)
-def test_install_uses_sdk_content_capture_default(
-    monkeypatch: pytest.MonkeyPatch,
-    capture: str | None,
-    expected: bool,
-) -> None:
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:6006")
-    if capture is None:
-        monkeypatch.delenv(
-            "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False
-        )
-    else:
-        monkeypatch.setenv(
-            "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", capture
-        )
+def test_install_captures_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "http://127.0.0.1:6006")
 
     adapter = telemetry.install("seal-test")
     assert adapter is not None
@@ -89,10 +77,119 @@ def test_install_uses_sdk_content_capture_default(
             )
         )
         attrs = adapter.span_attributes(span)
-        assert ("gen_ai.input.messages" in attrs) is expected
+        assert "gen_ai.input.messages" in attrs
+        assert "langfuse.observation.input" in attrs
+        assert attrs["langfuse.observation.type"] == "generation"
     finally:
         ai.experimental_telemetry.unregister(adapter)
         adapter.shutdown()
+
+
+def test_adapter_maps_observation_types() -> None:
+    provider = sdk_trace.TracerProvider()
+    adapter = telemetry._LangfuseAdapter(
+        tracer_provider=provider, capture_content=False
+    )
+    cases = [
+        (
+            ai.experimental_telemetry.RunSpanData(
+                agent="Seal", model="anthropic/claude", messages=[]
+            ),
+            "agent",
+        ),
+        (
+            ai.experimental_telemetry.ToolExecutionSpanData(
+                tool_name="bash", tool_call_id="tc-1"
+            ),
+            "tool",
+        ),
+        (ai.experimental_telemetry.LoopTurnSpanData(), "chain"),
+        (
+            ai.experimental_telemetry.CustomSpanData(
+                attributes={"openinference.span.kind": "AGENT"}
+            ),
+            "agent",
+        ),
+    ]
+    try:
+        for index, (data, expected) in enumerate(cases):
+            span = ai.experimental_telemetry.Span(
+                name="test",
+                data=data,
+                id=f"span-{index}",
+                trace_id="trace-1",
+            )
+            assert adapter.span_attributes(span)["langfuse.observation.type"] == (
+                expected
+            )
+    finally:
+        adapter.shutdown()
+
+
+def test_adapter_maps_turn_trace_attributes() -> None:
+    adapter = telemetry._LangfuseAdapter(
+        tracer_provider=sdk_trace.TracerProvider(), capture_content=False
+    )
+    span = ai.experimental_telemetry.Span(
+        name="turn",
+        data=ai.experimental_telemetry.CustomSpanData(
+            attributes={
+                "openinference.span.kind": "AGENT",
+                "session.id": "session-1:child:tool-call-1",
+            }
+        ),
+        id="span-1",
+        trace_id="trace-1",
+    )
+    try:
+        attributes = adapter.span_attributes(span)
+        assert attributes["langfuse.session.id"] == "session-1"
+        assert attributes["langfuse.trace.name"] == "agent-turn"
+    finally:
+        adapter.shutdown()
+
+
+async def test_export_context_uses_conversation_session_for_subagents() -> None:
+    exporter = in_memory.InMemorySpanExporter()
+    provider = sdk_trace.TracerProvider()
+    provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
+    adapter = telemetry._LangfuseAdapter(
+        tracer_provider=provider, capture_content=False
+    )
+    ai.experimental_telemetry.register(adapter)
+    try:
+        span = (
+            ai.experimental_telemetry.create_span("child-work")
+            .stamp_start()
+            .stamp_end()
+        )
+        with telemetry.use_trace("session-1:child:tool-call-1"):
+            await ai.experimental_telemetry.push_all([span])
+        (exported,) = exporter.get_finished_spans()
+        assert exported.attributes is not None
+        assert exported.attributes["langfuse.session.id"] == "session-1"
+    finally:
+        ai.experimental_telemetry.unregister(adapter)
+
+
+async def test_export_context_accepts_none() -> None:
+    exporter = in_memory.InMemorySpanExporter()
+    provider = sdk_trace.TracerProvider()
+    provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
+    adapter = telemetry._LangfuseAdapter(
+        tracer_provider=provider, capture_content=False
+    )
+    ai.experimental_telemetry.register(adapter)
+    try:
+        span = ai.experimental_telemetry.create_span("work").stamp_start().stamp_end()
+        with telemetry.use_trace(None):
+            await ai.experimental_telemetry.push_all([span])
+        (exported,) = exporter.get_finished_spans()
+        assert exported.attributes is not None
+        assert "langfuse.session.id" not in exported.attributes
+        assert "langfuse.trace.name" not in exported.attributes
+    finally:
+        ai.experimental_telemetry.unregister(adapter)
 
 
 @pytest.fixture
@@ -237,7 +334,9 @@ def telemetry_on() -> Iterator[in_memory.InMemorySpanExporter]:
     exporter = in_memory.InMemorySpanExporter()
     provider = sdk_trace.TracerProvider()
     provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
-    adapter = otel_adapter.OtelAdapter(tracer_provider=provider, capture_content=False)
+    adapter = telemetry._LangfuseAdapter(
+        tracer_provider=provider, capture_content=False
+    )
     ai.experimental_telemetry.register(adapter)
     yield exporter
     ai.experimental_telemetry.unregister(adapter)
@@ -271,9 +370,21 @@ async def test_turn_with_telemetry_suspends_then_closes(
     assert agent_run.parent.span_id == turn.context.span_id
     assert turn.attributes is not None
     assert turn.attributes["session.id"] == "s1"
+    assert turn.attributes["langfuse.session.id"] == "s1"
+    assert turn.attributes["langfuse.trace.name"] == "agent-turn"
+    assert turn.attributes["langfuse.observation.type"] == "agent"
     assert turn.attributes["openinference.span.kind"] == "AGENT"
+    assert chat.attributes is not None
+    assert chat.attributes["langfuse.session.id"] == "s1"
+    assert chat.attributes["langfuse.trace.name"] == "agent-turn"
+    assert chat.attributes["langfuse.observation.type"] == "generation"
+    assert agent_run.attributes is not None
+    assert agent_run.attributes["langfuse.session.id"] == "s1"
+    assert agent_run.attributes["langfuse.observation.type"] == "agent"
     assert "input.value" not in turn.attributes
     assert "output.value" not in turn.attributes
+    assert "langfuse.observation.input" not in turn.attributes
+    assert "langfuse.observation.output" not in turn.attributes
 
 
 async def test_gated_tool_approval_with_telemetry(

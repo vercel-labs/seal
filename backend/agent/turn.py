@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 import ai
 import vercel.workflow
 
-from agent import proto, stream, util, workflow
+from agent import proto, stream, telemetry, util, workflow
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = (
@@ -44,7 +44,7 @@ async def llm_step(
         if turn_span_data
         else None
     )
-    with ai.experimental_telemetry.use_span(turn_span):
+    with telemetry.use_trace(session_id), ai.experimental_telemetry.use_span(turn_span):
         async with ai.stream(model, messages, tools=tools) as model_stream:
             async for e in model_stream:
                 if writer is not None and not e.replay:
@@ -287,9 +287,11 @@ class DurableAgent(ai.Agent):
 
 
 @workflow.step(max_retries=0)
-async def ship_spans(spans_data: list[dict[str, Any]]) -> None:
+async def ship_spans(spans_data: list[dict[str, Any]], session_id: str) -> None:
     # re-deliver spans collected in the workflow body to the real adapters.
-    await ai.experimental_telemetry.push_all(spans_data)
+    with telemetry.use_trace(session_id):
+        await ai.experimental_telemetry.push_all(spans_data)
+        await ai.experimental_telemetry.flush()
 
 
 @workflow.step(max_retries=0)
@@ -315,6 +317,7 @@ async def resume_turn_hook(
         if span_attributes:
             turn_span.set(span_attributes)
         await turn_span.push()
+        await ai.experimental_telemetry.flush()
 
     # the driver may not have parked on the hook yet, so retry while it is
     # missing.
@@ -430,7 +433,7 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     if collector is not None:
         finished = [s.model_dump(mode="json") for s in collector.finished]
         if finished:
-            await ship_spans(finished)
+            await ship_spans(finished, session_id)
 
     # notify session that the turn is complete (and export its span).
     span_attrs: dict[str, Any] | None = None
