@@ -45,9 +45,7 @@ class _LangfuseAdapter(otel_adapter.OtelAdapter):
         if export_attributes := _export_attributes.get():
             attributes.update(export_attributes)
         if session_id := attributes.get("session.id"):
-            attributes["langfuse.session.id"] = str(session_id).partition(":child:")[
-                0
-            ]
+            attributes["langfuse.session.id"] = str(session_id).partition(":child:")[0]
         if span.name == "turn":
             attributes["langfuse.trace.name"] = "agent-turn"
 

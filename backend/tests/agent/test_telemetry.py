@@ -39,9 +39,7 @@ def test_install_configures_langfuse_exporter(
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
     monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com/")
-    exporter_factory = unittest.mock.Mock(
-        return_value=in_memory.InMemorySpanExporter()
-    )
+    exporter_factory = unittest.mock.Mock(return_value=in_memory.InMemorySpanExporter())
     monkeypatch.setattr(otlp, "OTLPSpanExporter", exporter_factory)
 
     adapter = telemetry.install("seal-test")
