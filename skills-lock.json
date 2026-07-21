@@ -48,6 +48,12 @@
       "sourceType": "github",
       "skillPath": "skills/ai-python-ui-adapter/SKILL.md",
       "computedHash": "1c15418a8ffb8efefac914150ef7c1caff4dabd879b7a7ee0c96c319c9bc6f6e"
+    },
+    "langfuse": {
+      "source": "langfuse/skills",
+      "sourceType": "github",
+      "skillPath": "skills/langfuse/SKILL.md",
+      "computedHash": "aac68c1676a7f60146d7d190330b548726de2f313f3ee18d57a7d2447a31f0db"
     }
   }
 }
