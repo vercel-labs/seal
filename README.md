@@ -29,9 +29,10 @@ silly, but this is a demo app.)
   hooks too: the turn parks until the user answers, then resumes with the
   decision. Model calls, stream writes, and session snapshots are all
   workflow steps, replay-safe via the workflow's deterministic RNG/clock.
-- **Storage** (`agent/storage.py`) — one append-only primitive backing both
-  durable streams and session snapshots. Uses Postgres when `DATABASE_URL`
-  is set, local jsonl files otherwise.
+- **Storage** (`agent/storage.py`) — one append-only primitive backing
+  both durable streams and session snapshots. Uses Postgres when
+  `DATABASE_URL` is set, local jsonl files otherwise. Uses Vercel Blob
+  to store attachments when available.
 
 Deployment is two Vercel services (see `vercel.json`): the frontend and the
 backend, with the workflow worker declared in `backend/pyproject.toml`.
