@@ -35,6 +35,10 @@ os.environ.setdefault(
     os.path.join(_BACKEND_DIR, ".seal"),
 )
 
+from agent import telemetry  # noqa: E402
+
+_telemetry = telemetry.install("seal-backend")
+
 import contextlib  # noqa: E402
 
 import ai.ui.ai_sdk as ai_sdk  # noqa: E402
@@ -51,7 +55,13 @@ from app import attachments, chat, sessions  # noqa: E402
 @contextlib.asynccontextmanager
 async def lifespan(_app: fastapi.FastAPI) -> collections.abc.AsyncIterator[None]:
     await sessions.ensure_schema()
-    yield
+    try:
+        yield
+    finally:
+        # flush the telemetry batch exporter before teardown so short-lived
+        # (dev-reload) processes don't drop tail spans.
+        if _telemetry is not None:
+            _telemetry.shutdown()
 
 
 app = fastapi.FastAPI(title="seal-durable-agent", lifespan=lifespan)
@@ -177,7 +187,7 @@ async def generate_title(session_id: str) -> sessions.SessionMeta:
             status_code=400, detail="No user message to generate title from"
         )
     updated = await sessions.set_title(
-        session_id, await sessions.generate_title(first_text)
+        session_id, await sessions.generate_title(session_id, first_text)
     )
     if updated is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")

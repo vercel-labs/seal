@@ -229,10 +229,21 @@ async def first_user_text(session_id: str) -> str | None:
     return None
 
 
-async def generate_title(first_message: str) -> str:
+async def generate_title(session_id: str, first_message: str) -> str:
     """Generate a short title from the first user message via a cheap LLM call."""
     messages = [ai.system_message(_TITLE_PROMPT), ai.user_message(first_message)]
-    async with ai.stream(ai.get_model(_TITLE_MODEL), messages) as stream:
+    # the named root span keeps this call out of the trace list as an
+    # anonymous chat and groups it with its session (``session.id``).
+    async with (
+        ai.experimental_telemetry.span(
+            "generate_title",
+            {
+                "session.id": session_id,
+                "openinference.span.kind": "CHAIN",
+            },
+        ),
+        ai.stream(ai.get_model(_TITLE_MODEL), messages) as stream,
+    ):
         async for _ in stream:
             pass
         return stream.text.strip()

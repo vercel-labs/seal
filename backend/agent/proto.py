@@ -68,6 +68,19 @@ class TurnInput(pydantic.BaseModel):
     # children) run bash directly and cannot delegate further.
     gated: bool = True
     turn_hook_token: str
+    # index of this turn within its session (always 0 for subagent turns).
+    turn_index: int = 0
+    # turn's root span. llm_steps and child turns nest under it.
+    turn_span: ai.experimental_telemetry.Span | None = None
+
+
+# in-process context of the running tool call, set by the agent loop around
+# each schedule so a tool can reach it without smuggling args. never journaled.
+class ToolCallContext(pydantic.BaseModel):
+    session_id: str
+    tool_call_id: str
+    # the enclosing turn's root span; a spawned child turn nests under it.
+    turn_span: ai.experimental_telemetry.Span | None = None
 
 
 class TurnOutput(pydantic.BaseModel):
