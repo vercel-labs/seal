@@ -44,16 +44,18 @@ async def llm_step(
         if turn_span_data
         else None
     )
-    with ai.experimental_telemetry.use_span(turn_span):
-        async with ai.stream(model, messages, tools=tools) as model_stream:
-            async for e in model_stream:
-                if writer is not None and not e.replay:
-                    await writer.write(e)
-                if isinstance(e, ai.events.StreamEnd):
-                    message = e.message
+    async with (
+        ai.experimental_telemetry.use_span(turn_span),
+        ai.stream(model, messages, tools=tools) as model_stream,
+    ):
+        async for e in model_stream:
+            if writer is not None and not e.replay:
+                await writer.write(e)
+            if isinstance(e, ai.events.StreamEnd):
+                message = e.message
 
-            if message is None:
-                message = model_stream.message
+        if message is None:
+            message = model_stream.message
 
     assert message is not None
     return message.model_dump(mode="json")
@@ -374,44 +376,42 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
     )
     try:
         model = ai.get_model(MODEL_ID)
-        with (
+        async with (
             ai.experimental_telemetry.use_sink(collector),
             ai.experimental_telemetry.use_span(_turn_input.turn_span),
+            agent.run(model, messages) as run,
+            asyncio.TaskGroup() as tg,
         ):
-            async with (
-                agent.run(model, messages) as run,
-                asyncio.TaskGroup() as tg,
-            ):
-                async for event in run:
-                    if (
-                        isinstance(event, ai.events.HookEvent)
-                        and event.hook.status == "pending"
-                        and event.hook.hook_type == ai.agents.TOOL_APPROVAL_HOOK_TYPE
-                        and (tool_call_id := event.hook.tool_call_id) is not None
-                    ):
-                        # HookEvents ride the runtime queue, not runner.events(),
-                        # so the loop never wrote this; write it here so the UI
-                        # gets the approval request part.
-                        await write_event(session_id, event.model_dump(mode="json"))
-                        tg.create_task(
-                            mediate(
-                                proto.ApprovalHook.wait(
-                                    token=proto.approval_hook_token(
-                                        session_id, tool_call_id
-                                    )
-                                ),
-                                event.hook.hook_id,
-                            )
+            async for event in run:
+                if (
+                    isinstance(event, ai.events.HookEvent)
+                    and event.hook.status == "pending"
+                    and event.hook.hook_type == ai.agents.TOOL_APPROVAL_HOOK_TYPE
+                    and (tool_call_id := event.hook.tool_call_id) is not None
+                ):
+                    # HookEvents ride the runtime queue, not runner.events(),
+                    # so the loop never wrote this; write it here so the UI
+                    # gets the approval request part.
+                    await write_event(session_id, event.model_dump(mode="json"))
+                    tg.create_task(
+                        mediate(
+                            proto.ApprovalHook.wait(
+                                token=proto.approval_hook_token(
+                                    session_id, tool_call_id
+                                )
+                            ),
+                            event.hook.hook_id,
                         )
-                    elif isinstance(event, ai.events.RunBlocked):
-                        # the run is blocked on approvals; tell the client we're
-                        # waiting on a human.
-                        await write_event(
-                            session_id,
-                            stream.tool_approval_requested(turn_index=turn_index),
-                        )
+                    )
+                elif isinstance(event, ai.events.RunBlocked):
+                    # the run is blocked on approvals; tell the client we're
+                    # waiting on a human.
+                    await write_event(
+                        session_id,
+                        stream.tool_approval_requested(turn_index=turn_index),
+                    )
 
-                messages = run.messages
+            messages = run.messages
     except Exception as error:
         output = proto.TurnOutput(
             kind="error",
