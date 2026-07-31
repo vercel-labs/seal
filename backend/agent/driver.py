@@ -7,7 +7,7 @@ import agent.proto as proto
 import agent.session as session
 import agent.stream as stream
 import agent.turn as turn
-from agent import workflow
+from agent import telemetry, workflow
 
 
 @workflow.step(max_retries=0)
@@ -29,6 +29,7 @@ async def spawn_turn_workflow(turn_input: dict[str, object]) -> dict[str, object
         # whatever is going on inside will be able to nest under it.
         turn_span = ai.experimental_telemetry.create_span("turn").stamp_start()
         turn_span.set_attrs({"openinference.span.kind": "AGENT"})
+        turn_span.trace_attrs.update(telemetry.trace_attrs(str(payload["session_id"])))
         payload["turn_span"] = turn_span.model_dump(mode="json")
     started = await vercel.workflow.start(turn.run_turn, payload)
     return {"run_id": started.run_id}

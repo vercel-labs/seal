@@ -8,6 +8,7 @@ workflow = vercel.workflow.Workflows(
             {
                 "rich",  # annoying terminal detection stuff
                 "modelsdotdev",  # sqlite database
+                "opentelemetry",  # calls uuid4() at import time
             }
             | (
                 {"ai"}
