@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Sequence
 from typing import Any, ClassVar
 
 import ai
+import pydantic
 import vercel.workflow
 
 from agent import proto, stream, util, workflow
@@ -26,12 +27,17 @@ IMAGE_SYSTEM_PROMPT = (
 )
 
 
+class EagerToolHook(pydantic.BaseModel, vercel.workflow.BaseHook):
+    payload: ai.messages.ToolCallPart
+
+
 @workflow.step
 async def llm_step(
     model_id: str,
     messages_data: list[dict[str, object]],
     tools_data: list[dict[str, object]],
     session_id: str | None,
+    tool_token: str | None = None,
     turn_span_data: dict[str, object] | None = None,
 ) -> dict[str, object]:
     model = ai.get_model(model_id)
@@ -59,8 +65,13 @@ async def llm_step(
         ai.stream(model, messages, tools=tools) as model_stream,
     ):
         async for e in model_stream:
-            if writer is not None and not e.replay:
+            if e.replay:
+                continue
+
+            if writer is not None:
                 await writer.write(e)
+            if tool_token and isinstance(e, ai.types.events.ToolEnd):
+                await EagerToolHook(payload=e.tool_call).resume(tool_token)
 
     return model_stream.message.model_dump(mode="json")
 
@@ -260,12 +271,19 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
     )
 
 
+# Tools that we can run eagerly, before the llm call generating them
+# has completed. These should be non-effectful (because they might get
+# cancelled) and non-streaming (because that would take some extra
+# thought).
+EAGER_TOOLS = {"generate_image", "web_fetch"}
+
+
 class DurableAgent(ai.Agent):
     # bash is gated/ungated per mode, so it is supplied via tools=, not here.
     TOOLS: ClassVar[list[ai.AgentTool]] = [web_fetch, generate_image]
 
-    # ``run(params=...)`` is typed inference params now, so the durable plumbing
-    # (model id, stream target, subagent side-channel) lives on the instance.
+    tg: asyncio.TaskGroup
+
     def __init__(
         self,
         *,
@@ -284,12 +302,48 @@ class DurableAgent(ai.Agent):
             self.turn_span.model_dump(mode="json") if self.turn_span else None
         )
 
+        tool_token = f"seal-early-tool:{session_id}"
+        live_tool_calls = {}
+
+        def launch_tool(tool_call: ai.messages.ToolCallPart) -> None:
+            # Launch a tool in a task under the right context, track
+            # it in the live call table.
+            token = tool_call_context.set(
+                proto.ToolCallContext(
+                    session_id=session_id or "",
+                    tool_call_id=tool_call.tool_call_id,
+                    turn_span=self.turn_span,
+                )
+            )
+            live_tool_calls[tool_call.tool_call_id] = self.tg.create_task(
+                context.resolve(tool_call)()
+            )
+            tool_call_context.reset(token)
+
+        eager_tool_hook = EagerToolHook.wait(token=tool_token)
+
+        async def watcher() -> None:
+            # Wait on our eager tool hook. For EAGER_TOOLS, trigger
+            # them now, from the watcher thread.
+            #
+            # Once llm_step returns, the tool runner will schedule a
+            # ToolRunner task that waits on them.
+            async for ev in eager_tool_hook:
+                tool_call = ev.payload
+                if tool_call.tool_name in EAGER_TOOLS:
+                    launch_tool(tool_call)
+
+        watcher_task = self.tg.create_task(watcher())
+
         while context.keep_running():
+            live_tool_calls.clear()
+
             result = await llm_step(
                 model_id,
                 [message.model_dump(mode="json") for message in context.messages],
                 [tool.model_dump(mode="json") for tool in context.tools],
                 session_id,
+                tool_token,
                 turn_span_data,
             )
 
@@ -301,16 +355,29 @@ class DurableAgent(ai.Agent):
             yield ai.events.StreamEnd(message=assistant_message)
 
             async with ai.ToolRunner() as runner:
+                # Cancel eager tool calls that are not legit -- that
+                # is, ones that are from a retried llm call. They
+                # won't actually get stopped if they are steps, unless
+                # the cancellation happens before the step was
+                # launched, but it will stop us from waiting on them.
+                legit_call_ids = {
+                    tc.tool_call_id for tc in assistant_message.tool_calls
+                }
+                for id, task in list(live_tool_calls.items()):
+                    if id not in legit_call_ids:
+                        task.cancel()
+                        del live_tool_calls[id]
+
                 for tool_call in assistant_message.tool_calls:
-                    token = tool_call_context.set(
-                        proto.ToolCallContext(
-                            session_id=session_id or "",
-                            tool_call_id=tool_call.tool_call_id,
-                            turn_span=self.turn_span,
-                        )
-                    )
-                    runner.schedule(context.resolve(tool_call))
-                    tool_call_context.reset(token)
+                    # Launch the tool if it isn't running already
+                    if tool_call.tool_call_id not in live_tool_calls:
+                        launch_tool(tool_call)
+
+                    # Wait on it
+                    async def _wait(tc: ai.messages.ToolCallPart = tool_call) -> Any:
+                        return await live_tool_calls[tc.tool_call_id]
+
+                    runner.schedule(_wait)
 
                 async for event in runner.events():
                     # write tool-running events from the producer side so they land
@@ -324,6 +391,9 @@ class DurableAgent(ai.Agent):
 
             if tool_message is not None:
                 context.add(tool_message)
+
+        watcher_task.cancel()
+        eager_tool_hook.dispose()
 
 
 @workflow.step
@@ -396,8 +466,10 @@ async def run_turn(turn_input: dict[str, Any]) -> None:
             ai.experimental_telemetry.use_sink(collector),
             ai.experimental_telemetry.use_span(_turn_input.turn_span),
             agent.run(model, messages) as run,
-            asyncio.TaskGroup() as tg,
+            ai.util.TaskGroup() as tg,
         ):
+            agent.tg = tg
+
             async for event in run:
                 if (
                     isinstance(event, ai.events.HookEvent)
