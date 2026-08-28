@@ -101,6 +101,7 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
             request.session_id,
             [
                 proto.ToolApprovalResponse(
+                    hook_id=approval.hook_id,
                     tool_call_id=approval.tool_call_id,
                     granted=approval.granted,
                     reason=approval.reason,

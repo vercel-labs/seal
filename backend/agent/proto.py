@@ -11,19 +11,16 @@ import vercel.workflow
 
 # external decision for a single gated tool call.
 class ToolApprovalResponse(pydantic.BaseModel):
+    hook_id: str
     tool_call_id: str
     granted: bool
     reason: str | None = None
 
 
-# ai SDK gates a tool behind a hook labelled ``approve_{tool_call_id}``.
-TOOL_APPROVAL_HOOK_PREFIX = "approve_"
-
-
-# the durable hook a gated call parks on; its trailing segment is exactly the ai
-# ``HookPart.hook_id``. tokens are global, so the session id keeps them unique.
-def approval_hook_token(session_id: str, tool_call_id: str) -> str:
-    return f"seal-approval:{session_id}:{TOOL_APPROVAL_HOOK_PREFIX}{tool_call_id}"
+# One durable hook carries all approval decisions for a turn. Tokens are global,
+# so the session id keeps each session's hook unique.
+def hooks_hook_token(session_id: str) -> str:
+    return f"{session_id}:hooks"
 
 
 def turn_hook_token(session_id: str) -> str:
@@ -49,9 +46,9 @@ class SessionHook(pydantic.BaseModel, vercel.workflow.BaseHook):
     payload: NewUserMessage
 
 
-# one gated call's decision, delivered on its own per-approval hook.
+# one or more gated call decisions, delivered through the session's shared hook.
 class ApprovalHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    response: ToolApprovalResponse
+    responses: list[ToolApprovalResponse]
 
 
 class SessionState(pydantic.BaseModel):

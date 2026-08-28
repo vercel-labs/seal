@@ -14,7 +14,7 @@ from conftest import MockProvider, text_msg, tool_call_msg
 from harness import (
     InProcessWorld,
     read_state,
-    resume_approval,
+    resume_approvals,
     start_session,
     wait_for_event,
     wait_for_lifecycle,
@@ -297,8 +297,13 @@ async def test_gated_tool_approval_with_telemetry(
     # the approval request must still reach the stream with telemetry on.
     await wait_for_event("s1", ai.events.RunBlocked)
 
-    await resume_approval(
-        "s1", proto.ToolApprovalResponse(tool_call_id="tc-1", granted=True)
+    await resume_approvals(
+        "s1",
+        [
+            proto.ToolApprovalResponse(
+                hook_id="approve_tc-1", tool_call_id="tc-1", granted=True
+            )
+        ],
     )
     await wait_for_lifecycle("s1", proto.SESSION_WAITING)
 

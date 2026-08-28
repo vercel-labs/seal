@@ -7,7 +7,7 @@ from collections.abc import (
     AsyncGenerator,
     Sequence,
 )
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import ai
 import pydantic
@@ -338,7 +338,7 @@ async def resume_turn_hook(token: str, output: proto.TurnOutput) -> None:
                 raise
 
 
-# runs one agent turn, parking on a durable hook per gated tool call
+# runs one agent turn, routing all gated approvals through one durable hook
 @workflow.workflow
 # Draw message/part ids from the workflow's deterministic RNG so they're
 # stable across replay. ``vercel.workflow.random`` is a factory resolved on
@@ -349,20 +349,23 @@ async def run_turn(
     turn_input: proto.TurnInput,
     writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
 ) -> None:
-    async def mediate(approval_event: Any, hook_id: str) -> None:
-        # bridge a durable ApprovalHook back into the ai-library approval hook so
-        # the gated tool proceeds in this same agent run.
-        decision = await approval_event
-        if decision is not None:
-            ai.resolve_hook(
-                hook_id,
-                {
-                    "granted": decision.response.granted,
-                    "reason": decision.response.reason,
-                },
-            )
+    hook_registry = ai.HookRegistry()
+    approval_hook = proto.ApprovalHook.wait(
+        token=proto.hooks_hook_token(turn_input.session_id)
+    )
 
-    with contextlib.nullcontext():
+    async def mediate(registry: ai.HookRegistry) -> None:
+        # Bridge decisions from one durable hook back into the ai-library hooks.
+        async for decision in approval_hook:
+            for response in decision.responses:
+                ai.resolve_hook(
+                    response.hook_id,
+                    {"granted": response.granted, "reason": response.reason},
+                    registry=registry,
+                )
+
+    approval_task = asyncio.create_task(mediate(hook_registry))
+    try:
         messages = turn_input.messages
         session_id = turn_input.session_id
         turn_index = turn_input.turn_index
@@ -398,29 +401,11 @@ async def run_turn(
             async with (
                 ai.experimental_telemetry.use_sink(collector),
                 ai.experimental_telemetry.use_span(turn_input.turn_span),
-                agent.run(model, messages) as run,
-                ai.util.TaskGroup() as tg,
+                agent.run(model, messages, hook_registry=hook_registry) as run,
             ):
                 async for event in run:
                     if not isinstance(event, ai.events.StreamEnd):
                         await write_event(writer, event)
-
-                    if (
-                        isinstance(event, ai.events.HookEvent)
-                        and event.hook.status == "pending"
-                        and event.hook.hook_type == ai.agents.TOOL_APPROVAL_HOOK_TYPE
-                        and (tool_call_id := event.hook.tool_call_id) is not None
-                    ):
-                        tg.create_task(
-                            mediate(
-                                proto.ApprovalHook.wait(
-                                    token=proto.approval_hook_token(
-                                        session_id, tool_call_id
-                                    )
-                                ),
-                                event.hook.hook_id,
-                            )
-                        )
 
                 messages = run.messages
         except Exception as error:
@@ -464,3 +449,8 @@ async def run_turn(
 
         # notify session that the turn is complete.
         await resume_turn_hook(proto.turn_hook_token(session_id), output)
+    finally:
+        approval_hook.dispose()
+        approval_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await approval_task

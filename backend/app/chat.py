@@ -106,7 +106,7 @@ async def start_or_resume(session_id: str, prompt: str) -> int:
 async def submit_approvals(
     session_id: str, approvals: list[proto.ToolApprovalResponse]
 ) -> int:
-    """Forward each UI approval decision into its own parked hook.
+    """Forward each UI approval decision into the session's shared hook.
 
     Returns the stream index to tail the continuation from: the next index after
     the park, computed *before* resuming so the continuation can't outrun it. The
@@ -116,11 +116,10 @@ async def submit_approvals(
     run_id = await stream.session_run_id(session_id)
     assert run_id is not None  # approvals only park on a started run
     start_index = await stream.tail_index(run_id) + 1
-    for approval in approvals:
-        await _resume(
-            proto.approval_hook_token(session_id, approval.tool_call_id),
-            proto.ApprovalHook(response=approval),
-        )
+    await _resume(
+        proto.hooks_hook_token(session_id),
+        proto.ApprovalHook(responses=approvals),
+    )
     return start_index
 
 

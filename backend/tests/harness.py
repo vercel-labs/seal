@@ -180,12 +180,12 @@ async def resume_session(token: str, payload: proto.NewUserMessage) -> None:
     await _resume_hook(token, proto.SessionHook(payload=payload))
 
 
-async def resume_approval(
-    session_id: str, response: proto.ToolApprovalResponse
+async def resume_approvals(
+    session_id: str, responses: list[proto.ToolApprovalResponse]
 ) -> None:
     await _resume_hook(
-        proto.approval_hook_token(session_id, response.tool_call_id),
-        proto.ApprovalHook(response=response),
+        proto.hooks_hook_token(session_id),
+        proto.ApprovalHook(responses=responses),
     )
 
 
