@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import traceback
@@ -348,29 +349,6 @@ async def run_turn(
     turn_input: proto.TurnInput,
     writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
 ) -> None:
-    messages = turn_input.messages
-    session_id = turn_input.session_id
-    turn_index = turn_input.turn_index
-
-    # messages should already contain either the user message
-    # or the tool result message, so no need to do anything
-
-    # main turns write to the session stream (handle passed in by the driver);
-    # a subagent turn owns its run's stream and must close it when done.
-    owns_stream = writer is None
-    if writer is None:
-        writer = vercel.workflow.get_writable(type=proto.StreamEvent)
-
-    extra_tools = [bash, subagent] if turn_input.gated else [bash_ungated]
-    agent = DurableAgent(
-        tools=extra_tools,
-        session_id=session_id,
-        writer=writer,
-        turn_span=turn_input.turn_span,
-    )
-    # tool tasks are created under this run's context and inherit this.
-    current_agent.set(agent)
-
     async def mediate(approval_event: Any, hook_id: str) -> None:
         # bridge a durable ApprovalHook back into the ai-library approval hook so
         # the gated tool proceeds in this same agent run.
@@ -384,79 +362,105 @@ async def run_turn(
                 },
             )
 
-    # collect spans that happen inside the workflow body, and send them
-    # once in a separate step.
-    collector = (
-        ai.experimental_telemetry.DictSink()
-        if turn_input.turn_span is not None
-        else None
-    )
-    try:
-        model = ai.get_model(MODEL_ID)
-        async with (
-            ai.experimental_telemetry.use_sink(collector),
-            ai.experimental_telemetry.use_span(turn_input.turn_span),
-            agent.run(model, messages) as run,
-            ai.util.TaskGroup() as tg,
-        ):
-            async for event in run:
-                if not isinstance(event, ai.events.StreamEnd):
-                    await write_event(writer, event)
+    with contextlib.nullcontext():
+        messages = turn_input.messages
+        session_id = turn_input.session_id
+        turn_index = turn_input.turn_index
 
-                if (
-                    isinstance(event, ai.events.HookEvent)
-                    and event.hook.status == "pending"
-                    and event.hook.hook_type == ai.agents.TOOL_APPROVAL_HOOK_TYPE
-                    and (tool_call_id := event.hook.tool_call_id) is not None
-                ):
-                    tg.create_task(
-                        mediate(
-                            proto.ApprovalHook.wait(
-                                token=proto.approval_hook_token(
-                                    session_id, tool_call_id
-                                )
-                            ),
-                            event.hook.hook_id,
+        # messages should already contain either the user message
+        # or the tool result message, so no need to do anything
+
+        # main turns write to the session stream (handle passed in by the driver);
+        # a subagent turn owns its run's stream and must close it when done.
+        owns_stream = writer is None
+        if writer is None:
+            writer = vercel.workflow.get_writable(type=proto.StreamEvent)
+
+        extra_tools = [bash, subagent] if turn_input.gated else [bash_ungated]
+        agent = DurableAgent(
+            tools=extra_tools,
+            session_id=session_id,
+            writer=writer,
+            turn_span=turn_input.turn_span,
+        )
+        # tool tasks are created under this run's context and inherit this.
+        current_agent.set(agent)
+
+        # collect spans that happen inside the workflow body, and send them
+        # once in a separate step.
+        collector = (
+            ai.experimental_telemetry.DictSink()
+            if turn_input.turn_span is not None
+            else None
+        )
+        try:
+            model = ai.get_model(MODEL_ID)
+            async with (
+                ai.experimental_telemetry.use_sink(collector),
+                ai.experimental_telemetry.use_span(turn_input.turn_span),
+                agent.run(model, messages) as run,
+                ai.util.TaskGroup() as tg,
+            ):
+                async for event in run:
+                    if not isinstance(event, ai.events.StreamEnd):
+                        await write_event(writer, event)
+
+                    if (
+                        isinstance(event, ai.events.HookEvent)
+                        and event.hook.status == "pending"
+                        and event.hook.hook_type == ai.agents.TOOL_APPROVAL_HOOK_TYPE
+                        and (tool_call_id := event.hook.tool_call_id) is not None
+                    ):
+                        tg.create_task(
+                            mediate(
+                                proto.ApprovalHook.wait(
+                                    token=proto.approval_hook_token(
+                                        session_id, tool_call_id
+                                    )
+                                ),
+                                event.hook.hook_id,
+                            )
                         )
-                    )
 
-            messages = run.messages
-    except Exception as error:
-        output = proto.TurnOutput(
-            kind="error",
-            messages=messages,
-            error=f"{type(error).__name__}: {error}",
-        )
-        print(
-            f"[seal] error in run_turn:\n{traceback.format_exc()}",
-            flush=True,
-        )
-    else:
-        output = proto.TurnOutput(kind="suspend", messages=messages)
-
-    # deliver the body's collected spans. only complete records ship: a span
-    # still open here would dangle in the shipping process's adapter.
-    if collector is not None:
-        # a copy: the turn span is appended below
-        finished = list(collector.finished_spans)
-        if turn_input.turn_span is not None:
-            # complete the turn span here (pure data ops on workflow time) so
-            # it ships with the rest instead of riding the resume step.
-            turn_span = turn_input.turn_span.stamp_end(
-                error=ai.experimental_telemetry.SpanError(
-                    type="TurnError", message=output.error
-                )
-                if output.kind == "error" and output.error
-                else None
+                messages = run.messages
+        except Exception as error:
+            output = proto.TurnOutput(
+                kind="error",
+                messages=messages,
+                error=f"{type(error).__name__}: {error}",
             )
-            turn_span.set_attrs({"session.id": session_id, "turn_index": turn_index})
-            finished.append(turn_span)
-        if finished:
-            await ship_spans(finished)
+            print(
+                f"[seal] error in run_turn:\n{traceback.format_exc()}",
+                flush=True,
+            )
+        else:
+            output = proto.TurnOutput(kind="suspend", messages=messages)
 
-    if owns_stream:
-        # a subagent turn ends its own stream so readers tailing it terminate.
-        await close_stream(writer)
+        # deliver the body's collected spans. only complete records ship: a span
+        # still open here would dangle in the shipping process's adapter.
+        if collector is not None:
+            # a copy: the turn span is appended below
+            finished = list(collector.finished_spans)
+            if turn_input.turn_span is not None:
+                # complete the turn span here (pure data ops on workflow time) so
+                # it ships with the rest instead of riding the resume step.
+                turn_span = turn_input.turn_span.stamp_end(
+                    error=ai.experimental_telemetry.SpanError(
+                        type="TurnError", message=output.error
+                    )
+                    if output.kind == "error" and output.error
+                    else None
+                )
+                turn_span.set_attrs(
+                    {"session.id": session_id, "turn_index": turn_index}
+                )
+                finished.append(turn_span)
+            if finished:
+                await ship_spans(finished)
 
-    # notify session that the turn is complete.
-    await resume_turn_hook(proto.turn_hook_token(session_id), output)
+        if owns_stream:
+            # a subagent turn ends its own stream so readers tailing it terminate.
+            await close_stream(writer)
+
+        # notify session that the turn is complete.
+        await resume_turn_hook(proto.turn_hook_token(session_id), output)
