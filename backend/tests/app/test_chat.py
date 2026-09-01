@@ -99,6 +99,17 @@ async def test_completed_run_is_not_resumable() -> None:
     assert await chat.active_run_start_index("s1") is None
 
 
+async def test_interrupted_run_is_not_resumable() -> None:
+    await _write(
+        "s1",
+        stream.session_started(),
+        stream.turn_started(turn_index=0),
+        *_text_events("partial"),
+        stream.session_interrupted(),
+    )
+    assert await chat.active_run_start_index("s1") is None
+
+
 async def test_in_flight_run_resumes_from_its_opener() -> None:
     await _write(
         "s1",
@@ -218,6 +229,43 @@ async def test_to_sse_streams_one_turn_and_terminates_at_waiting() -> None:
     assert [delta["delta"] for delta in deltas] == ["hello world"]
     assert lines[-1].startswith("data:")
     assert "[DONE]" in lines[-1]
+
+
+async def test_to_sse_ends_on_interruption() -> None:
+    await _write(
+        "s1",
+        stream.session_started(),
+        stream.turn_started(turn_index=0),
+        *_text_events("partial"),
+        stream.session_interrupted(),
+    )
+    lines = await _collect_sse("s1")
+    deltas = [
+        payload
+        for payload in _sse_payloads(lines)
+        if payload.get("type") == "text-delta"
+    ]
+    assert [delta["delta"] for delta in deltas] == ["partial"]
+    assert "[DONE]" in lines[-1]
+
+
+async def test_interrupt_waits_for_durable_acknowledgement(
+    monkeypatch: Any,
+) -> None:
+    await _write("s1", stream.session_started(), stream.turn_started(turn_index=0))
+    resumed = asyncio.Event()
+
+    async def resume(_hook: proto.InterruptHook, _token: str) -> None:
+        resumed.set()
+
+    monkeypatch.setattr(proto.InterruptHook, "resume", resume)
+    task = asyncio.create_task(chat.interrupt("s1"))
+    await resumed.wait()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    await _write("s1", stream.session_interrupted())
+    await asyncio.wait_for(task, timeout=1)
 
 
 async def test_to_sse_parks_at_a_deferred_approval() -> None:

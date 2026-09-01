@@ -4,6 +4,7 @@ Endpoints:
 
   POST /api/chat                     run a turn, stream the AI SDK UI message stream
   GET  /api/chat/{id}/stream         resume an in-flight stream
+  POST /api/sessions/{id}/interrupt  interrupt the active turn
   GET  /api/sessions                 list sessions
   POST /api/sessions                 create a session
   GET  /api/sessions/{id}            session metadata + UI message history
@@ -123,6 +124,19 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
         chat.to_sse(request.session_id, start_index),
         headers=ai_sdk.UI_MESSAGE_STREAM_HEADERS,
     )
+
+
+@app.post("/api/sessions/{session_id}/interrupt")
+async def interrupt_chat(session_id: str) -> dict[str, str]:
+    try:
+        await chat.interrupt(session_id)
+    except chat.SessionUnavailableError as error:
+        raise fastapi.HTTPException(status_code=409, detail=str(error)) from None
+    except TimeoutError:
+        raise fastapi.HTTPException(
+            status_code=504, detail="Interruption acknowledgement timed out"
+        ) from None
+    return {"status": "interrupted"}
 
 
 @app.get("/api/chat/{session_id}/stream")

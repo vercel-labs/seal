@@ -15,6 +15,7 @@ subprocess.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import itertools
 import random
@@ -96,10 +97,18 @@ class InProcessWorld(wf_local.LocalWorld):
             handler = wf_runtime.workflow_handler
             run_id = getattr(message, "run_id", None) or message.workflow_run_id
             lock = self._locks.setdefault(run_id, asyncio.Lock())
+            # Workflow replays for a run stay serialized, but step deliveries
+            # must run alongside them so a replay can cancel a running
+            # cancellable step.
+            delivery_lock = (
+                contextlib.nullcontext()
+                if getattr(message, "step_id", None) is not None
+                else lock
+            )
             attempt = 1
             while True:
                 async with (
-                    lock,
+                    delivery_lock,
                     # Install a seeded RNG for steps so they get
                     # deterministic IDs also.
                     ai.messages.use_random(self._step_rng),

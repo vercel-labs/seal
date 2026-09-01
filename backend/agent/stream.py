@@ -52,6 +52,10 @@ def session_completed(*, is_error: bool = False) -> proto.LifecycleEvent:
     )
 
 
+def session_interrupted() -> proto.LifecycleEvent:
+    return proto.LifecycleEvent(type=proto.SESSION_INTERRUPTED)
+
+
 def turn_started(*, turn_index: int) -> proto.LifecycleEvent:
     return proto.LifecycleEvent(
         type=proto.TURN_STARTED, data={"turn_index": turn_index}
