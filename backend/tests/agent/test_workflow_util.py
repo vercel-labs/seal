@@ -84,7 +84,8 @@ def test_workflow_class_exposes_its_registered_hooks() -> None:
 
     assert isinstance(turn.run_turn, workflow_util.WorkflowWithHooks)
     assert turn.run_turn.hook_labels("run-1", turn_input) == [
-        proto.hooks_hook_token("s1")
+        proto.hooks_hook_token("s1"),
+        proto.interrupt_hook_token("s1"),
     ]
 
 

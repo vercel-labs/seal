@@ -3,6 +3,8 @@ import contextlib
 import contextvars
 import dataclasses
 import functools
+import os
+import signal
 import traceback
 from collections.abc import (
     AsyncGenerator,
@@ -35,7 +37,7 @@ class EagerToolHook(pydantic.BaseModel, vercel.workflow.BaseHook):
     payload: ai.events.OmitEventMessages[ai.events.ToolEnd]
 
 
-@workflow.step
+@workflow.step(cancellable=True)
 async def llm_step(
     context: ai.Context,
     writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None,
@@ -109,7 +111,7 @@ async def close_stream(
 
 
 @ai.tool(require_approval=True)
-@workflow.step(max_retries=0)
+@workflow.step(max_retries=0, cancellable=True)
 async def bash(command: str, timeout: int | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(
         "bash",
@@ -117,12 +119,19 @@ async def bash(command: str, timeout: int | None = None) -> str:
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        await proc.communicate()
+    except (asyncio.CancelledError, TimeoutError) as error:
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=0.5)
+        except TimeoutError:
+            os.killpg(proc.pid, signal.SIGKILL)
+            await proc.communicate()
+        if isinstance(error, asyncio.CancelledError):
+            raise
         return f"Command timed out after {timeout}s."
 
     output = stdout.decode() if stdout else ""
@@ -139,7 +148,7 @@ bash_ungated = dataclasses.replace(
 
 
 @ai.tool
-@workflow.step
+@workflow.step(cancellable=True)
 async def web_fetch(
     url: str,
     method: str = "GET",
@@ -172,7 +181,7 @@ async def web_fetch(
 
 
 @ai.tool
-@workflow.step
+@workflow.step(cancellable=True)
 async def generate_image(prompt: str) -> ai.messages.ContentOutput:
     """Generate an image from a text prompt. Describe the desired image in
     detail, including subject, style, and composition."""
@@ -267,8 +276,14 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
             name=name,
         ),
     )
-    resolution = await hook
-    hook.dispose()
+    try:
+        resolution = await hook
+    except asyncio.CancelledError:
+        await interrupt_turn(child_session_id)
+        await hook
+        raise
+    finally:
+        hook.dispose()
 
     output = resolution.output
     await write_event(
@@ -296,9 +311,35 @@ async def ship_spans(spans: list[ai.experimental_telemetry.Span]) -> None:
 
 
 @workflow.step
+async def partial_messages(
+    run_id: str,
+    start_index: int,
+    input_messages: list[ai.messages.Message],
+) -> list[ai.messages.Message]:
+    events = [
+        event
+        async for event in stream.replay(run_id, start_index=start_index)
+        if isinstance(event, ai.events.Event)
+    ]
+    return ai_util.recover_partial_messages(input_messages, events)
+
+
+@workflow.step
+async def next_stream_index(
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
+) -> int:
+    return await stream.tail_index(writer.run_id) + 1
+
+
+@workflow.step
 async def resume_turn_hook(token: str, output: proto.TurnOutput) -> None:
     # resume() is a side effect, so it must run in a step.
     await proto.TurnHook(output=output).resume(token)
+
+
+@workflow.step
+async def interrupt_turn(session_id: str) -> None:
+    await proto.InterruptHook().resume(proto.interrupt_hook_token(session_id))
 
 
 class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
@@ -310,6 +351,7 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
     ) -> None:
         self.hook_registry = ai.HookRegistry()
         self.session_id = turn_input.session_id
+        self.run_task: asyncio.Task[proto.TurnOutput] | None = None
 
     @workflow_util.hook(
         proto.ApprovalHook,
@@ -323,26 +365,28 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
                 registry=self.hook_registry,
             )
 
+    @workflow_util.hook(
+        proto.InterruptHook,
+        token=lambda workflow: proto.interrupt_hook_token(workflow.session_id),
+    )
+    async def interrupt(self, _: proto.InterruptHook) -> None:
+        if self.run_task is not None:
+            self.run_task.cancel()
+
     # Draw message/part ids from the workflow's deterministic RNG so they're
     # stable across replay.
     @ai.messages.use_random(vercel.workflow.random)
     @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
-    async def run(
+    async def _run(
         self,
         turn_input: proto.TurnInput,
-        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
-    ) -> None:
+        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
+    ) -> proto.TurnOutput:
         messages = turn_input.messages
         turn_index = turn_input.turn_index
 
         # messages should already contain either the user message
         # or the tool result message, so no need to do anything
-
-        # main turns write to the session stream (handle passed in by the driver);
-        # a subagent turn owns its run's stream and must close it when done.
-        owns_stream = writer is None
-        if writer is None:
-            writer = vercel.workflow.get_writable(type=proto.StreamEvent)
 
         tools = [web_fetch, generate_image]
         tools += [bash, subagent] if turn_input.gated else [bash_ungated]
@@ -423,6 +467,31 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
                 finished.append(turn_span)
             if finished:
                 await ship_spans(finished)
+
+        return output
+
+    async def run(
+        self,
+        turn_input: proto.TurnInput,
+        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
+    ) -> None:
+        owns_stream = writer is None
+        if writer is None:
+            writer = vercel.workflow.get_writable(type=proto.StreamEvent)
+        stream_start_index = await next_stream_index(writer)
+
+        self.run_task = asyncio.create_task(self._run(turn_input, writer))
+        try:
+            output = await self.run_task
+        except asyncio.CancelledError:
+            output = proto.TurnOutput(
+                kind="interrupted",
+                messages=await partial_messages(
+                    writer.run_id,
+                    stream_start_index,
+                    turn_input.messages,
+                ),
+            )
 
         if owns_stream:
             # a subagent turn ends its own stream so readers tailing it terminate.

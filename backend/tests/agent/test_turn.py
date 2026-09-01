@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import ai
 import ai.types.messages as messages_
+
+from agent import turn
 
 
 def _assistant_with_tool_calls() -> messages_.Message:
@@ -48,6 +52,13 @@ def test_round_trip_preserves_replay_and_cached_result() -> None:
     assert by_id["tc-2"].cached_result is None
     # the visible content is untouched
     assert restored.model_dump(mode="json") == message.model_dump(mode="json")
+
+
+def test_model_and_tool_steps_are_cancellable() -> None:
+    assert turn.llm_step.cancellable
+    assert cast(Any, turn.bash.fn).cancellable
+    assert cast(Any, turn.web_fetch.fn).cancellable
+    assert cast(Any, turn.generate_image.fn).cancellable
 
 
 def test_round_trip_of_plain_message_stays_plain() -> None:

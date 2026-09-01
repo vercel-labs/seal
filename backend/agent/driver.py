@@ -43,7 +43,6 @@ async def save_session(
 async def run_session(session_input: proto.SessionInput) -> None:
     # prepare the session
     session_id = session_input.session_id
-
     # the session's event stream is this run's workflow stream; the handle is
     # writable inside steps and rides TurnInput into the turn workflows.
     writer = vercel.workflow.get_writable(type=proto.StreamEvent)
@@ -82,9 +81,14 @@ async def run_session(session_input: proto.SessionInput) -> None:
         state.messages = turn_result.messages
         await save_session(state, state_writer)
 
-        # A failed turn should not destroy the session. Park for another user
-        # message just like a successful turn.
-        await turn.write_event(writer, stream.session_waiting(turn_index=turn_index))
+        # A failed or interrupted turn should not destroy the session. Park for
+        # another user message after publishing the terminal UI boundary.
+        if turn_result.kind == "interrupted":
+            await turn.write_event(writer, stream.session_interrupted())
+        else:
+            await turn.write_event(
+                writer, stream.session_waiting(turn_index=turn_index)
+            )
         resolution = await session_hook
         state.messages.append(ai.user_message(resolution.payload.prompt))
 
