@@ -31,9 +31,8 @@ import ai
 import ai.ui.ai_sdk as ai_sdk
 import ai.ui.ai_sdk.outbound_stream as outbound_stream
 import ai.ui.ai_sdk.ui_events as ui_events
-import vercel.workflow
 
-from agent import driver, proto, stream, util
+from agent import driver, proto, stream, workflow_util
 
 _TERMINAL = {proto.SESSION_WAITING, proto.SESSION_COMPLETED, proto.SESSION_FAILED}
 
@@ -84,21 +83,17 @@ async def start_or_resume(session_id: str, prompt: str) -> int:
     if run_id is None:
         # no turn hook: start the session, then wait for the workflow to publish
         # the hook that identifies its run before the response starts tailing it.
-        await vercel.workflow.start(
-            driver.run_session,
+        await workflow_util.start(
+            workflow_util.with_hooks(
+                driver.run_session, [proto.turn_hook_token(session_id)]
+            ),
             proto.SessionInput(session_id=session_id, prompt=prompt),
         )
-        async for _ in util.hook_retries():
-            if await stream.session_run_id(session_id) is not None:
-                return 0
-        raise RuntimeError(
-            f"session workflow did not register its turn hook: {session_id}"
-        )
+        return 0
 
     start_index = await stream.tail_index(run_id) + 1
-    await _resume(
-        proto.session_hook_token(session_id),
-        proto.SessionHook(payload=proto.NewUserMessage(prompt=prompt)),
+    await proto.SessionHook(payload=proto.NewUserMessage(prompt=prompt)).resume(
+        proto.session_hook_token(session_id)
     )
     return start_index
 
@@ -116,9 +111,8 @@ async def submit_approvals(
     run_id = await stream.session_run_id(session_id)
     assert run_id is not None  # approvals only park on a started run
     start_index = await stream.tail_index(run_id) + 1
-    await _resume(
-        proto.hooks_hook_token(session_id),
-        proto.ApprovalHook(responses=approvals),
+    await proto.ApprovalHook(responses=approvals).resume(
+        proto.hooks_hook_token(session_id)
     )
     return start_index
 
@@ -275,14 +269,3 @@ def _upsert(messages: list[ai.messages.Message], message: ai.messages.Message) -
             messages[index] = message
             return
     messages.append(message)
-
-
-async def _resume(token: str, hook: vercel.workflow.BaseHook) -> None:
-    """Resolve a workflow hook, retrying while the driver registers it."""
-    async for last_attempt in util.hook_retries():
-        try:
-            await hook.resume(token)
-            return
-        except vercel.workflow.HookNotFoundError:
-            if last_attempt:
-                raise

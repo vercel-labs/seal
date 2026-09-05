@@ -4,6 +4,7 @@ import vercel.workflow
 import agent.proto as proto
 import agent.stream as stream
 import agent.turn as turn
+import agent.workflow_util as workflow_util
 from agent import workflow
 
 
@@ -21,7 +22,13 @@ async def spawn_turn_workflow(
         turn_span = ai.experimental_telemetry.create_span("turn").stamp_start()
         turn_span.set_attrs({"openinference.span.kind": "AGENT"})
         turn_input = turn_input.model_copy(update={"turn_span": turn_span})
-    started = await vercel.workflow.start(turn.run_turn, turn_input, writer)
+    started = await workflow_util.start(
+        workflow_util.with_hooks(
+            turn.run_turn, [proto.hooks_hook_token(turn_input.session_id)]
+        ),
+        turn_input,
+        writer,
+    )
     return started.run_id
 
 
