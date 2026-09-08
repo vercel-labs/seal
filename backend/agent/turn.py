@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import contextvars
 import dataclasses
 import traceback
@@ -190,12 +189,7 @@ async def spawn_subagent_turn(
         ).stamp_start()
         turn_span.set_attrs({"openinference.span.kind": "AGENT"})
         turn_input = turn_input.model_copy(update={"turn_span": turn_span})
-    started = await workflow_util.start(
-        workflow_util.with_hooks(
-            run_turn, [proto.hooks_hook_token(turn_input.session_id)]
-        ),
-        turn_input,
-    )
+    started = await workflow_util.start(run_turn, turn_input)
     return started.run_id
 
 
@@ -335,36 +329,38 @@ async def resume_turn_hook(token: str, output: proto.TurnOutput) -> None:
     await proto.TurnHook(output=output).resume(token)
 
 
-# runs one agent turn, routing all gated approvals through one durable hook
-@workflow.workflow
-# Draw message/part ids from the workflow's deterministic RNG so they're
-# stable across replay. ``vercel.workflow.random`` is a factory resolved on
-# entry (only valid inside the workflow).
-@ai.messages.use_random(vercel.workflow.random)
-@ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
-async def run_turn(
-    turn_input: proto.TurnInput,
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
-) -> None:
-    hook_registry = ai.HookRegistry()
-    approval_hook = proto.ApprovalHook.wait(
-        token=proto.hooks_hook_token(turn_input.session_id)
+class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
+    @workflow_util.init
+    def __init__(
+        self,
+        turn_input: proto.TurnInput,
+        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
+    ) -> None:
+        self.hook_registry = ai.HookRegistry()
+        self.session_id = turn_input.session_id
+
+    @workflow_util.hook(
+        proto.ApprovalHook,
+        token=lambda workflow: proto.hooks_hook_token(workflow.session_id),
     )
+    async def approval(self, decision: proto.ApprovalHook) -> None:
+        for response in decision.responses:
+            ai.resolve_hook(
+                response.hook_id,
+                {"granted": response.granted, "reason": response.reason},
+                registry=self.hook_registry,
+            )
 
-    async def mediate(registry: ai.HookRegistry) -> None:
-        # Bridge decisions from one durable hook back into the ai-library hooks.
-        async for decision in approval_hook:
-            for response in decision.responses:
-                ai.resolve_hook(
-                    response.hook_id,
-                    {"granted": response.granted, "reason": response.reason},
-                    registry=registry,
-                )
-
-    approval_task = asyncio.create_task(mediate(hook_registry))
-    try:
+    # Draw message/part ids from the workflow's deterministic RNG so they're
+    # stable across replay.
+    @ai.messages.use_random(vercel.workflow.random)
+    @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
+    async def run(
+        self,
+        turn_input: proto.TurnInput,
+        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
+    ) -> None:
         messages = turn_input.messages
-        session_id = turn_input.session_id
         turn_index = turn_input.turn_index
 
         # messages should already contain either the user message
@@ -379,7 +375,7 @@ async def run_turn(
         extra_tools = [bash, subagent] if turn_input.gated else [bash_ungated]
         agent = DurableAgent(
             tools=extra_tools,
-            session_id=session_id,
+            session_id=self.session_id,
             writer=writer,
             turn_span=turn_input.turn_span,
         )
@@ -398,7 +394,11 @@ async def run_turn(
             async with (
                 ai.experimental_telemetry.use_sink(collector),
                 ai.experimental_telemetry.use_span(turn_input.turn_span),
-                agent.run(model, messages, hook_registry=hook_registry) as run,
+                agent.run(
+                    model,
+                    messages,
+                    hook_registry=self.hook_registry,
+                ) as run,
             ):
                 async for event in run:
                     if not isinstance(event, ai.events.StreamEnd):
@@ -434,7 +434,7 @@ async def run_turn(
                     else None
                 )
                 turn_span.set_attrs(
-                    {"session.id": session_id, "turn_index": turn_index}
+                    {"session.id": self.session_id, "turn_index": turn_index}
                 )
                 finished.append(turn_span)
             if finished:
@@ -445,9 +445,8 @@ async def run_turn(
             await close_stream(writer)
 
         # notify session that the turn is complete.
-        approval_hook.dispose()
-        await resume_turn_hook(proto.turn_hook_token(session_id), output)
-    finally:
-        approval_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await approval_task
+        self.dispose_all()
+        await resume_turn_hook(proto.turn_hook_token(self.session_id), output)
+
+
+run_turn = TurnWorkflow.registered_workflow()
