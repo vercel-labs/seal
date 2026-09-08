@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import inspect
 import types
+import unittest.mock
 from typing import Any, cast
 
 import pytest
 import vercel.workflow
 
+import agent
 import agent.driver as driver
 import agent.proto as proto
+import agent.turn as turn
 import agent.workflow_util as workflow_util
+
+
+class ExampleWorkflow(workflow_util.WorkflowClass, registry=agent.workflow):
+    async def run(self) -> None:
+        return None
+
+
+class AbstractWorkflow(workflow_util.WorkflowClass, registry=agent.workflow):
+    pass
 
 
 def fake_run(run_id: str, status: str = "running") -> vercel.workflow.Run[None]:
@@ -19,6 +32,25 @@ def fake_run(run_id: str, status: str = "running") -> vercel.workflow.Run[None]:
         vercel.workflow.Run[None],
         types.SimpleNamespace(run_id=run_id, status=get_status),
     )
+
+
+def test_subclass_registers_hook_aware_workflow() -> None:
+    registered = ExampleWorkflow.registered_workflow()
+
+    assert registered.workflow.workflow_id.endswith("ExampleWorkflow.workflow")
+    assert registered.hook_labels("run-1") == []
+    assert inspect.isabstract(AbstractWorkflow)
+
+
+def test_dispose_all_disposes_hooks() -> None:
+    instance = ExampleWorkflow()
+    hook = unittest.mock.Mock(spec=vercel.workflow.HookEvent)
+    instance._active_hooks = [hook]
+
+    instance.dispose_all()
+    instance.dispose_all()
+
+    hook.dispose.assert_called_once_with()
 
 
 def test_with_hooks_accepts_static_or_generated_labels() -> None:
@@ -45,6 +77,15 @@ def test_with_hooks_collapses_existing_hook_wrapper() -> None:
     assert combined.workflow is driver.run_session
     assert combined.hook_labels("run-1", session_input) == ["one", "run-1:hello"]
     assert combined.timeout == 5
+
+
+def test_workflow_class_exposes_its_registered_hooks() -> None:
+    turn_input = proto.TurnInput(session_id="s1", messages=[])
+
+    assert isinstance(turn.run_turn, workflow_util.WorkflowWithHooks)
+    assert turn.run_turn.hook_labels("run-1", turn_input) == [
+        proto.hooks_hook_token("s1")
+    ]
 
 
 async def test_start_passes_through_plain_workflow(
