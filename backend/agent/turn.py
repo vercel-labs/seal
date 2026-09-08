@@ -448,9 +448,9 @@ async def run_turn(
             await close_stream(writer)
 
         # notify session that the turn is complete.
+        approval_hook.dispose()
         await resume_turn_hook(proto.turn_hook_token(session_id), output)
     finally:
-        approval_hook.dispose()
         approval_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await approval_task
