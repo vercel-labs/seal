@@ -6,14 +6,6 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi[standard]>=0.115.0",
     "vercel>=0.9.0",
-    "vercel-cache",
-    "vercel-headers",
-    "vercel-internal-core",
-    "vercel-internal-telemetry",
-    "vercel-oidc",
-    "vercel-queue",
-    "vercel-sandbox",
-    "vercel-workflow",
     "asyncpg>=0.29.0",
     "httpx>=0.28.1",
     "ai[otel]>=0.4.1",
@@ -51,6 +43,16 @@ timeout = 30
 [tool.uv]
 exclude-newer = "2 days"
 exclude-newer-package = { ai = false, vercel = false, vercel-cache = false, vercel-headers = false, vercel-internal-telemetry = false, vercel-oidc = false }
+override-dependencies = [
+    "vercel-cache",
+    "vercel-headers",
+    "vercel-internal-core",
+    "vercel-internal-telemetry",
+    "vercel-oidc",
+    "vercel-queue",
+    "vercel-sandbox",
+    "vercel-workflow",
+]
 
 [tool.uv.sources]
 ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
