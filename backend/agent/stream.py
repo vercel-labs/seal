@@ -13,15 +13,12 @@ from __future__ import annotations
 
 import collections.abc
 import contextlib
-import datetime
-from typing import Any
 
 import vercel.workflow
 
 from agent import proto
 
 __all__ = [
-    "dump_event",
     "get_readable",
     "read_session",
     "replay",
@@ -94,28 +91,16 @@ def reload_requested() -> proto.LifecycleEvent:
     return proto.LifecycleEvent(type=proto.RELOAD_REQUESTED)
 
 
-def dump_event(event: proto.StreamEvent) -> dict[str, Any]:
-    """The JSON dict an event is written to the stream as.
-
-    Events go on the wire as plain JSON dicts (validated back through
-    ``proto.STREAM_EVENT_ADAPTER`` on read) rather than model instances, so
-    the workflow serializer needs no registration for the ai event types.
-    """
-    data = event.model_dump(mode="json")
-    # stamp the dump, not the caller's event
-    if isinstance(event, proto.LifecycleEvent) and event.at is None:
-        data["at"] = datetime.datetime.now(datetime.UTC).isoformat()
-    return data
-
-
 async def get_readable(
     run_id: str, *, start_index: int = 0
 ) -> collections.abc.AsyncIterator[proto.StreamEvent]:
     """Tail a run's event stream from ``start_index`` until it is closed."""
-    source = vercel.workflow.Run(run_id).readable(start_index=start_index)
+    source = vercel.workflow.Run(run_id).readable(
+        type=proto.StreamEvent, start_index=start_index
+    )
     async with contextlib.aclosing(source):
-        async for data in source:
-            yield proto.STREAM_EVENT_ADAPTER.validate_python(data)
+        async for event in source:
+            yield event
 
 
 async def session_run_id(session_id: str) -> str | None:
@@ -131,14 +116,16 @@ async def session_run_id(session_id: str) -> str | None:
 
 async def read_session(run_id: str) -> proto.SessionState | None:
     """Return the latest snapshot for the session run, or ``None`` if absent."""
-    run: vercel.workflow.Run[Any] = vercel.workflow.Run(run_id)
+    run: vercel.workflow.Run[object] = vercel.workflow.Run(run_id)
     tail = (await run.stream_info(namespace=SESSION_NAMESPACE)).tail_index
     if tail < 0:
         return None
-    source = run.readable(namespace=SESSION_NAMESPACE, start_index=tail)
+    source = run.readable(
+        type=proto.SessionState, namespace=SESSION_NAMESPACE, start_index=tail
+    )
     async with contextlib.aclosing(source):
-        async for data in source:
-            return proto.SessionState.model_validate(data)
+        async for state in source:
+            return state
     return None
 
 
@@ -152,14 +139,14 @@ async def replay(
     run_id: str, *, start_index: int = 0
 ) -> collections.abc.AsyncIterator[proto.StreamEvent]:
     """Yield already-written events once, without tailing for new ones."""
-    run: vercel.workflow.Run[Any] = vercel.workflow.Run(run_id)
+    run: vercel.workflow.Run[object] = vercel.workflow.Run(run_id)
     remaining = (await run.stream_info()).tail_index - start_index + 1
     if remaining <= 0:
         return
-    source = run.readable(start_index=start_index)
+    source = run.readable(type=proto.StreamEvent, start_index=start_index)
     async with contextlib.aclosing(source):
-        async for data in source:
-            yield proto.STREAM_EVENT_ADAPTER.validate_python(data)
+        async for event in source:
+            yield event
             remaining -= 1
             if remaining == 0:
                 return

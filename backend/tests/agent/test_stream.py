@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import ai.types.events as events_
+import stream_codec
 import vercel.workflow._internal.streams as wf_streams
 import vercel.workflow._internal.world as wf_world
 
@@ -22,9 +23,8 @@ async def _write(run_id: str, *events: proto.StreamEvent) -> None:
     world = wf_world.get_world()
     name = wf_streams.workflow_run_stream_id(run_id)
     for event in events:
-        await world.streams_write(
-            run_id, name, wf_streams.encode_value(stream.dump_event(event))
-        )
+        data = stream_codec.adapter.dump_python(event, mode="json")
+        await world.streams_write(run_id, name, wf_streams.encode_value(data))
 
 
 async def _close(run_id: str) -> None:
@@ -104,17 +104,6 @@ async def test_tail_index_tracks_writes() -> None:
     assert await stream.tail_index("r1") == 0
     await _write("r1", events_.TextDelta(block_id="b", chunk="b"))
     assert await stream.tail_index("r1") == 1
-
-
-async def test_lifecycle_events_are_stamped_on_write() -> None:
-    # workflow bodies can't call datetime.now(); the dump seam stamps ``at``.
-    await _write("r1", stream.session_started())
-    await _close("r1")
-
-    [event] = await _collect("r1")
-    assert isinstance(event, proto.LifecycleEvent)
-    assert event.type == proto.SESSION_STARTED
-    assert event.at is not None
 
 
 async def test_agent_events_pass_through_unchanged() -> None:

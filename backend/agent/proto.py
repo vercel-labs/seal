@@ -101,13 +101,6 @@ class LifecycleEvent(pydantic.BaseModel):
     kind: Literal["lifecycle"] = "lifecycle"
     type: str
     data: dict[str, Any] = pydantic.Field(default_factory=dict)
-    # ISO 8601 UTC string. None when constructed inside a workflow body
-    # (datetime is sandbox-restricted); stamped by the write function.
-    at: str | None = None
 
 
 type StreamEvent = ai.events.AgentEvent | LifecycleEvent
-
-STREAM_EVENT_ADAPTER: pydantic.TypeAdapter[StreamEvent] = pydantic.TypeAdapter(
-    StreamEvent
-)

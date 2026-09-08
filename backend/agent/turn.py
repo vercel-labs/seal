@@ -37,7 +37,7 @@ class EagerToolHook(pydantic.BaseModel, vercel.workflow.BaseHook):
 @workflow.step
 async def llm_step(
     context: ai.Context,
-    writer: vercel.workflow.WorkflowWritable | None,
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None,
     tool_token: str | None = None,
     turn_span: ai.experimental_telemetry.Span | None = None,
 ) -> ai.messages.Message:
@@ -46,7 +46,7 @@ async def llm_step(
     # On a retry, emit a message requesting a reload. The will trigger
     # the client to drop everything from the last step.
     if writer is not None and metadata.attempt > 1:
-        await writer.write(stream.dump_event(stream.reload_requested()))
+        await writer.write(stream.reload_requested())
 
     # parent this step's spans under the turn's span
     async with (
@@ -58,7 +58,7 @@ async def llm_step(
                 continue
 
             if writer is not None:
-                await writer.write(stream.dump_event(e))
+                await writer.write(e)
             if tool_token and isinstance(e, ai.types.events.ToolEnd):
                 await EagerToolHook(payload=e.tool_call).resume(tool_token)
 
@@ -69,15 +69,17 @@ async def llm_step(
 async def write_event(
     # writes one stream event (agent or lifecycle) to the durable stream.
     # the handle passed in arrives here as a live writer.
-    writer: vercel.workflow.WorkflowWritable,
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
     event: proto.StreamEvent,
 ) -> None:
-    await writer.write(stream.dump_event(event))
+    await writer.write(event)
 
 
 # closes a durable event stream once the owning session is terminal.
 @workflow.step
-async def close_stream(writer: vercel.workflow.WorkflowWritable) -> None:
+async def close_stream(
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
+) -> None:
     await writer.close()
 
 
@@ -264,7 +266,7 @@ class DurableAgent(ai.Agent):
         *,
         tools: Sequence[ai.AgentTool | ai.Tool] | None = None,
         session_id: str | None = None,
-        writer: vercel.workflow.WorkflowWritable | None = None,
+        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
         turn_span: ai.experimental_telemetry.Span | None = None,
     ) -> None:
         super().__init__(tools=tools)
@@ -345,7 +347,7 @@ async def resume_turn_hook(token: str, output: proto.TurnOutput) -> None:
 @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
 async def run_turn(
     turn_input: proto.TurnInput,
-    writer: vercel.workflow.WorkflowWritable | None = None,
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
 ) -> None:
     messages = turn_input.messages
     session_id = turn_input.session_id
@@ -358,7 +360,7 @@ async def run_turn(
     # a subagent turn owns its run's stream and must close it when done.
     owns_stream = writer is None
     if writer is None:
-        writer = vercel.workflow.get_writable()
+        writer = vercel.workflow.get_writable(type=proto.StreamEvent)
 
     extra_tools = [bash, subagent] if turn_input.gated else [bash_ungated]
     agent = DurableAgent(

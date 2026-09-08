@@ -13,6 +13,7 @@ from typing import Any
 import ai
 import ai.types.events as events_
 import ai.types.messages as messages_
+import stream_codec
 
 from agent import proto
 
@@ -71,16 +72,14 @@ def test_stream_events_round_trip() -> None:
         _hook_event(),
     ]
     for event in events:
-        restored = proto.STREAM_EVENT_ADAPTER.validate_python(
-            event.model_dump(mode="json")
-        )
+        restored = stream_codec.adapter.validate_python(event.model_dump(mode="json"))
         assert type(restored) is type(event), f"{type(event).__name__} changed type"
         assert restored.model_dump(mode="json") == event.model_dump(mode="json")
 
 
 def test_hook_event_round_trip_keeps_approval_fields() -> None:
     """run_turn rebuilds approval requests from these fields after replay."""
-    restored = proto.STREAM_EVENT_ADAPTER.validate_python(
+    restored = stream_codec.adapter.validate_python(
         _hook_event().model_dump(mode="json")
     )
     assert isinstance(restored, events_.HookEvent)

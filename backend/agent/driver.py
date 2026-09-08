@@ -9,7 +9,8 @@ from agent import workflow
 
 @workflow.step(max_retries=0)
 async def spawn_turn_workflow(
-    turn_input: proto.TurnInput, writer: vercel.workflow.WorkflowWritable
+    turn_input: proto.TurnInput,
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
 ) -> str:
     # TODO: making retry for this safe requires cooperation on the workflow side
     # ts docs suggest using a hook and checking uniqueness!
@@ -26,10 +27,11 @@ async def spawn_turn_workflow(
 
 @workflow.step
 async def save_session(
-    state: proto.SessionState, writer: vercel.workflow.WorkflowWritable
+    state: proto.SessionState,
+    writer: vercel.workflow.WorkflowWritable[proto.SessionState],
 ) -> None:
     # appends the current session state as the latest snapshot
-    await writer.write(state.model_dump(mode="json"))
+    await writer.write(state)
 
 
 @workflow.workflow
@@ -43,9 +45,11 @@ async def run_session(session_input: proto.SessionInput) -> None:
 
     # the session's event stream is this run's workflow stream; the handle is
     # writable inside steps and rides TurnInput into the turn workflows.
-    writer = vercel.workflow.get_writable()
+    writer = vercel.workflow.get_writable(type=proto.StreamEvent)
     # session snapshots go on a second, namespaced stream on the same run.
-    state_writer = vercel.workflow.get_writable(namespace=stream.SESSION_NAMESPACE)
+    state_writer = vercel.workflow.get_writable(
+        type=proto.SessionState, namespace=stream.SESSION_NAMESPACE
+    )
     # Stable hooks carry all child-turn results and user messages. The turn
     # hook also lets stream readers discover this workflow's run id.
     turn_hook = proto.TurnHook.wait(token=proto.turn_hook_token(session_id))

@@ -20,6 +20,7 @@ from typing import Any, cast
 import ai
 import ai.types.events as events_
 import ai.types.messages as messages_
+import stream_codec
 import vercel.workflow._internal.serialization as wf_serialization
 import vercel.workflow._internal.streams as wf_streams
 import vercel.workflow._internal.world as wf_world
@@ -59,9 +60,8 @@ async def _write_run(run_id: str, *events: proto.StreamEvent) -> None:
     world = wf_world.get_world()
     name = wf_streams.workflow_run_stream_id(run_id)
     for event in events:
-        await world.streams_write(
-            run_id, name, wf_streams.encode_value(stream.dump_event(event))
-        )
+        data = stream_codec.adapter.dump_python(event, mode="json")
+        await world.streams_write(run_id, name, wf_streams.encode_value(data))
 
 
 async def _write(session_id: str, *events: proto.StreamEvent) -> None:
