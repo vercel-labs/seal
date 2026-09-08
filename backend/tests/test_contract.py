@@ -35,7 +35,7 @@ from typing import Any
 import ai
 import ai.types.messages as messages_
 import ai.ui.ai_sdk as ai_sdk
-import httpx
+import httpx2
 import pytest
 from conftest import MockProvider, assert_message_invariants, text_msg
 from harness import (
@@ -119,8 +119,10 @@ async def _capture_run(
     # GET /sessions/{id} endpoint (which also rebuilds subagent MessageBundles
     # into the nested UIMessage shape — server-side logic this test covers).
     await sessions.create_session(session_id)
-    transport = httpx.ASGITransport(app=server.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=server.app)
+    async with httpx2.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as client:
         response = await client.get(f"/api/sessions/{session_id}")
     assert response.status_code == 200
     ui_messages: list[dict[str, Any]] = response.json()["messages"]

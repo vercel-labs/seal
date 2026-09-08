@@ -121,7 +121,7 @@ async def web_fetch(
     headers: str = "",
     body: str = "",
 ) -> str:
-    import httpx
+    import httpx2
 
     parsed_headers: dict[str, str] = {}
     for line in headers.strip().splitlines():
@@ -129,7 +129,7 @@ async def web_fetch(
             key, value = line.split(":", 1)
             parsed_headers[key.strip()] = value.strip()
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+    async with httpx2.AsyncClient(follow_redirects=True, timeout=30) as client:
         response = await client.request(
             method,
             url,
