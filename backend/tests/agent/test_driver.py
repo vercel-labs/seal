@@ -33,6 +33,9 @@ from harness import (
     start_session as _start,
 )
 from harness import (
+    wait_for_event as _wait_for_event,
+)
+from harness import (
     wait_for_hook as _wait_for_hook,
 )
 from harness import (
@@ -132,9 +135,9 @@ async def test_gated_tool_approval_runs_in_one_turn(
     ]
 
     await _start("s1", "run it")
-    # the turn parks on the approval hook and emits tool_approval.requested; the
-    # gated tool has not run yet, so the model was called exactly once.
-    await _wait_for_lifecycle("s1", proto.TOOL_APPROVAL_REQUESTED)
+    # The turn parks on the approval hook; the gated tool has not run yet, so
+    # the model was called exactly once.
+    await _wait_for_event("s1", ai.events.RunBlocked)
     assert scripted_model.call_count == 1
 
     await _resume_approval(
@@ -159,14 +162,6 @@ async def test_gated_tool_approval_runs_in_one_turn(
     assert_message_invariants(state.messages)
     # one model call for the gated turn, one more for the final answer
     assert scripted_model.call_count == 2
-
-    # the whole exchange is a single turn that parked once on the approval.
-    assert await _lifecycle("s1") == [
-        proto.SESSION_STARTED,
-        proto.TURN_STARTED,
-        proto.TOOL_APPROVAL_REQUESTED,
-        proto.SESSION_WAITING,
-    ]
 
 
 async def test_parallel_gated_tools_park_then_run(
@@ -196,7 +191,7 @@ async def test_parallel_gated_tools_park_then_run(
 
     await _start("s2", "run both")
     # both gated calls park on their own hook before the turn parks.
-    await _wait_for_lifecycle("s2", proto.TOOL_APPROVAL_REQUESTED)
+    await _wait_for_event("s2", ai.events.RunBlocked)
     assert scripted_model.call_count == 1
 
     await _resume_approval(
@@ -214,7 +209,6 @@ async def test_parallel_gated_tools_park_then_run(
     assert results == {"tc-a": "a\n", "tc-b": "b\n"}
     assert_message_invariants(state.messages)
     assert scripted_model.call_count == 2
-    assert proto.TOOL_APPROVAL_REQUESTED in await _lifecycle("s2")
 
 
 async def test_subagent_result_lands_on_the_trailing_tool_message(

@@ -141,7 +141,7 @@ async def test_run_parked_on_approval_is_resumable_from_run_start() -> None:
         stream.session_started(),
         stream.turn_started(turn_index=0),
         *_text_events("need approval"),
-        stream.tool_approval_requested(),
+        events_.RunBlocked(),
     )
     assert await chat.active_run_start_index("s1") == 0
 
@@ -249,7 +249,7 @@ async def test_to_sse_parks_at_a_deferred_approval() -> None:
         events_.HookEvent(
             message=ai.messages.Message(role="internal", parts=[hook]), hook=hook
         ),
-        stream.tool_approval_requested(),
+        events_.RunBlocked(hooks=(hook,)),
     )
     lines = await _collect_sse("s1")
 

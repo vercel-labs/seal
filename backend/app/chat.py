@@ -185,15 +185,15 @@ async def _turn_events(
     run_id = await stream.session_run_id(session_id)
     assert run_id is not None  # both endpoints guarantee the run has started
     async for event in stream.get_readable(run_id, start_index=start_index):
+        if isinstance(event, ai.events.RunBlocked):
+            yield event
+            return
         if not isinstance(event, proto.LifecycleEvent):
             yield event  # ai.events.AgentEvent
             continue
 
         if event.type == proto.SUBAGENT_CALLED:
             children.append(asyncio.create_task(_pump_subagent(event, queue)))
-        elif event.type == proto.TOOL_APPROVAL_REQUESTED:
-            # turn parks until the human responds on the next /chat request.
-            return
         elif event.type == proto.RELOAD_REQUESTED:
             # Tell the client to discard the current step, then keep reading so
             # events from the retried step can use the same connection.

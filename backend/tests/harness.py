@@ -158,6 +158,24 @@ async def wait_for_lifecycle(
     await asyncio.wait_for(watch(), timeout)
 
 
+async def wait_for_event(
+    session_id: str, event_type: type[Any], *, count: int = 1, timeout: float = 30
+) -> None:
+    async def watch() -> None:
+        while True:
+            run_id = await stream.session_run_id(session_id)
+            if run_id is not None:
+                seen = 0
+                async for event in stream.replay(run_id):
+                    if isinstance(event, event_type):
+                        seen += 1
+                        if seen >= count:
+                            return
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(watch(), timeout)
+
+
 async def resume_session(token: str, payload: proto.NewUserMessage) -> None:
     await _resume_hook(token, proto.SessionHook(payload=payload))
 

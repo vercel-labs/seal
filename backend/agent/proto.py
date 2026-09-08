@@ -93,7 +93,6 @@ SESSION_FAILED = "session.failed"
 TURN_STARTED = "turn.started"
 SUBAGENT_CALLED = "subagent.called"
 SUBAGENT_COMPLETED = "subagent.completed"
-TOOL_APPROVAL_REQUESTED = "tool_approval.requested"
 RELOAD_REQUESTED = "reload.requested"
 
 

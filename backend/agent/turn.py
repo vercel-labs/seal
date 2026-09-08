@@ -258,6 +258,10 @@ EAGER_TOOLS = {"generate_image", "web_fetch"}
 
 
 class DurableAgent(ai.Agent):
+    # We require the loop to run in lockstep with the client code, so that
+    # tool streams are always sent before the next llm_step invocation.
+    LOOP_BUFFER = 0
+
     # bash is gated/ungated per mode, so it is supplied via tools=, not here.
     TOOLS: ClassVar[list[ai.AgentTool]] = [web_fetch, generate_image]
 
@@ -306,11 +310,6 @@ class DurableAgent(ai.Agent):
                     runner.schedule(tool_call)
 
                 async for event in runner.events():
-                    # write tool-running events from the producer side so they land
-                    # in loop order (results before the next turn's answer); run_turn
-                    # only writes HookEvents, which ride the runtime queue instead.
-                    if self.writer is not None:
-                        await write_event(self.writer, event)
                     yield event
 
                 context.add(runner.get_tool_message())
@@ -401,16 +400,15 @@ async def run_turn(
             ai.util.TaskGroup() as tg,
         ):
             async for event in run:
+                if not isinstance(event, ai.events.StreamEnd):
+                    await write_event(writer, event)
+
                 if (
                     isinstance(event, ai.events.HookEvent)
                     and event.hook.status == "pending"
                     and event.hook.hook_type == ai.agents.TOOL_APPROVAL_HOOK_TYPE
                     and (tool_call_id := event.hook.tool_call_id) is not None
                 ):
-                    # HookEvents ride the runtime queue, not runner.events(),
-                    # so the loop never wrote this; write it here so the UI
-                    # gets the approval request part.
-                    await write_event(writer, event)
                     tg.create_task(
                         mediate(
                             proto.ApprovalHook.wait(
@@ -420,13 +418,6 @@ async def run_turn(
                             ),
                             event.hook.hook_id,
                         )
-                    )
-                elif isinstance(event, ai.events.RunBlocked):
-                    # the run is blocked on approvals; tell the client we're
-                    # waiting on a human.
-                    await write_event(
-                        writer,
-                        stream.tool_approval_requested(),
                     )
 
             messages = run.messages

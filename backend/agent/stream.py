@@ -79,11 +79,6 @@ def subagent_completed(*, tool_call_id: str, is_error: bool) -> proto.LifecycleE
     )
 
 
-def tool_approval_requested() -> proto.LifecycleEvent:
-    # the turn parked: every scheduled tool has finished or is awaiting approval.
-    return proto.LifecycleEvent(type=proto.TOOL_APPROVAL_REQUESTED)
-
-
 def reload_requested() -> proto.LifecycleEvent:
     # a retried step just wiped its own aborted first attempt's partial
     # output; a client that already streamed that output needs to reload

@@ -42,6 +42,7 @@ from harness import (
     InProcessWorld,
     read_state,
     start_session,
+    wait_for_event,
     wait_for_lifecycle,
 )
 
@@ -99,7 +100,7 @@ def _assistant(text: str, *calls: tuple[str, str, str]) -> messages_.Message:
 
 
 async def _capture_run(
-    session_id: str, prompt: str, park_event: str
+    session_id: str, prompt: str, park_event: str | type[Any]
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Start a session, stream it like a POST /chat would, run until parked."""
     await start_session(session_id, prompt)
@@ -108,7 +109,10 @@ async def _capture_run(
         return [line async for line in chat.to_sse(session_id, 0)]
 
     capture = asyncio.create_task(collect())
-    await wait_for_lifecycle(session_id, park_event)
+    if isinstance(park_event, str):
+        await wait_for_lifecycle(session_id, park_event)
+    else:
+        await wait_for_event(session_id, park_event)
     sse = await asyncio.wait_for(capture, 10)
 
     # the history exactly as the UI receives it on reload: through the real
@@ -199,7 +203,7 @@ async def test_parallel_approvals(
     ]
 
     sse, ui_messages = await _capture_run(
-        "s1", "run both commands", proto.TOOL_APPROVAL_REQUESTED
+        "s1", "run both commands", ai.events.RunBlocked
     )
 
     _check_or_update("parallel-approvals", sse, ui_messages)
@@ -278,7 +282,7 @@ async def test_mixed_subagents_and_approvals(
     scripted_model.keyed_responses = {"task-gamma": [text_msg("gamma report")]}
 
     sse, ui_messages = await _capture_run(
-        "s1", "delegate and run", proto.TOOL_APPROVAL_REQUESTED
+        "s1", "delegate and run", ai.events.RunBlocked
     )
     _check_or_update("mixed-subagents-approvals", sse, ui_messages)
 

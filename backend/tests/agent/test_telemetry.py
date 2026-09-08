@@ -16,6 +16,7 @@ from harness import (
     read_state,
     resume_approval,
     start_session,
+    wait_for_event,
     wait_for_lifecycle,
 )
 
@@ -294,7 +295,7 @@ async def test_gated_tool_approval_with_telemetry(
 
     await start_session("s1", "run it")
     # the approval request must still reach the stream with telemetry on.
-    await wait_for_lifecycle("s1", proto.TOOL_APPROVAL_REQUESTED)
+    await wait_for_event("s1", ai.events.RunBlocked)
 
     await resume_approval(
         "s1", proto.ToolApprovalResponse(tool_call_id="tc-1", granted=True)
