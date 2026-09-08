@@ -74,19 +74,22 @@ def test_with_hooks_collapses_existing_hook_wrapper() -> None:
     )
     session_input = proto.SessionInput(session_id="s1", prompt="hello")
 
-    assert combined.workflow is driver.run_session
+    assert combined.workflow is driver.run_session.workflow
     assert combined.hook_labels("run-1", session_input) == ["one", "run-1:hello"]
     assert combined.timeout == 5
 
 
 def test_workflow_class_exposes_its_registered_hooks() -> None:
     turn_input = proto.TurnInput(session_id="s1", messages=[])
+    session_input = proto.SessionInput(session_id="s1", prompt="hello")
 
     assert isinstance(turn.run_turn, workflow_util.WorkflowWithHooks)
     assert turn.run_turn.hook_labels("run-1", turn_input) == [
         proto.hooks_hook_token("s1"),
         proto.interrupt_hook_token("s1"),
     ]
+    assert isinstance(driver.run_session, workflow_util.WorkflowWithHooks)
+    assert driver.run_session.hook_labels("run-1", session_input) == []
 
 
 async def test_start_passes_through_plain_workflow(
@@ -100,7 +103,7 @@ async def test_start_passes_through_plain_workflow(
     monkeypatch.setattr(vercel.workflow, "start", fake_start)
 
     run = await workflow_util.start(
-        driver.run_session,
+        driver.run_session.workflow,
         proto.SessionInput(session_id="s1", prompt="hello"),
     )
 

@@ -35,64 +35,69 @@ async def save_session(
     await writer.write(state)
 
 
-@workflow.workflow
-# Draw message/part ids from the workflow's deterministic RNG so they're
-# stable across replay.
-@ai.messages.use_random(vercel.workflow.random)
-@ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
-async def run_session(session_input: proto.SessionInput) -> None:
-    # prepare the session
-    session_id = session_input.session_id
-    # the session's event stream is this run's workflow stream; the handle is
-    # writable inside steps and rides TurnInput into the turn workflows.
-    writer = vercel.workflow.get_writable(type=proto.StreamEvent)
-    # session snapshots go on a second, namespaced stream on the same run.
-    state_writer = vercel.workflow.get_writable(
-        type=proto.SessionState, namespace=stream.SESSION_NAMESPACE
-    )
-    # Stable hooks carry all child-turn results and user messages. The turn
-    # hook also lets stream readers discover this workflow's run id.
-    turn_hook = proto.TurnHook.wait(token=proto.turn_hook_token(session_id))
-    session_hook = proto.SessionHook.wait(token=proto.session_hook_token(session_id))
-
-    state = proto.SessionState(
-        session_id=session_id,
-        messages=[
-            ai.system_message(turn.SYSTEM_PROMPT),
-            ai.user_message(session_input.prompt),
-        ],
-    )
-    await save_session(state, state_writer)
-    await turn.write_event(writer, stream.session_started())
-
-    turn_index = 0
-    while True:
-        # run turn workflow and suspend on a hook until it completes
-        await turn.write_event(writer, stream.turn_started(turn_index=turn_index))
-        turn_input = proto.TurnInput(
-            session_id=session_id,
-            messages=state.messages,
-            turn_index=turn_index,
+class SessionWorkflow(workflow_util.WorkflowClass, registry=workflow):
+    # Draw message/part ids from the workflow's deterministic RNG so they're
+    # stable across replay.
+    @ai.messages.use_random(vercel.workflow.random)
+    @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
+    async def run(self, session_input: proto.SessionInput) -> None:
+        # prepare the session
+        session_id = session_input.session_id
+        # the session's event stream is this run's workflow stream; the handle is
+        # writable inside steps and rides TurnInput into the turn workflows.
+        writer = vercel.workflow.get_writable(type=proto.StreamEvent)
+        # session snapshots go on a second, namespaced stream on the same run.
+        state_writer = vercel.workflow.get_writable(
+            type=proto.SessionState, namespace=stream.SESSION_NAMESPACE
         )
-        await spawn_turn_workflow(turn_input, writer)
-        turn_result = (await turn_hook).output
+        # Stable hooks carry all child-turn results and user messages. The turn
+        # hook also lets stream readers discover this workflow's run id.
+        turn_hook = proto.TurnHook.wait(token=proto.turn_hook_token(session_id))
+        session_hook = proto.SessionHook.wait(
+            token=proto.session_hook_token(session_id)
+        )
 
-        # process turn results
-        state.messages = turn_result.messages
+        state = proto.SessionState(
+            session_id=session_id,
+            messages=[
+                ai.system_message(turn.SYSTEM_PROMPT),
+                ai.user_message(session_input.prompt),
+            ],
+        )
         await save_session(state, state_writer)
+        await turn.write_event(writer, stream.session_started())
 
-        # A failed or interrupted turn should not destroy the session. Park for
-        # another user message after publishing the terminal UI boundary.
-        if turn_result.kind == "interrupted":
-            await turn.write_event(writer, stream.session_interrupted())
-        else:
-            await turn.write_event(
-                writer, stream.session_waiting(turn_index=turn_index)
+        turn_index = 0
+        while True:
+            # run turn workflow and suspend on a hook until it completes
+            await turn.write_event(writer, stream.turn_started(turn_index=turn_index))
+            turn_input = proto.TurnInput(
+                session_id=session_id,
+                messages=state.messages,
+                turn_index=turn_index,
             )
-        resolution = await session_hook
-        state.messages.append(ai.user_message(resolution.payload.prompt))
+            await spawn_turn_workflow(turn_input, writer)
+            turn_result = (await turn_hook).output
 
-        # persist post-turn mutations (resume prompt / subagent results) so the
-        # next turn resumes from the latest state after a crash.
-        await save_session(state, state_writer)
-        turn_index += 1
+            # process turn results
+            state.messages = turn_result.messages
+            await save_session(state, state_writer)
+
+            # A failed or interrupted turn should not destroy the session. Park for
+            # another user message after publishing the terminal UI boundary.
+            if turn_result.kind == "interrupted":
+                await turn.write_event(writer, stream.session_interrupted())
+            else:
+                await turn.write_event(
+                    writer, stream.session_waiting(turn_index=turn_index)
+                )
+            resolution = await session_hook
+            state.messages.append(ai.user_message(resolution.payload.prompt))
+
+            # persist post-turn mutations (resume prompt / subagent results) so the
+            # next turn resumes from the latest state after a crash.
+            await save_session(state, state_writer)
+            turn_index += 1
+
+
+run_session = SessionWorkflow.registered_workflow()
