@@ -12,9 +12,9 @@ from __future__ import annotations
 import logging
 import os
 
-# the vercel runtime forces the root logger to INFO, and httpx logs every
+# the vercel runtime forces the root logger to INFO, and httpx2 logs every
 # request at INFO; the worker's constant HTTP traffic makes that unreadable.
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 # every queue delivery is an HTTP POST to this worker, so uvicorn's access log
 # prints a line per step. the dev runtime applies its uvicorn dictConfig *after*
 # importing this module, resetting the logger's level — but dictConfig never
