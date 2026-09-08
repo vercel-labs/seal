@@ -180,6 +180,7 @@ async def _submit_approval_request_fixture(
 
     responses = [
         proto.ToolApprovalResponse(
+            hook_id=approval.hook_id,
             tool_call_id=approval.tool_call_id,
             granted=approval.granted,
             reason=approval.reason,
