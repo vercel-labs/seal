@@ -1,22 +1,9 @@
-import asyncio
 import contextlib
 import functools
 import inspect
 import traceback
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from typing import Any, overload
-
-
-async def hook_retries(
-    retry_count: int = 40, sleep_seconds: float = 0.05
-) -> AsyncIterator[bool]:
-    """Yield hook attempts, marking the last one, with a delay between retries."""
-    if retry_count < 1:
-        raise ValueError("retry_count must be positive")
-    for attempt in range(retry_count):
-        if attempt:
-            await asyncio.sleep(sleep_seconds)
-        yield attempt == retry_count - 1
 
 
 @contextlib.contextmanager

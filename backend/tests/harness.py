@@ -26,7 +26,7 @@ import vercel.workflow._internal.runtime as wf_runtime  # noqa: E402
 import vercel.workflow._internal.worlds.local as wf_local  # noqa: E402
 
 import agent.driver as driver  # noqa: E402
-from agent import proto, stream, util  # noqa: E402
+from agent import proto, stream, workflow_util  # noqa: E402
 
 
 class InProcessWorld(wf_local.LocalWorld):
@@ -122,14 +122,12 @@ class InProcessWorld(wf_local.LocalWorld):
 
 
 async def start_session(session_id: str, prompt: str) -> vercel.workflow.Run[None]:
-    run = await vercel.workflow.start(
-        driver.run_session,
+    return await workflow_util.start(
+        workflow_util.with_hooks(
+            driver.run_session, [proto.turn_hook_token(session_id)]
+        ),
         proto.SessionInput(session_id=session_id, prompt=prompt),
     )
-    async for _ in util.hook_retries(retry_count=100):
-        if await stream.session_run_id(session_id) is not None:
-            return run
-    raise RuntimeError(f"session workflow did not register its turn hook: {session_id}")
 
 
 async def read_state(session_id: str) -> proto.SessionState | None:
@@ -177,35 +175,25 @@ async def wait_for_event(
 
 
 async def resume_session(token: str, payload: proto.NewUserMessage) -> None:
-    await _resume_hook(token, proto.SessionHook(payload=payload))
+    await proto.SessionHook(payload=payload).resume(token)
 
 
 async def resume_approvals(
     session_id: str, responses: list[proto.ToolApprovalResponse]
 ) -> None:
-    await _resume_hook(
-        proto.hooks_hook_token(session_id),
-        proto.ApprovalHook(responses=responses),
+    await proto.ApprovalHook(responses=responses).resume(
+        proto.hooks_hook_token(session_id)
     )
 
 
-async def _resume_hook(token: str, hook: vercel.workflow.BaseHook) -> None:
-    async for last_attempt in util.hook_retries(retry_count=100):
-        try:
-            await hook.resume(token)
-            return
-        except vercel.workflow.HookNotFoundError:
-            if last_attempt:
-                raise
-
-
 async def wait_for_hook(token: str) -> vercel.workflow.Hook:
-    async for last_attempt in util.hook_retries(retry_count=100):
+    for attempt in range(100):
         try:
             return await vercel.workflow.get_hook_by_token(token)
         except vercel.workflow.HookNotFoundError:
-            if last_attempt:
+            if attempt == 99:
                 raise
+            await asyncio.sleep(0.05)
     raise AssertionError("unreachable")
 
 

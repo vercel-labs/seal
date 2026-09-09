@@ -13,7 +13,7 @@ import ai
 import pydantic
 import vercel.workflow
 
-from agent import ai_util, proto, stream, util, workflow
+from agent import ai_util, proto, stream, workflow, workflow_util
 
 MODEL_ID = "gateway:openai/gpt-5.6-luna"
 IMAGE_MODEL_ID = "gateway:google/gemini-3.1-flash-image"
@@ -190,7 +190,12 @@ async def spawn_subagent_turn(
         ).stamp_start()
         turn_span.set_attrs({"openinference.span.kind": "AGENT"})
         turn_input = turn_input.model_copy(update={"turn_span": turn_span})
-    started = await vercel.workflow.start(run_turn, turn_input)
+    started = await workflow_util.start(
+        workflow_util.with_hooks(
+            run_turn, [proto.hooks_hook_token(turn_input.session_id)]
+        ),
+        turn_input,
+    )
     return started.run_id
 
 
@@ -326,16 +331,8 @@ async def ship_spans(spans: list[ai.experimental_telemetry.Span]) -> None:
 
 @workflow.step
 async def resume_turn_hook(token: str, output: proto.TurnOutput) -> None:
-    # resume() is a side effect, so it must run in a step. the driver may not
-    # have parked on the hook yet, so retry while it is missing.
-    hook = proto.TurnHook(output=output)
-    async for last_attempt in util.hook_retries():
-        try:
-            await hook.resume(token)
-            return
-        except vercel.workflow.HookNotFoundError:
-            if last_attempt:
-                raise
+    # resume() is a side effect, so it must run in a step.
+    await proto.TurnHook(output=output).resume(token)
 
 
 # runs one agent turn, routing all gated approvals through one durable hook
