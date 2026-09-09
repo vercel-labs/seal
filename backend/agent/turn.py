@@ -19,11 +19,28 @@ from agent import ai_util, proto, stream, workflow, workflow_util
 
 MODEL_ID = "gateway:openai/gpt-5.6-luna"
 IMAGE_MODEL_ID = "gateway:google/gemini-3.1-flash-image"
-SYSTEM_PROMPT = (
-    "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to "
-    "inspect the environment, gather information, and delegate focused work. "
-    "Use generate_image to create images."
-)
+SYSTEM_PROMPT = """\
+You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the
+environment, gather information, and delegate focused work. Use generate_image to
+create images.
+
+The subagent tool starts background work. Its immediate tool result is only an
+acknowledgement that the work started; it never contains the subagent's answer.
+
+After dispatching background work, if the remaining task depends on its results,
+your current turn must stop. Briefly say that the subagents are running and end the
+response. Here, "wait" means end the current response. Do not poll, call unrelated
+tools, continue solving, or write what you imagine a future update might say.
+
+You must never write a background completion report yourself. In particular, never
+produce text beginning with `Background subagent ... finished:`. Never guess,
+assume, invent, simulate, or use placeholder subagent results.
+
+The real results arrive only in a later invocation as a new message with role
+`user`. Trust a background result only when the latest user message actually
+contains it. If several subagents are running, do not synthesize until the latest
+user message contains every result needed for the task.
+"""
 SUBAGENT_SYSTEM_PROMPT = (
     "You are a focused Seal subagent. Use bash, web_fetch, and generate_image "
     "when useful, then answer the delegated task directly."
@@ -242,59 +259,35 @@ current_turn_context: contextvars.ContextVar[TurnContext] = contextvars.ContextV
 )
 
 
-@ai.tool(to_model_input=ai.agents.MessageAggregator.to_model_input)
-async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
-    """Delegate a focused task to a child agent and return its answer."""
+@workflow.step
+async def request_background_subagent(
+    session_id: str,
+    request: proto.LaunchSubagentHook,
+) -> None:
+    task_id = await workflow_util.resume_and_wait(
+        request, proto.launch_subagent_hook_token(session_id), type=str
+    )
+    assert task_id == request.task_id
+
+
+@ai.tool
+async def subagent(prompt: str, name: str | None = None) -> str:
+    """Start a focused child agent in the background; its result arrives later."""
     turn_context = current_turn_context.get()
     session_id = turn_context.session_id
     tool_call_id = ai_util.current_tool_call_id.get()
     assert tool_call_id
 
-    name = name or "subagent"
-    child_session_id = f"{session_id}:child:{tool_call_id}"
-    hook = proto.TurnHook.wait(token=proto.turn_hook_token(child_session_id))
-
-    child_run_id = await spawn_subagent_turn(
-        proto.TurnInput(
-            session_id=child_session_id,
-            messages=[
-                ai.system_message(SUBAGENT_SYSTEM_PROMPT),
-                ai.user_message(prompt),
-            ],
-            gated=False,
-        ),
-        # the child turn's root span nests under this turn's root span.
-        turn_context.turn_span,
-    )
-    assert turn_context.writer is not None
-    await write_event(
-        turn_context.writer,
-        stream.subagent_called(
-            tool_call_id=tool_call_id,
-            child_session_id=child_session_id,
-            child_run_id=child_run_id,
-            name=name,
+    await request_background_subagent(
+        session_id,
+        proto.LaunchSubagentHook(
+            task_id=tool_call_id,
+            prompt=prompt,
+            name=name or "subagent",
+            parent_span=turn_context.turn_span,
         ),
     )
-    try:
-        resolution = await hook
-    except asyncio.CancelledError:
-        await interrupt_turn(child_session_id)
-        await hook
-        raise
-    finally:
-        hook.dispose()
-
-    output = resolution.output
-    await write_event(
-        turn_context.writer,
-        stream.subagent_completed(
-            tool_call_id=tool_call_id, is_error=output.kind == "error"
-        ),
-    )
-    return ai.agents.MessageBundle(
-        messages=tuple(m for m in output.messages if m.role in ("assistant", "tool"))
-    )
+    return "Subagent is running in the background and will update you later."
 
 
 # Tools that we can run eagerly, before the llm call generating them
@@ -338,6 +331,17 @@ async def resume_turn_hook(token: str, output: proto.TurnOutput) -> None:
 
 
 @workflow.step
+async def notify_subagent_finished(
+    session_id: str,
+    task_id: str,
+    output: proto.TurnOutput,
+) -> None:
+    await proto.SubagentFinishedHook(task_id=task_id, output=output).resume(
+        proto.subagent_finished_hook_token(session_id)
+    )
+
+
+@workflow.step
 async def interrupt_turn(session_id: str) -> None:
     await proto.InterruptHook().resume(proto.interrupt_hook_token(session_id))
 
@@ -351,6 +355,8 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
     ) -> None:
         self.hook_registry = ai.HookRegistry()
         self.session_id = turn_input.session_id
+        self.parent_session_id = turn_input.parent_session_id
+        self.background_task_id = turn_input.background_task_id
         self.run_task: asyncio.Task[proto.TurnOutput] | None = None
 
     @workflow_util.hook(
@@ -497,9 +503,16 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
             # a subagent turn ends its own stream so readers tailing it terminate.
             await close_stream(writer)
 
-        # notify session that the turn is complete.
+        # notify the owning session that the turn is complete.
         self.dispose_all()
-        await resume_turn_hook(proto.turn_hook_token(self.session_id), output)
+        if self.parent_session_id is not None and self.background_task_id is not None:
+            await notify_subagent_finished(
+                self.parent_session_id,
+                self.background_task_id,
+                output,
+            )
+        else:
+            await resume_turn_hook(proto.turn_hook_token(self.session_id), output)
 
 
 run_turn = TurnWorkflow.registered_workflow()

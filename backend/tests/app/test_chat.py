@@ -3,8 +3,8 @@ regressions live.
 
 ``active_run_start_index`` decides where a reload resumes (wrong answer =
 duplicated assistant message in the UI), ``to_sse`` decides when a stream
-terminates (wrong answer = hang or truncated turn), and ``bundle_to_wire``
-is the single source of truth for the nested subagent shape.
+terminates (wrong answer = hang or truncated turn), and
+``background_task_output`` owns the nested subagent shape.
 
 All tests run against real workflow run streams (on the local world) and the
 real ai SDK UI adapter; writes go through the world directly, as the step
@@ -20,6 +20,7 @@ from typing import Any, cast
 import ai
 import ai.types.events as events_
 import ai.types.messages as messages_
+import pytest
 import stream_codec
 import vercel.workflow._internal.serialization as wf_serialization
 import vercel.workflow._internal.streams as wf_streams
@@ -137,11 +138,24 @@ async def test_multi_turn_run_resumes_from_run_start_not_inner_turn() -> None:
             child_run_id="wrun-test-child-tc-1",
             name="helper",
         ),  # 7
-        stream.subagent_completed(tool_call_id="tc-1", is_error=False),  # 8
-        stream.turn_started(turn_index=1),  # 9 (inner turn, same run)
-        events_.StreamStart(),  # 10
+        stream.session_waiting(turn_index=0, active_background_tasks=1),  # 8
+        stream.subagent_completed(tool_call_id="tc-1", is_error=False),  # 9
+        stream.turn_started(turn_index=1, background=True),  # 10
+        events_.StreamStart(),  # 11
     )
-    assert await chat.active_run_start_index("s1") == 0
+    assert await chat.active_run_start_index("s1") == 1
+
+
+async def test_new_message_is_rejected_while_background_run_is_active() -> None:
+    await _write(
+        "s1",
+        stream.session_started(),
+        stream.turn_started(turn_index=0),
+        stream.session_waiting(turn_index=0, active_background_tasks=1),
+    )
+
+    with pytest.raises(chat.SessionUnavailableError, match="already running"):
+        await chat.start_or_resume("s1", "another message")
 
 
 async def test_run_parked_on_approval_is_resumable_from_run_start() -> None:
@@ -154,13 +168,13 @@ async def test_run_parked_on_approval_is_resumable_from_run_start() -> None:
         *_text_events("need approval"),
         events_.RunBlocked(),
     )
-    assert await chat.active_run_start_index("s1") == 0
+    assert await chat.active_run_start_index("s1") == 1
 
 
-# --- bundle_to_wire ---------------------------------------------------------------
+# --- background_task_output -------------------------------------------------------
 
 
-def test_bundle_to_wire_folds_all_assistant_turns_into_one_ui_message() -> None:
+def test_background_task_output_keeps_all_assistant_messages() -> None:
     transcript = [
         ai.system_message("you are a subagent"),
         ai.user_message("task"),
@@ -178,16 +192,19 @@ def test_bundle_to_wire_folds_all_assistant_turns_into_one_ui_message() -> None:
             role="assistant", parts=[messages_.TextPart(text="second")]
         ),
     ]
-    nested = chat.bundle_to_wire(transcript)
-    assert nested is not None
-    assert nested["role"] == "assistant"
-    parts = cast(list[dict[str, Any]], nested["parts"])
+    nested = chat.background_task_output(transcript)
+    assert all(message["role"] == "assistant" for message in nested)
+    parts = [
+        part
+        for message in nested
+        for part in cast(list[dict[str, Any]], message["parts"])
+    ]
     texts = [part["text"] for part in parts if part.get("type") == "text"]
     assert texts == ["first", "second"]
 
 
-def test_bundle_to_wire_with_no_assistant_message_yet() -> None:
-    assert chat.bundle_to_wire([ai.user_message("task")]) is None
+def test_background_task_output_with_no_assistant_message_yet() -> None:
+    assert chat.background_task_output([ai.user_message("task")]) == []
 
 
 # --- to_sse ----------------------------------------------------------------------
@@ -425,8 +442,13 @@ async def test_to_sse_interleaves_live_subagent_progress() -> None:
 
     await _write(
         "s1",
-        stream.subagent_completed(tool_call_id="tc-1", is_error=False),
-        stream.turn_started(turn_index=1),
+        stream.session_waiting(turn_index=0, active_background_tasks=1),
+        stream.subagent_completed(
+            tool_call_id="tc-1",
+            is_error=False,
+            messages=[child_message.model_dump(mode="json")],
+        ),
+        stream.turn_started(turn_index=1, background=True),
         *_text_events("all done"),
         stream.session_waiting(turn_index=1),
     )
@@ -444,11 +466,22 @@ async def test_to_sse_interleaves_live_subagent_progress() -> None:
         if payload.get("type") == "tool-output-available" and payload.get("preliminary")
     ]
     assert preliminary, "no preliminary subagent output reached the client"
-    nested = preliminary[-1]["output"]
+    [nested] = preliminary[-1]["output"]
     assert nested["role"] == "assistant"
     assert any(
         part.get("type") == "text" and part.get("text") == "child says hi"
         for part in nested["parts"]
+    )
+    final = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "tool-output-available"
+        and payload.get("preliminary") is False
+    ]
+    [final_message] = final[-1]["output"]
+    assert any(
+        part.get("type") == "text" and part.get("text") == "child says hi"
+        for part in final_message["parts"]
     )
     # the parent turn's own text still arrives exactly once afterwards
     deltas = [p["delta"] for p in payloads if p.get("type") == "text-delta"]

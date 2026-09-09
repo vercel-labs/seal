@@ -88,8 +88,12 @@ def test_with_hooks_accepts_static_or_generated_labels() -> None:
     )
     session_input = proto.SessionInput(session_id="s1", prompt="hello")
 
-    assert static.hook_labels("ignored", session_input) == ["one", "two"]
-    assert generated.hook_labels("run-1", session_input) == ["run-1:s1"]
+    expected = [
+        proto.launch_subagent_hook_token("s1"),
+        proto.subagent_finished_hook_token("s1"),
+    ]
+    assert static.hook_labels("ignored", session_input) == expected + ["one", "two"]
+    assert generated.hook_labels("run-1", session_input) == expected + ["run-1:s1"]
 
 
 def test_with_hooks_collapses_existing_hook_wrapper() -> None:
@@ -102,7 +106,12 @@ def test_with_hooks_collapses_existing_hook_wrapper() -> None:
     session_input = proto.SessionInput(session_id="s1", prompt="hello")
 
     assert combined.workflow is driver.run_session.workflow
-    assert combined.hook_labels("run-1", session_input) == ["one", "run-1:hello"]
+    assert combined.hook_labels("run-1", session_input) == [
+        proto.launch_subagent_hook_token("s1"),
+        proto.subagent_finished_hook_token("s1"),
+        "one",
+        "run-1:hello",
+    ]
     assert combined.timeout == 5
 
 
@@ -116,7 +125,10 @@ def test_workflow_class_exposes_its_registered_hooks() -> None:
         proto.interrupt_hook_token("s1"),
     ]
     assert isinstance(driver.run_session, workflow_util.WorkflowWithHooks)
-    assert driver.run_session.hook_labels("run-1", session_input) == []
+    assert driver.run_session.hook_labels("run-1", session_input) == [
+        proto.launch_subagent_hook_token("s1"),
+        proto.subagent_finished_hook_token("s1"),
+    ]
 
 
 async def test_start_passes_through_plain_workflow(
@@ -170,7 +182,12 @@ async def test_start_retries_until_all_declared_hooks_exist(
     )
 
     assert run is expected
-    assert attempts == {"run-1:s1:one": 2, "run-1:s1:two": 2}
+    assert attempts == {
+        proto.launch_subagent_hook_token("s1"): 2,
+        proto.subagent_finished_hook_token("s1"): 2,
+        "run-1:s1:one": 2,
+        "run-1:s1:two": 2,
+    }
 
 
 async def test_start_times_out_waiting_for_hooks(

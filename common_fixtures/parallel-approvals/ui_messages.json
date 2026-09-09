@@ -1,42 +1,16 @@
 [
  {
-  "id": "msg_4e2373b5b03f",
-  "role": "system",
-  "metadata": {
-   "aiPython": {
-    "sourceMessages": [
-     {
-      "id": "msg_4e2373b5b03f",
-      "role": "system",
-      "turnId": null,
-      "partIds": [
-       "part_19662e9dad12"
-      ]
-     }
-    ]
-   }
-  },
-  "parts": [
-   {
-    "type": "text",
-    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work. Use generate_image to create images.",
-    "state": null,
-    "providerMetadata": null
-   }
-  ]
- },
- {
-  "id": "msg_8a8a67aae884",
+  "id": "msg_d8fd4e074d10",
   "role": "user",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_8a8a67aae884",
+      "id": "msg_d8fd4e074d10",
       "role": "user",
       "turnId": null,
       "partIds": [
-       "part_622f6f46462b"
+       "part_762ef1ce36b8"
       ]
      }
     ]

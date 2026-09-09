@@ -27,33 +27,22 @@
        ]
       },
       {
-       "id": "msg_7b27178e9775",
+       "id": "msg_f1e0eb22f703",
        "role": "internal",
        "turnId": null,
        "partIds": [
-        "part_66fd369019d9"
+        "part_a1be48e839ef"
        ]
       },
       {
-       "id": "msg_6cbbede91606",
+       "id": "msg_9374a0dec8b2",
        "role": "tool",
        "turnId": null,
        "partIds": [
-        "part_87b67c08351e"
-       ]
-      },
-      {
-       "id": "msg_19f8cf370af0",
-       "role": "tool",
-       "turnId": null,
-       "partIds": [
-        "part_ff37dab583b0"
+        "part_43ddc8d53b69"
        ]
       }
-     ],
-     "toolResultKinds": {
-      "tc-sub": "messages"
-     }
+     ]
     }
    },
    "role": "assistant",
@@ -74,32 +63,7 @@
       "prompt": "task-gamma",
       "name": "gamma"
      },
-     "output": {
-      "id": "msg_d76ae3e5aa3b",
-      "role": "assistant",
-      "metadata": {
-       "aiPython": {
-        "sourceMessages": [
-         {
-          "id": "msg_d76ae3e5aa3b",
-          "role": "assistant",
-          "turnId": null,
-          "partIds": [
-           "text-0"
-          ]
-         }
-        ]
-       }
-      },
-      "parts": [
-       {
-        "type": "text",
-        "text": "gamma report",
-        "state": null,
-        "provider_metadata": null
-       }
-      ]
-     }
+     "output": "Subagent is running in the background and will update you later."
     },
     {
      "type": "tool-bash",
