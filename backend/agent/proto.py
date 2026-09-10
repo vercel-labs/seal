@@ -99,4 +99,7 @@ class LifecycleEvent(pydantic.BaseModel):
     data: dict[str, Any] = pydantic.Field(default_factory=dict)
 
 
-type StreamEvent = ai.events.AgentEvent | LifecycleEvent
+# By using OmitEventMessage, we strip all the message fields from
+# events (keeping only ids). We reconstruct them in the one place
+# we need them (subagents).
+type StreamEvent = ai.events.OmitEventMessages[ai.events.AgentEvent] | LifecycleEvent

@@ -104,12 +104,3 @@ async def test_tail_index_tracks_writes() -> None:
     assert await stream.tail_index("r1") == 0
     await _write("r1", events_.TextDelta(block_id="b", chunk="b"))
     assert await stream.tail_index("r1") == 1
-
-
-async def test_agent_events_pass_through_unchanged() -> None:
-    sent = events_.TextDelta(block_id="b", chunk="hello")
-    await _write("r1", sent)
-    await _close("r1")
-
-    [received] = await _collect("r1")
-    assert received.model_dump(mode="json") == sent.model_dump(mode="json")
