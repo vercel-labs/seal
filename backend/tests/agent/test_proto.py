@@ -77,9 +77,25 @@ def test_stream_events_round_trip() -> None:
         _hook_event(),
     ]
     for event in events:
-        restored = stream_codec.adapter.validate_python(event.model_dump(mode="json"))
+        dumped = stream_codec.adapter.dump_python(event, mode="json")
+        restored = stream_codec.adapter.validate_python(dumped)
         assert type(restored) is type(event), f"{type(event).__name__} changed type"
-        assert restored.model_dump(mode="json") == event.model_dump(mode="json")
+        assert stream_codec.adapter.dump_python(restored, mode="json") == dumped
+
+
+def test_stream_events_omit_model_message_bodies() -> None:
+    message = ai.messages.Message(
+        id="message-1",
+        role="assistant",
+        parts=[messages_.TextPart(text="a large response")],
+    )
+
+    dumped = stream_codec.adapter.dump_python(
+        events_.TextDelta(message=message, block_id="text-0", chunk="a"),
+        mode="json",
+    )
+
+    assert dumped["message"] == {"id": "message-1"}
 
 
 def test_hook_event_round_trip_keeps_approval_fields() -> None:

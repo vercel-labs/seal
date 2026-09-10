@@ -329,7 +329,12 @@ async def test_to_sse_interleaves_live_subagent_progress() -> None:
     )
     await _write_run(
         child_run_id,
-        events_.StreamStart(),
+        events_.StreamStart(message=child_message),
+        events_.TextStart(message=child_message, block_id="child-text"),
+        events_.TextDelta(
+            message=child_message, block_id="child-text", chunk="child says hi"
+        ),
+        events_.TextEnd(message=child_message, block_id="child-text"),
         events_.StreamEnd(message=child_message),
     )
     await wf_world.get_world().streams_close(

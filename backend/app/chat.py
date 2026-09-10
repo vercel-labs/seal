@@ -242,15 +242,12 @@ async def _pump_subagent(
     tool_call_id = str(event.data.get("tool_call_id"))
     child_run_id = str(event.data.get("child_run_id"))
 
-    child_messages: list[ai.messages.Message] = []
+    hydrator = ai.events.MessageHydrator()
     async for child_event in stream.get_readable(child_run_id, start_index=0):
         if isinstance(child_event, proto.LifecycleEvent):
             continue
-        message = getattr(child_event, "message", None)
-        if not isinstance(message, ai.messages.Message):
-            continue
-        _upsert(child_messages, message)
-        nested = bundle_to_wire(child_messages)
+        child_event = hydrator.feed(child_event)
+        nested = bundle_to_wire(hydrator.messages)
         if nested is None:
             continue
         await queue.put(
@@ -260,12 +257,3 @@ async def _pump_subagent(
                 preliminary=True,
             )
         )
-
-
-def _upsert(messages: list[ai.messages.Message], message: ai.messages.Message) -> None:
-    """Replace the message with the same id, else append it."""
-    for index, existing in enumerate(messages):
-        if existing.id == message.id:
-            messages[index] = message
-            return
-    messages.append(message)
