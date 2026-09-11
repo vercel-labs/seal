@@ -22,13 +22,7 @@ async def spawn_turn_workflow(
         turn_span = ai.experimental_telemetry.create_span("turn").stamp_start()
         turn_span.set_attrs({"openinference.span.kind": "AGENT"})
         turn_input = turn_input.model_copy(update={"turn_span": turn_span})
-    started = await workflow_util.start(
-        workflow_util.with_hooks(
-            turn.run_turn, [proto.hooks_hook_token(turn_input.session_id)]
-        ),
-        turn_input,
-        writer,
-    )
+    started = await workflow_util.start(turn.run_turn, turn_input, writer)
     return started.run_id
 
 
