@@ -23,6 +23,10 @@ def hooks_hook_token(session_id: str) -> str:
     return f"{session_id}:hooks"
 
 
+def interrupt_hook_token(session_id: str) -> str:
+    return f"{session_id}:interrupt"
+
+
 def turn_hook_token(session_id: str) -> str:
     return f"seal-turn:{session_id}"
 
@@ -51,6 +55,10 @@ class ApprovalHook(pydantic.BaseModel, vercel.workflow.BaseHook):
     responses: list[ToolApprovalResponse]
 
 
+class InterruptHook(pydantic.BaseModel, vercel.workflow.BaseHook):
+    pass
+
+
 class SessionState(pydantic.BaseModel):
     session_id: str
     messages: list[ai.messages.Message]
@@ -72,7 +80,7 @@ class TurnInput(pydantic.BaseModel):
 
 
 class TurnOutput(pydantic.BaseModel):
-    kind: Literal["suspend", "error"]
+    kind: Literal["suspend", "error", "interrupted"]
     messages: list[ai.messages.Message]
     error: str | None = None
 
@@ -87,6 +95,7 @@ SESSION_STARTED = "session.started"
 SESSION_WAITING = "session.waiting"
 SESSION_COMPLETED = "session.completed"
 SESSION_FAILED = "session.failed"
+SESSION_INTERRUPTED = "session.interrupted"
 TURN_STARTED = "turn.started"
 SUBAGENT_CALLED = "subagent.called"
 SUBAGENT_COMPLETED = "subagent.completed"

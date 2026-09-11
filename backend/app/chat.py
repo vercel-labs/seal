@@ -31,10 +31,20 @@ import ai
 import ai.ui.ai_sdk as ai_sdk
 import ai.ui.ai_sdk.outbound_stream as outbound_stream
 import ai.ui.ai_sdk.ui_events as ui_events
+import vercel.workflow
 
 from agent import driver, proto, stream, workflow_util
 
-_TERMINAL = {proto.SESSION_WAITING, proto.SESSION_COMPLETED, proto.SESSION_FAILED}
+_TERMINAL = {
+    proto.SESSION_WAITING,
+    proto.SESSION_COMPLETED,
+    proto.SESSION_FAILED,
+    proto.SESSION_INTERRUPTED,
+}
+
+
+class SessionUnavailableError(RuntimeError):
+    pass
 
 
 async def active_run_start_index(session_id: str) -> int | None:
@@ -115,6 +125,29 @@ async def submit_approvals(
         proto.hooks_hook_token(session_id)
     )
     return start_index
+
+
+async def interrupt(session_id: str) -> None:
+    """Interrupt the active turn and wait for its durable stream boundary."""
+    run_id = await stream.session_run_id(session_id)
+    if run_id is None:
+        raise SessionUnavailableError("Session is not running")
+
+    start_index = await stream.tail_index(run_id) + 1
+    try:
+        await proto.InterruptHook().resume(proto.interrupt_hook_token(session_id))
+    except vercel.workflow.HookNotFoundError:
+        raise SessionUnavailableError("Session has no active turn") from None
+
+    async with asyncio.timeout(30):
+        async for event in stream.get_readable(run_id, start_index=start_index):
+            if (
+                isinstance(event, proto.LifecycleEvent)
+                and event.type == proto.SESSION_INTERRUPTED
+            ):
+                return
+
+    raise RuntimeError("Session stream closed before interruption was acknowledged")
 
 
 async def to_sse(

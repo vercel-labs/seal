@@ -10,11 +10,13 @@ deadlocks (every wait is bounded, so a deadlock is a fast red test).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 
 import ai
 import pytest
+import vercel.workflow
 from conftest import MockProvider, assert_message_invariants, text_msg, tool_call_msg
 from harness import (
     InProcessWorld,
@@ -43,6 +45,18 @@ from harness import (
 )
 
 from agent import proto
+
+
+async def _wait_for_run_stopped(run_id: str) -> str:
+    run: vercel.workflow.Run[None] = vercel.workflow.Run(run_id)
+    async with asyncio.timeout(10):
+        while (status := await run.status()) not in (
+            "completed",
+            "failed",
+            "cancelled",
+        ):
+            await asyncio.sleep(0.02)
+    return status
 
 
 async def test_single_turn_suspends(
@@ -169,6 +183,64 @@ async def test_gated_tool_approval_runs_in_one_turn(
     assert scripted_model.call_count == 2
 
 
+async def test_interrupt_hook_cancels_a_running_tool_step(
+    world: InProcessWorld, scripted_model: MockProvider
+) -> None:
+    scripted_model.responses = [
+        [
+            tool_call_msg(
+                tc_id="tc-1",
+                name="bash",
+                args='{"command": "sleep 30"}',
+            )
+        ],
+        [text_msg("recovered")],
+    ]
+
+    await _start("s1", "run it")
+    await _wait_for_event("s1", ai.events.RunBlocked)
+    interrupt = await _wait_for_hook(proto.interrupt_hook_token("s1"))
+    await _resume_approvals(
+        "s1",
+        [
+            proto.ToolApprovalResponse(
+                hook_id="approve_tc-1",
+                tool_call_id="tc-1",
+                granted=True,
+            )
+        ],
+    )
+    await asyncio.sleep(0.1)
+
+    await proto.InterruptHook().resume(interrupt)
+
+    await _wait_for_lifecycle("s1", proto.SESSION_INTERRUPTED)
+    assert await _wait_for_run_stopped(interrupt.run_id) == "completed"
+
+    interrupted = await read_state("s1")
+    assert interrupted is not None
+    assert [message.role for message in interrupted.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    [result] = interrupted.messages[-1].tool_results
+    assert result.result == "Interrupted by user"
+    assert result.result_kind == "error"
+    assert_message_invariants(interrupted.messages)
+
+    await _resume(
+        proto.session_hook_token("s1"),
+        proto.NewUserMessage(prompt="continue"),
+    )
+    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    resumed = await read_state("s1")
+    assert resumed is not None
+    assert resumed.messages[-1].text == "recovered"
+    assert_message_invariants(resumed.messages)
+
+
 async def test_parallel_gated_tools_park_then_run(
     world: InProcessWorld, scripted_model: MockProvider
 ) -> None:
@@ -219,6 +291,42 @@ async def test_parallel_gated_tools_park_then_run(
     assert results == {"tc-a": "a\n", "tc-b": "b\n"}
     assert_message_invariants(state.messages)
     assert scripted_model.call_count == 2
+
+
+async def test_interrupting_subagent_forwards_interrupt_to_child_turn(
+    world: InProcessWorld, scripted_model: MockProvider
+) -> None:
+    scripted_model.responses = [
+        [
+            tool_call_msg(
+                tc_id="tc-sub",
+                name="subagent",
+                args='{"prompt": "child-blocked"}',
+            )
+        ]
+    ]
+    scripted_model.keyed_responses = {
+        "child-blocked": [
+            tool_call_msg(
+                tc_id="tc-bash",
+                name="bash",
+                args='{"command": "sleep 30"}',
+            )
+        ]
+    }
+
+    await _start("s1", "delegate")
+    parent_interrupt = await _wait_for_hook(proto.interrupt_hook_token("s1"))
+    child_interrupt = await _wait_for_hook(
+        proto.interrupt_hook_token("s1:child:tc-sub")
+    )
+    await asyncio.sleep(0.1)
+
+    await proto.InterruptHook().resume(parent_interrupt)
+
+    await _wait_for_lifecycle("s1", proto.SESSION_INTERRUPTED)
+    assert await _wait_for_run_stopped(parent_interrupt.run_id) == "completed"
+    assert await _wait_for_run_stopped(child_interrupt.run_id) == "completed"
 
 
 async def test_subagent_result_lands_on_the_trailing_tool_message(
