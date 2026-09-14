@@ -1,7 +1,6 @@
 import asyncio
 import contextvars
-from collections.abc import AsyncIterable, Collection
-from typing import Any, Self
+from collections.abc import Collection
 
 import ai
 
@@ -45,26 +44,3 @@ class TrackingToolRunner(ai.ToolRunner):
             self.id_to_task[id] = task
             self.task_to_id[task] = id
         return task
-
-
-class SpeculativeToolRunner(TrackingToolRunner):
-    def __init__(
-        self,
-        *,
-        tool_stream: AsyncIterable[ai.ToolCall],
-    ) -> None:
-        super().__init__()
-        self.tool_stream = tool_stream
-
-    async def __aenter__(self) -> Self:
-        res = await super().__aenter__()
-        self.worker = asyncio.create_task(self.watcher())
-        return res
-
-    async def __aexit__(self, *args: Any) -> None:
-        self.worker.cancel()
-        return await super().__aexit__(*args)
-
-    async def watcher(self) -> None:
-        async for tool_call in self.tool_stream:
-            self.schedule(tool_call)

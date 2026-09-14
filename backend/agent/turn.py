@@ -5,6 +5,7 @@ import dataclasses
 import traceback
 from collections.abc import (
     AsyncGenerator,
+    AsyncIterator,
     Sequence,
 )
 from typing import ClassVar
@@ -32,7 +33,7 @@ IMAGE_SYSTEM_PROMPT = (
 
 
 class EagerToolHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    payload: ai.messages.ToolCallPart
+    payload: ai.events.ToolEnd
 
 
 @workflow.step
@@ -61,9 +62,37 @@ async def llm_step(
             if writer is not None:
                 await writer.write(e)
             if tool_token and isinstance(e, ai.types.events.ToolEnd):
-                await EagerToolHook(payload=e.tool_call).resume(tool_token)
+                await EagerToolHook(payload=e).resume(tool_token)
 
     return model_stream.message
+
+
+@contextlib.asynccontextmanager
+async def llm_step_stream(
+    context: ai.Context,
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None,
+    tool_token: str | None,
+    turn_span: ai.experimental_telemetry.Span | None = None,
+) -> AsyncIterator[AsyncGenerator[ai.events.AgentEvent]]:
+    eager_tool_hook = EagerToolHook.wait(token=tool_token)
+
+    async def _stream() -> AsyncGenerator[ai.events.AgentEvent]:
+        async with eager_tool_hook:
+            message = await llm_step(context, writer, tool_token, turn_span)
+
+        async with ai.Stream.replay_message(message) as replay:
+            async for event in replay:
+                yield event
+
+    async with contextlib.aclosing(_stream()) as stream:
+        yield ai.util.merge(
+            (ev.payload async for ev in eager_tool_hook),
+            stream,
+            restart=False,
+            # priority means no eager hook will get output after the
+            # first stream one, because of the dispose.
+            priority=True,
+        )
 
 
 @workflow.step
@@ -285,42 +314,33 @@ class DurableAgent(ai.Agent):
         self.turn_span = turn_span
 
     async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
-        session_id = self.session_id
-
-        tool_token = f"seal-early-tool:{session_id}"
-        eager_tool_hook = EagerToolHook.wait(token=tool_token)
+        tool_token = f"seal-early-tool:{self.session_id}"
 
         while context.keep_running():
-            async with ai_util.SpeculativeToolRunner(
-                tool_stream=(
-                    context.resolve(ev.payload)
-                    async for ev in eager_tool_hook
-                    if ev.payload.tool_name in EAGER_TOOLS
-                ),
-            ) as runner:
-                assistant_message = await llm_step(
-                    context,
-                    self.writer,
-                    tool_token,
-                    self.turn_span,
-                )
-                context.add(assistant_message)
-                # llm_step streamed this turn out-of-band (straight to the durable
-                # stream), so yield the final StreamEnd here for run-blocked
-                # tracking, which counts the turn's tool calls from it.
-                yield ai.events.StreamEnd(message=assistant_message)
+            async with (
+                llm_step_stream(
+                    context, self.writer, tool_token, self.turn_span
+                ) as stream,
+                ai_util.TrackingToolRunner() as tr,
+            ):
+                final = False
+                async for event in stream:
+                    if isinstance(event, ai.events.ToolEnd):
+                        if final or event.tool_call.tool_name in EAGER_TOOLS:
+                            tool = context.resolve(event.tool_call)
+                            tr.schedule(tool)
+                    elif isinstance(event, ai.events.StreamEnd):
+                        tr.discard_except(context.resolve(event.message.tool_calls))
+                        context.add(event.message)
+                    elif isinstance(event, ai.events.StreamStart):
+                        final = True
 
-                tool_calls = context.resolve(assistant_message.tool_calls)
-                runner.discard_except(tool_calls)
-                for tool_call in tool_calls:
-                    runner.schedule(tool_call)
-
-                async for event in runner.events():
                     yield event
 
-                context.add(runner.get_tool_message())
+                async for event in tr.events():
+                    yield event
 
-        eager_tool_hook.dispose()
+                context.add(tr.get_tool_message())
 
 
 @workflow.step
@@ -401,7 +421,8 @@ async def run_turn(
                 agent.run(model, messages, hook_registry=hook_registry) as run,
             ):
                 async for event in run:
-                    if not isinstance(event, ai.events.StreamEnd):
+                    # ModelEvents get streamed directly by the step.
+                    if not isinstance(event, ai.events.ModelEvent):
                         await write_event(writer, event)
 
                 messages = run.messages

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import os
+from typing import Any
 
 import ai
 import pytest
@@ -43,6 +44,7 @@ from harness import (
 )
 
 from agent import proto
+from agent import stream as stream_
 
 
 async def test_single_turn_suspends(
@@ -397,3 +399,86 @@ async def test_parallel_subagents_land_deterministically(
     assert bundle_b.messages[-1].text == "beta-report"
     # parent: 1 turn issuing both calls + 1 follow-up; each child: 1 turn
     assert scripted_model.call_count == 4
+
+
+async def test_eager_tool_result_from_failed_llm_step_is_not_streamed(
+    world: InProcessWorld,
+    scripted_model: MockProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first llm_step attempt emits an eager generate_image call and then
+    # dies before StreamEnd. The retry produces plain text. The eager tool's
+    # result belongs to an assistant message that never existed, so it must
+    # reach neither the client stream nor the history.
+    png_b64 = base64.b64encode(b"\x89PNG fake image bytes").decode()
+    scripted_model.responses = [
+        [
+            tool_call_msg(
+                tc_id="tc-img",
+                name="generate_image",
+                args='{"prompt": "a heron at dawn"}',
+                text="drawing it",
+            )
+        ],
+        [text_msg("recovered without drawing")],
+        # only reached if the stale eager result wrongly lands in the history
+        [text_msg("follow-up after stray tool result")],
+    ]
+    scripted_model.keyed_responses = {
+        "heron": [
+            ai.messages.Message(
+                role="assistant",
+                parts=[
+                    ai.messages.TextPart(text="here it is"),
+                    ai.messages.FilePart(data=png_b64, media_type="image/png"),
+                ],
+            )
+        ],
+    }
+
+    original_stream = MockProvider.stream
+
+    async def _drop_before_end(events: Any) -> Any:
+        async for event in events:
+            if isinstance(event, ai.events.StreamEnd):
+                raise RuntimeError("model connection dropped")
+            yield event
+
+    def stream(self: MockProvider, *args: Any, **kwargs: Any) -> Any:
+        events = original_stream(self, *args, **kwargs)
+        # only the first llm_step attempt fails
+        if self.call_count == 1:
+            return _drop_before_end(events)
+        return events
+
+    monkeypatch.setattr(MockProvider, "stream", stream)
+
+    await _start("s1", "hello")
+    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+
+    state = await read_state("s1")
+    assert state is not None
+    run_id = await stream_.session_run_id("s1")
+    assert run_id is not None
+    events = [e async for e in stream_.replay(run_id)]
+    assert any(
+        isinstance(e, proto.LifecycleEvent) and e.type == proto.RELOAD_REQUESTED
+        for e in events
+    )
+    # every tool result the client saw must answer a call in the history
+    known_calls = {p.tool_call_id for m in state.messages for p in m.tool_calls}
+    streamed_results = [
+        r.tool_call_id
+        for e in events
+        if isinstance(e, ai.events.ToolCallResult)
+        for r in e.results
+    ]
+    assert all(tc in known_calls for tc in streamed_results), (
+        f"streamed results for tool calls not in history: {streamed_results}"
+    )
+
+    assert [m.role for m in state.messages] == ["system", "user", "assistant"]
+    assert state.messages[-1].text == "recovered without drawing"
+    assert_message_invariants(state.messages)
+    # first attempt, the image model, the retry
+    assert scripted_model.call_count == 3
