@@ -27,6 +27,10 @@ class ApprovalSignal(pydantic.BaseModel):
     responses: list[ToolApprovalResponse]
 
 
+class EagerToolSignal(pydantic.BaseModel):
+    tool_call: ai.messages.ToolCallPart
+
+
 class SessionState(pydantic.BaseModel):
     session_id: str
     messages: list[ai.messages.Message]

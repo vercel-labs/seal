@@ -4,6 +4,8 @@ import asyncio
 from typing import cast
 
 import ai
+import httpx2
+import pytest
 import temporalio.client
 from conftest import MockProvider, assert_message_invariants, text_msg, tool_call_msg
 
@@ -162,5 +164,63 @@ async def test_llm_activity_retries_and_requests_reload(
         state = await temporal.session_state("s4")
         assert state is not None
         assert state.messages[-1].text == "recovered"
+    finally:
+        await handle.terminate("test complete")
+
+
+async def test_web_fetch_starts_before_model_stream_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_model: MockProvider,
+    temporal_client: temporalio.client.Client,
+) -> None:
+    tool_started = asyncio.Event()
+    request_count = 0
+    MockProvider.wait_after_tool = tool_started
+    scripted_model.responses = [
+        [
+            tool_call_msg(
+                tc_id="tc-eager",
+                name="web_fetch",
+                args='{"url":"https://example.test"}',
+            )
+        ],
+        [text_msg("done")],
+    ]
+
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+        text = "eager result"
+
+    async def request(
+        _client: httpx2.AsyncClient,
+        method: str,
+        url: str,
+        **_kwargs: object,
+    ) -> Response:
+        nonlocal request_count
+        assert method == "GET"
+        assert url == "https://example.test"
+        request_count += 1
+        tool_started.set()
+        return Response()
+
+    monkeypatch.setattr(httpx2.AsyncClient, "request", request)
+    handle = await _start(temporal_client, "s5", "fetch")
+    try:
+        await _wait_for_event("s5", proto.SESSION_WAITING)
+        assert tool_started.is_set()
+        assert request_count == 1
+
+        state = await temporal.session_state("s5")
+        assert state is not None
+        result = next(
+            result
+            for message in state.messages
+            for result in message.tool_results
+            if result.tool_call_id == "tc-eager"
+        )
+        assert "eager result" in str(result.result)
+        assert state.messages[-1].text == "done"
     finally:
         await handle.terminate("test complete")

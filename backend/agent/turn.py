@@ -39,6 +39,8 @@ IMAGE_SYSTEM_PROMPT = (
 
 NO_RETRIES = temporalio.common.RetryPolicy(maximum_attempts=1)
 ACTIVITY_TIMEOUT = datetime.timedelta(minutes=5)
+EAGER_TOOLS = {"generate_image", "web_fetch"}
+EAGER_TOOL_SIGNAL = "eager_tool"
 
 
 class ModelActivityInput(pydantic.BaseModel):
@@ -86,6 +88,13 @@ async def partial_messages_activity(
 
 @temporalio.activity.defn
 async def llm_activity(activity_input: ModelActivityInput) -> ai.messages.Message:
+    activity_info = temporalio.activity.info()
+    if activity_info.workflow_id is None or activity_info.workflow_run_id is None:
+        raise RuntimeError("LLM activity has no parent workflow")
+    workflow_handle = temporalio.activity.client().get_workflow_handle(
+        activity_info.workflow_id,
+        run_id=activity_info.workflow_run_id,
+    )
     stream_client = (
         temporalio.contrib.workflow_streams.WorkflowStreamClient.from_within_activity(
             batch_interval=datetime.timedelta(milliseconds=50),
@@ -105,7 +114,17 @@ async def llm_activity(activity_input: ModelActivityInput) -> ai.messages.Messag
         ) as model_stream:
             async for event in model_stream:
                 if not event.replay:
-                    events.publish(event)
+                    events.publish(
+                        event, force_flush=isinstance(event, ai.events.ToolEnd)
+                    )
+                if (
+                    isinstance(event, ai.events.ToolEnd)
+                    and event.tool_call.tool_name in EAGER_TOOLS
+                ):
+                    await workflow_handle.signal(
+                        EAGER_TOOL_SIGNAL,
+                        proto.EagerToolSignal(tool_call=event.tool_call),
+                    )
                 if isinstance(event, ai.events.StreamEnd):
                     message = event.message
 
@@ -252,6 +271,7 @@ async def generate_image(prompt: str) -> ai.messages.ContentOutput:
 class TurnContext:
     session_id: str
     events: temporalio.contrib.workflow_streams.WorkflowTopicHandle[proto.StreamEvent]
+    eager_tool_events: ai.util.AsyncIterableQueue[ai.events.ToolEnd]
 
 
 current_turn_context: contextvars.ContextVar[TurnContext] = contextvars.ContextVar(
@@ -315,31 +335,50 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
 async def temporal_streamer(
     *, context: ai.Context
 ) -> AsyncGenerator[AsyncIterator[ai.events.AgentEvent]]:
-    assistant_message = await _execute_activity(
-        llm_activity,
-        ModelActivityInput(
-            model=context.model,
-            messages=context.messages,
-            tools=context.tools,
-        ),
-    )
-    async with ai.Stream.replay_message(assistant_message) as replay:
-        yield replay
+    turn_context = current_turn_context.get()
+
+    async def model_events() -> AsyncGenerator[ai.events.AgentEvent]:
+        try:
+            assistant_message = await _execute_activity(
+                llm_activity,
+                ModelActivityInput(
+                    model=context.model,
+                    messages=context.messages,
+                    tools=context.tools,
+                ),
+            )
+        finally:
+            await turn_context.eager_tool_events.astop()
+        async with ai.Stream.replay_message(assistant_message) as replay:
+            async for event in replay:
+                yield event
+
+    async with contextlib.aclosing(model_events()) as model_stream:
+        yield ai.util.merge(turn_context.eager_tool_events, model_stream, restart=False)
 
 
 async def run_turn(
     turn_input: proto.TurnInput,
     *,
     events: temporalio.contrib.workflow_streams.WorkflowTopicHandle[proto.StreamEvent],
+    eager_tool_events: ai.util.AsyncIterableQueue[ai.events.ToolEnd],
     hook_registry: ai.HookRegistry,
 ) -> proto.TurnOutput:
     start_index = await _execute_activity(stream_offset_activity)
     current_turn_context.set(
-        TurnContext(session_id=turn_input.session_id, events=events)
+        TurnContext(
+            session_id=turn_input.session_id,
+            events=events,
+            eager_tool_events=eager_tool_events,
+        )
     )
     tools = [web_fetch, generate_image]
     tools += [bash, subagent] if turn_input.gated else [bash_ungated]
-    agent = ai_util.DurableAgent(tools=tools, streamer=temporal_streamer)
+    agent = ai_util.DurableAgent(
+        tools=tools,
+        streamer=temporal_streamer,
+        eager_tools=EAGER_TOOLS,
+    )
     messages = turn_input.messages
 
     try:
@@ -376,6 +415,16 @@ class TurnWorkflow:
         self.events = self.workflow_stream.topic(
             stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent)
         )
+        self.eager_tool_events = ai.util.AsyncIterableQueue[ai.events.ToolEnd]()
+
+    @temporalio.workflow.signal(name=EAGER_TOOL_SIGNAL)
+    def eager_tool(self, signal: proto.EagerToolSignal) -> None:
+        self.eager_tool_events.put_nowait(
+            ai.events.ToolEnd(
+                tool_call_id=signal.tool_call.tool_call_id,
+                tool_call=signal.tool_call,
+            )
+        )
 
     @temporalio.workflow.run
     @ai.messages.use_random(temporalio.workflow.random)
@@ -384,6 +433,7 @@ class TurnWorkflow:
         output = await run_turn(
             turn_input,
             events=self.events,
+            eager_tool_events=self.eager_tool_events,
             hook_registry=ai.HookRegistry(),
         )
         await write_event(

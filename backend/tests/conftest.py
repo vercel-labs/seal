@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import AsyncGenerator, Iterator, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -64,6 +65,7 @@ class MockProvider(models.Provider):
     # Provider is now a frozen pydantic model; opt this test double back into
     # mutability and keep the scripted state out of serialization/hashing.
     model_config = pydantic.ConfigDict(frozen=False)
+    wait_after_tool: ClassVar[asyncio.Event | None] = None
 
     provider_class_id: str = "mock"
     name: str = "mock"
@@ -102,10 +104,10 @@ class MockProvider(models.Provider):
         last_user = next((m.text for m in reversed(messages) if m.role == "user"), "")
         for key, response in self.keyed_responses.items():
             if key in last_user:
-                return _emit_events(response)
+                return _emit_events(response, wait_after_tool=self.wait_after_tool)
         if not self.responses:
             raise RuntimeError("MockProvider: no more responses configured")
-        return _emit_events(self.responses.pop(0))
+        return _emit_events(self.responses.pop(0), wait_after_tool=self.wait_after_tool)
 
     async def generate(
         self,
@@ -125,6 +127,8 @@ MOCK_MODEL = models.Model(id="mock-model", provider=MOCK_PROVIDER)
 
 async def _emit_events(
     seq: list[messages_.Message],
+    *,
+    wait_after_tool: asyncio.Event | None = None,
 ) -> AsyncGenerator[events_.Event]:
     """Replay complete messages as the event stream a real adapter would emit."""
     yield events_.StreamStart()
@@ -145,6 +149,8 @@ async def _emit_events(
                         tool_call_id=part.tool_call_id, chunk=part.tool_args
                     )
                 yield events_.ToolEnd(tool_call_id=part.tool_call_id, tool_call=part)
+                if wait_after_tool is not None:
+                    await wait_after_tool.wait()
             elif isinstance(part, messages_.FilePart):
                 yield events_.FileEvent(
                     block_id=part.id,
@@ -169,11 +175,13 @@ def mock_llm() -> Iterator[MockProvider]:
     MOCK_PROVIDER.keyed_responses = {}
     MOCK_PROVIDER.call_count = 0
     MOCK_PROVIDER.failures_remaining = 0
+    MockProvider.wait_after_tool = None
     MOCK_PROVIDER.calls = []
     yield MOCK_PROVIDER
     MOCK_PROVIDER.responses = []
     MOCK_PROVIDER.keyed_responses = {}
     MOCK_PROVIDER.failures_remaining = 0
+    MockProvider.wait_after_tool = None
     MOCK_PROVIDER.calls = []
 
 

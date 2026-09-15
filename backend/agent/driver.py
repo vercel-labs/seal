@@ -20,6 +20,7 @@ class SessionWorkflow:
             stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent)
         )
         self.hook_registry = ai.HookRegistry()
+        self.eager_tool_events = ai.util.AsyncIterableQueue[ai.events.ToolEnd]()
         self.pending_messages: list[proto.NewUserMessage] = []
         self.run_task: asyncio.Task[proto.TurnOutput] | None = None
         self.state: proto.SessionState | None = None
@@ -46,6 +47,15 @@ class SessionWorkflow:
         if self.run_task is not None:
             self.run_task.cancel()
 
+    @temporalio.workflow.signal(name=turn.EAGER_TOOL_SIGNAL)
+    def eager_tool(self, signal: proto.EagerToolSignal) -> None:
+        self.eager_tool_events.put_nowait(
+            ai.events.ToolEnd(
+                tool_call_id=signal.tool_call.tool_call_id,
+                tool_call=signal.tool_call,
+            )
+        )
+
     @temporalio.workflow.run
     @ai.messages.use_random(temporalio.workflow.random)
     async def run(self, session_input: proto.SessionInput) -> None:
@@ -60,6 +70,7 @@ class SessionWorkflow:
 
         turn_index = 0
         while True:
+            self.eager_tool_events = ai.util.AsyncIterableQueue()
             await turn.write_event(
                 self.events, stream.turn_started(turn_index=turn_index)
             )
@@ -71,6 +82,7 @@ class SessionWorkflow:
                         turn_index=turn_index,
                     ),
                     events=self.events,
+                    eager_tool_events=self.eager_tool_events,
                     hook_registry=self.hook_registry,
                 )
             )
