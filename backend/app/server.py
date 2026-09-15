@@ -4,6 +4,7 @@ Endpoints:
 
   POST /api/chat                     run a turn, stream the AI SDK UI message stream
   GET  /api/chat/{id}/stream         resume an in-flight stream
+  POST /api/sessions/{id}/interrupt  interrupt the active turn
   GET  /api/sessions                 list sessions
   POST /api/sessions                 create a session
   GET  /api/sessions/{id}            session metadata + UI message history
@@ -18,18 +19,11 @@ from __future__ import annotations
 
 import collections.abc
 import logging
-import os
 
 # uvicorn's reloader passes watch_filter=None to watchfiles and applies its
-# *.py filter only afterward, so every .workflow-data/.seal write logs an INFO
+# *.py filter only afterward, so every .seal write logs an INFO
 # "N changes detected" without causing a reload; drop those count lines.
 logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
-
-_BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
-os.environ.setdefault(
-    "WORKFLOW_LOCAL_DATA_DIR",
-    os.path.join(_BACKEND_DIR, ".workflow-data"),
-)
 
 from agent import telemetry  # noqa: E402
 
@@ -44,7 +38,7 @@ import fastapi.responses  # noqa: E402
 import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
-from agent import proto  # noqa: E402
+from agent import proto, temporal  # noqa: E402
 from app import attachments, chat, sessions  # noqa: E402
 
 
@@ -125,6 +119,19 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
     )
 
 
+@app.post("/api/sessions/{session_id}/interrupt")
+async def interrupt_chat(session_id: str) -> dict[str, str]:
+    try:
+        await chat.interrupt(session_id)
+    except chat.SessionUnavailableError as error:
+        raise fastapi.HTTPException(status_code=409, detail=str(error)) from None
+    except TimeoutError:
+        raise fastapi.HTTPException(
+            status_code=504, detail="Interruption acknowledgement timed out"
+        ) from None
+    return {"status": "interrupted"}
+
+
 @app.get("/api/chat/{session_id}/stream")
 async def resume_chat(session_id: str) -> fastapi.responses.Response:
     # ``useChat({ resume: true })`` GETs this on mount. Re-tail the durable
@@ -195,6 +202,8 @@ async def generate_title(session_id: str) -> sessions.SessionMeta:
 async def delete_session(session_id: str) -> dict[str, str]:
     if not await sessions.delete_session(session_id):
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
+    with contextlib.suppress(Exception):
+        await temporal.terminate(session_id)
     return {"status": "deleted"}
 
 

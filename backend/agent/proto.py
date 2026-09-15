@@ -4,31 +4,13 @@ from typing import Any, Literal
 
 import ai
 import pydantic
-import vercel.workflow
-
-# Session inputs / outputs
 
 
-# external decision for a single gated tool call.
 class ToolApprovalResponse(pydantic.BaseModel):
     hook_id: str
     tool_call_id: str
     granted: bool
     reason: str | None = None
-
-
-# One durable hook carries all approval decisions for a turn. Tokens are global,
-# so the session id keeps each session's hook unique.
-def hooks_hook_token(session_id: str) -> str:
-    return f"{session_id}:hooks"
-
-
-def turn_hook_token(session_id: str) -> str:
-    return f"seal-turn:{session_id}"
-
-
-def session_hook_token(session_id: str) -> str:
-    return f"seal-session:{session_id}"
 
 
 class SessionInput(pydantic.BaseModel):
@@ -41,14 +23,12 @@ class NewUserMessage(pydantic.BaseModel):
     prompt: str
 
 
-# carries the next user message to a parked session.
-class SessionHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    payload: NewUserMessage
-
-
-# one or more gated call decisions, delivered through the session's shared hook.
-class ApprovalHook(pydantic.BaseModel, vercel.workflow.BaseHook):
+class ApprovalSignal(pydantic.BaseModel):
     responses: list[ToolApprovalResponse]
+
+
+class EagerToolSignal(pydantic.BaseModel):
+    tool_call: ai.messages.ToolCallPart
 
 
 class SessionState(pydantic.BaseModel):
@@ -56,37 +36,24 @@ class SessionState(pydantic.BaseModel):
     messages: list[ai.messages.Message]
 
 
-# Turn inputs / outputs
-
-
 class TurnInput(pydantic.BaseModel):
     session_id: str
     messages: list[ai.messages.Message]
-    # gated turns expose bash behind approval + subagent; ungated (subagent
-    # children) run bash directly and cannot delegate further.
     gated: bool = True
-    # index of this turn within its session (always 0 for subagent turns).
     turn_index: int = 0
-    # turn's root span. llm_steps and child turns nest under it.
-    turn_span: ai.experimental_telemetry.Span | None = None
 
 
 class TurnOutput(pydantic.BaseModel):
-    kind: Literal["suspend", "error"]
+    kind: Literal["suspend", "error", "interrupted"]
     messages: list[ai.messages.Message]
     error: str | None = None
 
-
-class TurnHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    output: TurnOutput
-
-
-# Durable stream
 
 SESSION_STARTED = "session.started"
 SESSION_WAITING = "session.waiting"
 SESSION_COMPLETED = "session.completed"
 SESSION_FAILED = "session.failed"
+SESSION_INTERRUPTED = "session.interrupted"
 TURN_STARTED = "turn.started"
 SUBAGENT_CALLED = "subagent.called"
 SUBAGENT_COMPLETED = "subagent.completed"
@@ -99,7 +66,4 @@ class LifecycleEvent(pydantic.BaseModel):
     data: dict[str, Any] = pydantic.Field(default_factory=dict)
 
 
-# By using OmitEventMessage, we strip all the message fields from
-# events (keeping only ids). We reconstruct them in the one place
-# we need them (subagents).
 type StreamEvent = ai.events.OmitEventMessages[ai.events.AgentEvent] | LifecycleEvent

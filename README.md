@@ -1,13 +1,11 @@
 # seal
 
-A personal AI assistant built as a **durable agent**: every agent run is a
-Vercel workflow, so turns survive restarts, streams can be resumed mid-run,
-and tool calls can park indefinitely waiting for human approval.
+A personal AI assistant built as a **durable agent**. Temporal owns session
+and turn execution, so conversations survive worker restarts, streams can be
+resumed mid-run, and tool calls can wait for human approval.
 
 Seal is an example app for the [AI SDK for Python](https://ai-python.dev)
-(the `ai` package) and for
-[Workflows with Python](https://vercel.com/docs/workflows/python)
-(`vercel.workflow`).
+(the `ai` package) and [Temporal](https://temporal.io/).
 
 The agent (Claude via the AI Gateway) has three tools: `bash`,
 `web_fetch`, and `subagent`. Bash runs are gated behind an approval UI
@@ -23,34 +21,42 @@ silly, but this is a demo app.)
   run and streams the AI SDK UI message protocol; other endpoints cover
   sessions, titles, and private blob attachments. See `app/server.py` for the
   endpoint list.
-- **backend/agent/** — the durable agent itself. `driver.py` runs a
-  `run_session` workflow that spawns one child `run_turn` workflow per agent
-  turn and suspends on a hook until it finishes. Tool approvals are workflow
-  hooks too: the turn parks until the user answers, then resumes with the
-  decision. Model calls, stream writes, and session snapshots are all
-  workflow steps, replay-safe via the workflow's deterministic RNG/clock.
-- **Storage** — durable streams and session snapshots are stored on the
-  workflow SDK's run streams (`agent/stream.py`). Session metadata
-  (`app/sessions.py`) uses Postgres when `DATABASE_URL` is set, local
-  JSON files otherwise. Uses Vercel Blob to store attachments when
-  available.
+- **backend/agent/** — `driver.py` hosts one long-lived Temporal workflow per
+  chat session. New messages, approvals, and interrupts are Temporal signals.
+  Model and tool calls are Temporal activities. Subagents run as child
+  workflows.
+- **Streaming and state** — each session and subagent workflow hosts a Temporal
+  Workflow Stream. Activities publish model events into it and FastAPI resumes
+  from durable offsets. Committed message history is queried from workflow
+  state. Attachments still use Vercel Blob.
 
-Deployment is two Vercel services (see `vercel.json`): the frontend and the
-backend, with the workflow worker declared in `backend/pyproject.toml`.
+The frontend and FastAPI service can still run on Vercel. The Temporal worker
+must run as a separate long-lived process.
 
 ## Development
 
-Prereqs: [uv](https://docs.astral.sh/uv/), [pnpm](https://pnpm.io), and the
-[Vercel CLI](https://vercel.com/docs/cli).
+Prereqs: [uv](https://docs.astral.sh/uv/), [pnpm](https://pnpm.io), the
+[Vercel CLI](https://vercel.com/docs/cli), and the
+[Temporal CLI](https://docs.temporal.io/cli).
 
 ```sh
-./dev-setup.sh        # sync backend deps (works around a vercel-worker version override)
+./dev-setup.sh
 cd frontend && pnpm install
-vercel dev            # serves frontend + backend + worker on :3000
+
+# terminal 1: Temporal server and UI (:8233)
+temporal server start-dev
+
+# terminal 2: Temporal worker
+cd backend && uv run worker
+
+# terminal 3: frontend + FastAPI (:3000)
+vercel dev
 ```
 
-Environment: `AI_GATEWAY_API_KEY` (model access), optional `DATABASE_URL`
-(Postgres storage), and a blob token for attachments.
+Environment: `AI_GATEWAY_API_KEY` (model access), optional `TEMPORAL_ADDRESS`
+(default `localhost:7233`), optional `TEMPORAL_NAMESPACE` (default `default`),
+optional `DATABASE_URL` (shared session-list metadata), and a blob token for
+attachments. Temporal Workflow Streams are currently experimental.
 
 ### Checks
 
@@ -77,6 +83,7 @@ from the submit click. Timings also land in
 
 ## Deployment
 
-Deploy as a project to Vercel with `vc deploy`. `DATABASE_URL` must
-point to a Postgres database, which can most easily be done by
-configuring a marketplace integration with Neon or similar.
+Deploy the frontend and FastAPI project with `vc deploy`, and run
+`cd backend && uv run worker` on a long-lived host that can reach the same
+Temporal namespace. Set `DATABASE_URL` for FastAPI when multiple instances need
+to share the session list; agent state and SSE offsets live in Temporal.

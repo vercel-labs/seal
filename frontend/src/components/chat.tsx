@@ -4,7 +4,7 @@ import {
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from "ai"
 import type { FileUIPart, UIMessage } from "ai"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 
 import { ChatMessage } from "@/components/chat-message"
 import { PromptForm } from "@/components/prompt-form"
@@ -57,6 +57,8 @@ export function ChatView({
   onFinishReply: () => void
 }) {
   const [isUploading, setIsUploading] = useState(false)
+  const [isInterrupting, setIsInterrupting] = useState(false)
+  const interruptFinishedRef = useRef<Promise<void> | null>(null)
   // UI-only for now: the backend model is still hardcoded (see lib/models.ts).
   const [model, setModel] = useState(DEFAULT_MODEL)
 
@@ -76,23 +78,55 @@ export function ChatView({
     []
   )
 
-  const {
-    messages,
-    sendMessage,
-    status,
-    stop,
-    error,
-    addToolApprovalResponse,
-  } = useChat<ChatUIMessage>({
-    id: sessionId,
-    transport,
-    messages: initialMessages as ChatUIMessage[],
-    resume: true,
-    onFinish: onFinishReply,
-    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
-  })
+  const handleFinish = useCallback(() => {
+    onFinishReply()
+
+    const interruptFinished = interruptFinishedRef.current
+    if (interruptFinished === null) return
+
+    const finishInterrupt = () => {
+      if (interruptFinishedRef.current === interruptFinished) {
+        interruptFinishedRef.current = null
+        setIsInterrupting(false)
+      }
+    }
+    void interruptFinished.then(finishInterrupt, finishInterrupt)
+  }, [onFinishReply])
+
+  const { messages, sendMessage, status, error, addToolApprovalResponse } =
+    useChat<ChatUIMessage>({
+      id: sessionId,
+      transport,
+      messages: initialMessages as ChatUIMessage[],
+      resume: true,
+      onFinish: handleFinish,
+      sendAutomaticallyWhen:
+        lastAssistantMessageIsCompleteWithApprovalResponses,
+    })
 
   const isStreaming = status === "submitted" || status === "streaming"
+
+  const handleStop = useCallback(() => {
+    if (interruptFinishedRef.current !== null) return
+
+    setIsInterrupting(true)
+    const interruptFinished = (async () => {
+      const response = await fetch(`/api/sessions/${sessionId}/interrupt`, {
+        method: "POST",
+      })
+      if (!response.ok) {
+        throw new Error(`Interrupt failed: ${response.statusText}`)
+      }
+    })()
+    interruptFinishedRef.current = interruptFinished
+
+    void interruptFinished.catch(() => {
+      if (interruptFinishedRef.current === interruptFinished) {
+        interruptFinishedRef.current = null
+        setIsInterrupting(false)
+      }
+    })
+  }, [sessionId])
 
   const handleSubmit = useCallback(
     async ({ text, files }: { text: string; files: FileUIPart[] }) => {
@@ -174,9 +208,9 @@ export function ChatView({
           models={MODELS}
           model={model}
           onModelChange={setModel}
-          isBusy={isStreaming || isUploading}
+          isBusy={isStreaming || isUploading || isInterrupting}
           onSubmit={handleSubmit}
-          onStop={() => void stop()}
+          onStop={() => void handleStop()}
         />
       </div>
     </div>

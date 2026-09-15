@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import ai
 import ai.types.messages as messages_
+
+from agent import turn
 
 
 def _assistant_with_tool_calls() -> messages_.Message:
@@ -48,6 +52,15 @@ def test_round_trip_preserves_replay_and_cached_result() -> None:
     assert by_id["tc-2"].cached_result is None
     # the visible content is untouched
     assert restored.model_dump(mode="json") == message.model_dump(mode="json")
+
+
+def test_temporal_workflow_and_activities_are_registered() -> None:
+    definition = cast(Any, turn.TurnWorkflow).__temporal_workflow_definition
+    assert definition.name == "TurnWorkflow"
+    assert {
+        cast(Any, activity).__temporal_activity_definition.name
+        for activity in turn.ACTIVITIES
+    } >= {"llm_activity", "bash_activity", "stream_offset_activity"}
 
 
 def test_round_trip_of_plain_message_stays_plain() -> None:

@@ -10,17 +10,8 @@ import opentelemetry.sdk.trace as sdk_trace
 import opentelemetry.sdk.trace.export as sdk_export
 import opentelemetry.sdk.trace.export.in_memory_span_exporter as in_memory
 import pytest
-from conftest import MockProvider, text_msg, tool_call_msg
-from harness import (
-    InProcessWorld,
-    read_state,
-    resume_approvals,
-    start_session,
-    wait_for_event,
-    wait_for_lifecycle,
-)
 
-from agent import proto, telemetry
+from agent import telemetry
 
 
 def test_install_is_noop_without_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,98 +215,3 @@ async def test_real_error_is_recorded(
     (span,) = exporter.get_finished_spans()
     assert span.status.status_code.name == "ERROR"
     assert "boom" in (span.status.description or "")
-
-
-# --- telemetry enabled end-to-end on the real engine -------------------------
-#
-# the driver tests run with telemetry off (no turn span minted); these
-# re-run the critical flows with the adapter installed, covering the
-# mint -> sandbox-validate -> collect -> ship -> export path.
-
-
-@pytest.fixture
-def telemetry_on() -> Iterator[in_memory.InMemorySpanExporter]:
-    # registering the adapter is all it takes: the spawn steps gate on
-    # ``ai.experimental_telemetry.is_enabled()``.
-    exporter = in_memory.InMemorySpanExporter()
-    provider = sdk_trace.TracerProvider()
-    provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
-    adapter = otel_adapter.OtelAdapter(tracer_provider=provider, capture_content=False)
-    ai.experimental_telemetry.register(adapter)
-    yield exporter
-    ai.experimental_telemetry.unregister(adapter)
-
-
-async def test_turn_with_telemetry_suspends(
-    telemetry_on: in_memory.InMemorySpanExporter,
-    world: InProcessWorld,
-    scripted_model: MockProvider,
-) -> None:
-    scripted_model.responses = [[text_msg("hello there")]]
-
-    await start_session("s1", "hi")
-    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
-
-    spans = {s.name: s for s in telemetry_on.get_finished_spans()}
-    # the turn root exported at completion; the model call and the agent run
-    # hang under it in one trace.
-    assert "turn" in spans, f"exported: {list(spans)}"
-    turn = spans["turn"]
-    chat = next(span for name, span in spans.items() if name.startswith("chat "))
-    agent_run = spans["invoke_agent DurableAgent"]
-    assert turn.context is not None
-    assert chat.context is not None and agent_run.context is not None
-    assert chat.context.trace_id == turn.context.trace_id
-    assert agent_run.context.trace_id == turn.context.trace_id
-    assert agent_run.parent is not None
-    assert agent_run.parent.span_id == turn.context.span_id
-    assert turn.attributes is not None
-    assert turn.attributes["session.id"] == "s1"
-    assert turn.attributes["openinference.span.kind"] == "AGENT"
-    assert "input.value" not in turn.attributes
-    assert "output.value" not in turn.attributes
-
-
-async def test_gated_tool_approval_with_telemetry(
-    telemetry_on: in_memory.InMemorySpanExporter,
-    world: InProcessWorld,
-    scripted_model: MockProvider,
-) -> None:
-    scripted_model.responses = [
-        [
-            tool_call_msg(
-                tc_id="tc-1",
-                name="bash",
-                args='{"command": "echo approved-run"}',
-                text="running it",
-            )
-        ],
-        [text_msg("done")],
-    ]
-
-    await start_session("s1", "run it")
-    # the approval request must still reach the stream with telemetry on.
-    await wait_for_event("s1", ai.events.RunBlocked)
-
-    await resume_approvals(
-        "s1",
-        [
-            proto.ToolApprovalResponse(
-                hook_id="approve_tc-1", tool_call_id="tc-1", granted=True
-            )
-        ],
-    )
-    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
-
-    state = await read_state("s1")
-    assert state is not None
-    [tool_message] = [m for m in state.messages if m.role == "tool"]
-    [result] = tool_message.tool_results
-    assert result.result == "approved-run\n"
-
-    spans = {s.name: s for s in telemetry_on.get_finished_spans()}
-    assert "turn" in spans, f"exported: {list(spans)}"
-    tool = spans["execute_tool bash"]
-    turn = spans["turn"]
-    assert tool.context is not None and turn.context is not None
-    assert tool.context.trace_id == turn.context.trace_id

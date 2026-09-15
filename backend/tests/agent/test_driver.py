@@ -1,484 +1,247 @@
-"""End-to-end driver tests: the real durable engine, in-process.
-
-The harness (``tests/harness.py``) runs ``run_session`` on the real workflow
-engine; the only test double is the scripted model (``scripted_model``).
-
-These are the regression net for the failure modes that matter here:
-duplicated or missing messages after replay, unanswered tool calls, and
-deadlocks (every wait is bounded, so a deadlock is a fast red test).
-"""
-
 from __future__ import annotations
 
-import base64
-import os
-from typing import Any
+import asyncio
+from typing import cast
 
 import ai
+import httpx2
 import pytest
+import temporalio.client
 from conftest import MockProvider, assert_message_invariants, text_msg, tool_call_msg
-from harness import (
-    InProcessWorld,
-    read_state,
-)
-from harness import (
-    lifecycle as _lifecycle,
-)
-from harness import (
-    resume_approvals as _resume_approvals,
-)
-from harness import (
-    resume_session as _resume,
-)
-from harness import (
-    start_session as _start,
-)
-from harness import (
-    wait_for_event as _wait_for_event,
-)
-from harness import (
-    wait_for_hook as _wait_for_hook,
-)
-from harness import (
-    wait_for_lifecycle as _wait_for_lifecycle,
-)
 
-from agent import proto
-from agent import stream as stream_
+from agent import proto, session_workflow_id, stream, temporal
 
 
-async def test_single_turn_suspends(
-    world: InProcessWorld, scripted_model: MockProvider
+async def _start(
+    client: temporalio.client.Client, session_id: str, prompt: str
+) -> temporalio.client.WorkflowHandle[None, None]:
+    await temporal.start_or_resume(session_id, prompt)
+    return cast(
+        temporalio.client.WorkflowHandle[None, None],
+        client.get_workflow_handle(session_workflow_id(session_id)),
+    )
+
+
+async def _wait_for_event(
+    session_id: str, event_type: type[object] | str, *, count: int = 1
+) -> object:
+    stream_id = session_workflow_id(session_id)
+    async with asyncio.timeout(10):
+        while True:
+            events = [event async for event in stream.replay(stream_id)]
+            matches = [
+                event
+                for event in events
+                if (
+                    isinstance(event_type, str)
+                    and isinstance(event, proto.LifecycleEvent)
+                    and event.type == event_type
+                )
+                or (isinstance(event_type, type) and isinstance(event, event_type))
+            ]
+            if len(matches) >= count:
+                return matches[count - 1]
+            await asyncio.sleep(0.02)
+
+
+async def test_session_runs_and_resumes(
+    scripted_model: MockProvider, temporal_client: temporalio.client.Client
 ) -> None:
-    scripted_model.responses = [[text_msg("hello there")]]
+    scripted_model.responses = [[text_msg("first")], [text_msg("second")]]
+    handle = await _start(temporal_client, "s1", "one")
+    try:
+        await _wait_for_event("s1", proto.SESSION_WAITING)
+        await temporal.start_or_resume("s1", "two")
+        await _wait_for_event("s1", proto.SESSION_WAITING, count=2)
 
-    await _start("s1", "hi")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
-
-    state = await read_state("s1")
-    assert state is not None
-    assert [m.role for m in state.messages] == ["system", "user", "assistant"]
-    assert state.messages[-1].text == "hello there"
-    assert_message_invariants(state.messages)
-
-
-async def test_failed_turn_parks_and_accepts_another_message(
-    world: InProcessWorld, scripted_model: MockProvider
-) -> None:
-    scripted_model.responses = []
-
-    run = await _start("s1", "fail")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
-    assert await run.status() not in ("completed", "failed", "cancelled")
-
-    scripted_model.responses = [[text_msg("recovered")]]
-    await _resume(proto.session_hook_token("s1"), proto.NewUserMessage(prompt="retry"))
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING, count=2)
-
-    state = await read_state("s1")
-    assert state is not None
-    assert [m.role for m in state.messages] == [
-        "system",
-        "user",
-        "user",
-        "assistant",
-    ]
-    assert state.messages[-1].text == "recovered"
-    assert_message_invariants(state.messages)
+        state = await temporal.session_state("s1")
+        assert state is not None
+        assert [message.role for message in state.messages] == [
+            "system",
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert state.messages[-1].text == "second"
+        assert_message_invariants(state.messages)
+    finally:
+        await handle.terminate("test complete")
 
 
-async def test_resume_appends_user_message_without_duplicating_history(
-    world: InProcessWorld, scripted_model: MockProvider
-) -> None:
-    scripted_model.responses = [[text_msg("first answer")], [text_msg("second answer")]]
-
-    run = await _start("s1", "one")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
-    first_hook = await _wait_for_hook(proto.turn_hook_token("s1"))
-    first_session_hook = await _wait_for_hook(proto.session_hook_token("s1"))
-    assert first_hook.run_id == run.run_id
-    assert first_session_hook.run_id == run.run_id
-
-    await _resume(proto.session_hook_token("s1"), proto.NewUserMessage(prompt="two"))
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING, count=2)
-    second_hook = await _wait_for_hook(proto.turn_hook_token("s1"))
-    second_session_hook = await _wait_for_hook(proto.session_hook_token("s1"))
-    assert second_hook.hook_id == first_hook.hook_id
-    assert second_session_hook.hook_id == first_session_hook.hook_id
-
-    state = await read_state("s1")
-    assert state is not None
-    assert [m.role for m in state.messages] == [
-        "system",
-        "user",
-        "assistant",
-        "user",
-        "assistant",
-    ]
-    assert [m.text for m in state.messages if m.role == "user"] == ["one", "two"]
-    assert state.messages[-1].text == "second answer"
-    assert_message_invariants(state.messages)
-    assert scripted_model.call_count == 2
-
-
-async def test_gated_tool_approval_runs_in_one_turn(
-    world: InProcessWorld, scripted_model: MockProvider
+async def test_approval_signal_resumes_gated_tool(
+    scripted_model: MockProvider, temporal_client: temporalio.client.Client
 ) -> None:
     scripted_model.responses = [
         [
             tool_call_msg(
                 tc_id="tc-1",
                 name="bash",
-                args='{"command": "echo approved-run"}',
-                text="running it",
+                args='{"command":"echo approved"}',
+                text="running",
             )
         ],
         [text_msg("done")],
     ]
+    handle = await _start(temporal_client, "s2", "run it")
+    try:
+        blocked = await _wait_for_event("s2", ai.events.RunBlocked)
+        assert isinstance(blocked, ai.events.RunBlocked)
+        hook = blocked.hooks[0]
+        await temporal.submit_approvals(
+            "s2",
+            [
+                proto.ToolApprovalResponse(
+                    hook_id=hook.hook_id,
+                    tool_call_id="tc-1",
+                    granted=True,
+                )
+            ],
+        )
+        await _wait_for_event("s2", proto.SESSION_WAITING)
 
-    await _start("s1", "run it")
-    # The turn parks on the approval hook; the gated tool has not run yet, so
-    # the model was called exactly once.
-    await _wait_for_event("s1", ai.events.RunBlocked)
-    assert scripted_model.call_count == 1
-
-    await _resume_approvals(
-        "s1",
-        [
-            proto.ToolApprovalResponse(
-                hook_id="approve_tc-1", tool_call_id="tc-1", granted=True
-            )
-        ],
-    )
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
-
-    state = await read_state("s1")
-    assert state is not None
-    assert [m.role for m in state.messages] == [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
-    # the bash subprocess really ran, exactly once, after the approval landed
-    [tool_message] = [m for m in state.messages if m.role == "tool"]
-    [result] = tool_message.tool_results
-    assert result.tool_call_id == "tc-1"
-    assert result.result == "approved-run\n"
-    assert_message_invariants(state.messages)
-    # one model call for the gated turn, one more for the final answer
-    assert scripted_model.call_count == 2
+        state = await temporal.session_state("s2")
+        assert state is not None
+        results = [
+            result for message in state.messages for result in message.tool_results
+        ]
+        assert results[0].result == "approved\n"
+        assert state.messages[-1].text == "done"
+        assert_message_invariants(state.messages)
+    finally:
+        await handle.terminate("test complete")
 
 
-async def test_parallel_gated_tools_park_then_run(
-    world: InProcessWorld, scripted_model: MockProvider
-) -> None:
-    scripted_model.responses = [
-        [
-            ai.messages.Message(
-                role="assistant",
-                parts=[
-                    ai.messages.TextPart(text="running both"),
-                    ai.messages.ToolCallPart(
-                        tool_call_id="tc-a",
-                        tool_name="bash",
-                        tool_args='{"command": "echo a"}',
-                    ),
-                    ai.messages.ToolCallPart(
-                        tool_call_id="tc-b",
-                        tool_name="bash",
-                        tool_args='{"command": "echo b"}',
-                    ),
-                ],
-            )
-        ],
-        [text_msg("done")],
-    ]
-
-    await _start("s2", "run both")
-    # both gated calls park on their own hook before the turn parks.
-    await _wait_for_event("s2", ai.events.RunBlocked)
-    assert scripted_model.call_count == 1
-
-    await _resume_approvals(
-        "s2",
-        [
-            proto.ToolApprovalResponse(
-                hook_id="approve_tc-a", tool_call_id="tc-a", granted=True
-            ),
-            proto.ToolApprovalResponse(
-                hook_id="approve_tc-b", tool_call_id="tc-b", granted=True
-            ),
-        ],
-    )
-    await _wait_for_lifecycle("s2", proto.SESSION_WAITING)
-
-    state = await read_state("s2")
-    assert state is not None
-    [tool_message] = [m for m in state.messages if m.role == "tool"]
-    results = {r.tool_call_id: r.result for r in tool_message.tool_results}
-    assert results == {"tc-a": "a\n", "tc-b": "b\n"}
-    assert_message_invariants(state.messages)
-    assert scripted_model.call_count == 2
-
-
-async def test_subagent_result_lands_on_the_trailing_tool_message(
-    world: InProcessWorld, scripted_model: MockProvider
+async def test_subagent_runs_as_child_workflow(
+    scripted_model: MockProvider, temporal_client: temporalio.client.Client
 ) -> None:
     scripted_model.responses = [
         [
             tool_call_msg(
                 tc_id="tc-sub",
                 name="subagent",
-                args='{"prompt": "say hi", "name": "helper"}',
-                text="delegating",
+                args='{"prompt":"child task","name":"helper"}',
             )
         ],
-        [text_msg("child answer")],  # the child session's single turn
-        [text_msg("final answer")],  # the parent's follow-up turn
+        [text_msg("parent done")],
     ]
-
-    await _start("s1", "delegate")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
-
-    state = await read_state("s1")
-    assert state is not None
-    assert [m.role for m in state.messages] == [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
-    assert_message_invariants(state.messages)
-    assert state.messages[-1].text == "final answer"
-
-    # the child's full transcript (a MessageBundle) is the tool result
-    [tool_message] = [m for m in state.messages if m.role == "tool"]
-    [result] = tool_message.tool_results
-    assert result.tool_call_id == "tc-sub"
-    bundle = ai.agents.MessageBundle.model_validate(result.result)
-    assert [m.role for m in bundle.messages] == ["assistant"]
-    assert bundle.messages[-1].text == "child answer"
-
-    assert await _lifecycle("s1") == [
-        proto.SESSION_STARTED,
-        proto.TURN_STARTED,
-        proto.SUBAGENT_CALLED,
-        proto.SUBAGENT_COMPLETED,
-        proto.SESSION_WAITING,
-    ]
-    # the child ran as a single turn on its own stream (no session wrapper)
-    assert await _lifecycle("s1:child:tc-sub") == []
-    assert scripted_model.call_count == 3
+    scripted_model.keyed_responses = {"child task": [text_msg("child answer")]}
+    handle = await _start(temporal_client, "s3", "delegate")
+    try:
+        await _wait_for_event("s3", proto.SESSION_WAITING)
+        state = await temporal.session_state("s3")
+        assert state is not None
+        result = next(
+            result
+            for message in state.messages
+            for result in message.tool_results
+            if result.tool_call_id == "tc-sub"
+        )
+        bundle = ai.agents.MessageBundle.model_validate(result.result)
+        assert bundle.messages[-1].text == "child answer"
+        assert state.messages[-1].text == "parent done"
+        assert_message_invariants(state.messages)
+    finally:
+        await handle.terminate("test complete")
 
 
-async def test_generate_image_returns_multipart_result(
-    world: InProcessWorld, scripted_model: MockProvider
+async def test_llm_activity_retries_and_requests_reload(
+    scripted_model: MockProvider, temporal_client: temporalio.client.Client
 ) -> None:
-    png_b64 = base64.b64encode(b"\x89PNG fake image bytes").decode()
-    scripted_model.responses = [
-        [
-            tool_call_msg(
-                tc_id="tc-img",
-                name="generate_image",
-                args='{"prompt": "a cat in cherry blossoms"}',
-                text="drawing it",
-            )
-        ],
-        # the image model's turn: an inline image alongside text
-        [
-            ai.messages.Message(
-                role="assistant",
-                parts=[
-                    ai.messages.TextPart(text="here it is"),
-                    ai.messages.FilePart(data=png_b64, media_type="image/png"),
-                ],
-            )
-        ],
-        [text_msg("done drawing")],
-    ]
+    scripted_model.failures_remaining = 1
+    scripted_model.responses = [[text_msg("recovered")]]
+    handle = await _start(temporal_client, "s4", "retry")
+    try:
+        await _wait_for_event("s4", proto.SESSION_WAITING)
+        events = [event async for event in stream.replay(session_workflow_id("s4"))]
+        assert scripted_model.call_count == 2
+        assert any(
+            isinstance(event, proto.LifecycleEvent)
+            and event.type == proto.RELOAD_REQUESTED
+            for event in events
+        )
 
-    await _start("s1", "draw a cat")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
-
-    state = await read_state("s1")
-    assert state is not None
-    assert_message_invariants(state.messages)
-    assert state.messages[-1].text == "done drawing"
-
-    # the tool result is a multipart ContentOutput carrying the image, so the
-    # model (and the UI adapter) sees the actual media.
-    [tool_message] = [m for m in state.messages if m.role == "tool"]
-    [result] = tool_message.tool_results
-    assert result.tool_call_id == "tc-img"
-    assert result.result_kind == "special"
-    content = result.result
-    assert isinstance(content, ai.messages.ContentOutput)
-    [text_part, file_part] = content.value
-    assert isinstance(text_part, ai.messages.TextPart)
-    assert text_part.text == "here it is"
-    assert isinstance(file_part, ai.messages.FilePart)
-    assert file_part.media_type == "image/png"
-    assert file_part.data == png_b64
-    assert scripted_model.call_count == 3
-
-    # what the follow-up model call actually saw: the tool result's
-    # model-facing value must still be typed after the step JSON round-trip,
-    # or providers JSON-encode it and the image goes up as base64 text.
-    final_call = scripted_model.calls[-1]
-    [seen_result] = [part for m in final_call for part in m.tool_results]
-    assert isinstance(seen_result.get_model_input(), ai.messages.ContentOutput)
+        state = await temporal.session_state("s4")
+        assert state is not None
+        assert state.messages[-1].text == "recovered"
+    finally:
+        await handle.terminate("test complete")
 
 
-# How many times to repeat the parallel-subagent stress. Kept low by default
-# (each iteration re-imports `ai` per delivery, which is slow); bump for a
-# heavier determinism sweep, e.g. SEAL_PARALLEL_SUBAGENT_ITERS=24.
-_PARALLEL_SUBAGENT_ITERS = int(os.environ.get("SEAL_PARALLEL_SUBAGENT_ITERS", "2"))
-
-
-@pytest.mark.parametrize("iteration", range(_PARALLEL_SUBAGENT_ITERS))
-async def test_parallel_subagents_land_deterministically(
-    world: InProcessWorld, scripted_model: MockProvider, iteration: int
+async def test_interrupt_cancels_llm_activity(
+    scripted_model: MockProvider, temporal_client: temporalio.client.Client
 ) -> None:
-    # Two subagents scheduled from one assistant turn run concurrently: their
-    # tool coroutines and the agent loop all issue durable ``write_event`` steps,
-    # so the engine must deliver recorded completions one at a time (fully
-    # draining each before the next) or the two coroutines interleave their
-    # writes differently across replays -> NondeterminismError. Repeated to catch
-    # the flaky ordering.
-    session_id = f"s{iteration}"
+    model_blocked = asyncio.Event()
+    cancellation_observed = asyncio.Event()
+    MockProvider.wait_after_tool = model_blocked
+    MockProvider.cancellation_observed = cancellation_observed
     scripted_model.responses = [
-        [
-            ai.messages.Message(
-                role="assistant",
-                parts=[
-                    ai.messages.TextPart(text="delegating both"),
-                    ai.messages.ToolCallPart(
-                        tool_call_id="tc-a",
-                        tool_name="subagent",
-                        tool_args='{"prompt": "task-alpha", "name": "alpha"}',
-                    ),
-                    ai.messages.ToolCallPart(
-                        tool_call_id="tc-b",
-                        tool_name="subagent",
-                        tool_args='{"prompt": "task-beta", "name": "beta"}',
-                    ),
-                ],
-            )
-        ],
-        [text_msg("wrapped up")],  # parent's follow-up turn after both children
+        [tool_call_msg(tc_id="tc-cancel", name="bash", args='{"command":"true"}')]
     ]
-    scripted_model.keyed_responses = {
-        "task-alpha": [text_msg("alpha-report")],
-        "task-beta": [text_msg("beta-report")],
-    }
-
-    await _start(session_id, "delegate both")
-    await _wait_for_lifecycle(session_id, proto.SESSION_WAITING)
-
-    state = await read_state(session_id)
-    assert state is not None
-    assert [m.role for m in state.messages] == [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
-    assert state.messages[-1].text == "wrapped up"
-    assert_message_invariants(state.messages)
-
-    [tool_message] = [m for m in state.messages if m.role == "tool"]
-    results = {r.tool_call_id: r for r in tool_message.tool_results}
-    assert set(results) == {"tc-a", "tc-b"}
-    bundle_a = ai.agents.MessageBundle.model_validate(results["tc-a"].result)
-    bundle_b = ai.agents.MessageBundle.model_validate(results["tc-b"].result)
-    assert bundle_a.messages[-1].text == "alpha-report"
-    assert bundle_b.messages[-1].text == "beta-report"
-    # parent: 1 turn issuing both calls + 1 follow-up; each child: 1 turn
-    assert scripted_model.call_count == 4
+    handle = await _start(temporal_client, "s5", "cancel")
+    try:
+        await _wait_for_event("s5", ai.events.ToolEnd)
+        await temporal.interrupt("s5")
+        await _wait_for_event("s5", proto.SESSION_INTERRUPTED)
+        async with asyncio.timeout(10):
+            await cancellation_observed.wait()
+    finally:
+        await handle.terminate("test complete")
 
 
-async def test_eager_tool_result_from_failed_llm_step_is_not_streamed(
-    world: InProcessWorld,
-    scripted_model: MockProvider,
+async def test_web_fetch_starts_before_model_stream_finishes(
     monkeypatch: pytest.MonkeyPatch,
+    scripted_model: MockProvider,
+    temporal_client: temporalio.client.Client,
 ) -> None:
-    # The first llm_step attempt emits an eager generate_image call and then
-    # dies before StreamEnd. The retry produces plain text. The eager tool's
-    # result belongs to an assistant message that never existed, so it must
-    # reach neither the client stream nor the history.
-    png_b64 = base64.b64encode(b"\x89PNG fake image bytes").decode()
+    tool_started = asyncio.Event()
+    request_count = 0
+    MockProvider.wait_after_tool = tool_started
     scripted_model.responses = [
         [
             tool_call_msg(
-                tc_id="tc-img",
-                name="generate_image",
-                args='{"prompt": "a heron at dawn"}',
-                text="drawing it",
+                tc_id="tc-eager",
+                name="web_fetch",
+                args='{"url":"https://example.test"}',
             )
         ],
-        [text_msg("recovered without drawing")],
-        # only reached if the stale eager result wrongly lands in the history
-        [text_msg("follow-up after stray tool result")],
+        [text_msg("done")],
     ]
-    scripted_model.keyed_responses = {
-        "heron": [
-            ai.messages.Message(
-                role="assistant",
-                parts=[
-                    ai.messages.TextPart(text="here it is"),
-                    ai.messages.FilePart(data=png_b64, media_type="image/png"),
-                ],
-            )
-        ],
-    }
 
-    original_stream = MockProvider.stream
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+        text = "eager result"
 
-    async def _drop_before_end(events: Any) -> Any:
-        async for event in events:
-            if isinstance(event, ai.events.StreamEnd):
-                raise RuntimeError("model connection dropped")
-            yield event
+    async def request(
+        _client: httpx2.AsyncClient,
+        method: str,
+        url: str,
+        **_kwargs: object,
+    ) -> Response:
+        nonlocal request_count
+        assert method == "GET"
+        assert url == "https://example.test"
+        request_count += 1
+        tool_started.set()
+        return Response()
 
-    def stream(self: MockProvider, *args: Any, **kwargs: Any) -> Any:
-        events = original_stream(self, *args, **kwargs)
-        # only the first llm_step attempt fails
-        if self.call_count == 1:
-            return _drop_before_end(events)
-        return events
+    monkeypatch.setattr(httpx2.AsyncClient, "request", request)
+    handle = await _start(temporal_client, "s6", "fetch")
+    try:
+        await _wait_for_event("s6", proto.SESSION_WAITING)
+        assert tool_started.is_set()
+        assert request_count == 1
 
-    monkeypatch.setattr(MockProvider, "stream", stream)
-
-    await _start("s1", "hello")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
-
-    state = await read_state("s1")
-    assert state is not None
-    run_id = await stream_.session_run_id("s1")
-    assert run_id is not None
-    events = [e async for e in stream_.replay(run_id)]
-    assert any(
-        isinstance(e, proto.LifecycleEvent) and e.type == proto.RELOAD_REQUESTED
-        for e in events
-    )
-    # every tool result the client saw must answer a call in the history
-    known_calls = {p.tool_call_id for m in state.messages for p in m.tool_calls}
-    streamed_results = [
-        r.tool_call_id
-        for e in events
-        if isinstance(e, ai.events.ToolCallResult)
-        for r in e.results
-    ]
-    assert all(tc in known_calls for tc in streamed_results), (
-        f"streamed results for tool calls not in history: {streamed_results}"
-    )
-
-    assert [m.role for m in state.messages] == ["system", "user", "assistant"]
-    assert state.messages[-1].text == "recovered without drawing"
-    assert_message_invariants(state.messages)
-    # first attempt, the image model, the retry
-    assert scripted_model.call_count == 3
+        state = await temporal.session_state("s6")
+        assert state is not None
+        result = next(
+            result
+            for message in state.messages
+            for result in message.tool_results
+            if result.tool_call_id == "tc-eager"
+        )
+        assert "eager result" in str(result.result)
+        assert state.messages[-1].text == "done"
+    finally:
+        await handle.terminate("test complete")
