@@ -2,13 +2,12 @@ import asyncio
 import contextlib
 import contextvars
 import dataclasses
+import functools
 import traceback
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
-    Sequence,
 )
-from typing import ClassVar
 
 import ai
 import pydantic
@@ -33,7 +32,7 @@ IMAGE_SYSTEM_PROMPT = (
 
 
 class EagerToolHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    payload: ai.events.ToolEnd
+    payload: ai.events.OmitEventMessages[ai.events.ToolEnd]
 
 
 @workflow.step
@@ -88,10 +87,6 @@ async def llm_step_stream(
         yield ai.util.merge(
             (ev.payload async for ev in eager_tool_hook),
             stream,
-            restart=False,
-            # priority means no eager hook will get output after the
-            # first stream one, because of the dispose.
-            priority=True,
         )
 
 
@@ -228,19 +223,26 @@ async def spawn_subagent_turn(
     return started.run_id
 
 
-# the agent whose turn is running, set by run_turn so a tool can reach the
-# turn's session/stream/span without smuggling args. tasks copy the
-# contextvars at creation, so every tool task under the run sees it.
-current_agent: contextvars.ContextVar["DurableAgent"] = contextvars.ContextVar(
-    "current_agent"
+@dataclasses.dataclass
+class TurnContext:
+    session_id: str
+    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None
+    turn_span: ai.experimental_telemetry.Span | None
+
+
+# Tools use this to reach the current turn's session/stream/span without
+# smuggling args. Tasks copy the contextvars at creation, so every tool task
+# under the run sees it.
+current_turn_context: contextvars.ContextVar[TurnContext] = contextvars.ContextVar(
+    "current_turn_context"
 )
 
 
 @ai.tool(to_model_input=ai.agents.MessageAggregator.to_model_input)
 async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
     """Delegate a focused task to a child agent and return its answer."""
-    agent = current_agent.get()
-    session_id = agent.session_id
+    turn_context = current_turn_context.get()
+    session_id = turn_context.session_id
     tool_call_id = ai_util.current_tool_call_id.get()
     assert tool_call_id
 
@@ -258,11 +260,11 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
             gated=False,
         ),
         # the child turn's root span nests under this turn's root span.
-        agent.turn_span,
+        turn_context.turn_span,
     )
-    assert agent.writer is not None
+    assert turn_context.writer is not None
     await write_event(
-        agent.writer,
+        turn_context.writer,
         stream.subagent_called(
             tool_call_id=tool_call_id,
             child_session_id=child_session_id,
@@ -275,7 +277,7 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
 
     output = resolution.output
     await write_event(
-        agent.writer,
+        turn_context.writer,
         stream.subagent_completed(
             tool_call_id=tool_call_id, is_error=output.kind == "error"
         ),
@@ -290,57 +292,6 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
 # cancelled) and non-streaming (because that would take some extra
 # thought).
 EAGER_TOOLS = {"generate_image", "web_fetch"}
-
-
-class DurableAgent(ai.Agent):
-    # We require the loop to run in lockstep with the client code, so that
-    # tool streams are always sent before the next llm_step invocation.
-    LOOP_BUFFER = 0
-
-    # bash is gated/ungated per mode, so it is supplied via tools=, not here.
-    TOOLS: ClassVar[list[ai.AgentTool]] = [web_fetch, generate_image]
-
-    def __init__(
-        self,
-        *,
-        tools: Sequence[ai.AgentTool | ai.Tool] | None = None,
-        session_id: str | None = None,
-        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
-        turn_span: ai.experimental_telemetry.Span | None = None,
-    ) -> None:
-        super().__init__(tools=tools)
-        self.session_id = session_id
-        self.writer = writer
-        self.turn_span = turn_span
-
-    async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
-        tool_token = f"seal-early-tool:{self.session_id}"
-
-        while context.keep_running():
-            async with (
-                llm_step_stream(
-                    context, self.writer, tool_token, self.turn_span
-                ) as stream,
-                ai_util.TrackingToolRunner() as tr,
-            ):
-                final = False
-                async for event in stream:
-                    if isinstance(event, ai.events.ToolEnd):
-                        if final or event.tool_call.tool_name in EAGER_TOOLS:
-                            tool = context.resolve(event.tool_call)
-                            tr.schedule(tool)
-                    elif isinstance(event, ai.events.StreamEnd):
-                        tr.discard_except(context.resolve(event.message.tool_calls))
-                        context.add(event.message)
-                    elif isinstance(event, ai.events.StreamStart):
-                        final = True
-
-                    yield event
-
-                async for event in tr.events():
-                    yield event
-
-                context.add(tr.get_tool_message())
 
 
 @workflow.step
@@ -396,15 +347,26 @@ async def run_turn(
         if writer is None:
             writer = vercel.workflow.get_writable(type=proto.StreamEvent)
 
-        extra_tools = [bash, subagent] if turn_input.gated else [bash_ungated]
-        agent = DurableAgent(
-            tools=extra_tools,
-            session_id=session_id,
+        tools = [web_fetch, generate_image]
+        tools += [bash, subagent] if turn_input.gated else [bash_ungated]
+        streamer = functools.partial(
+            llm_step_stream,
+            tool_token=f"seal-early-tool:{session_id}",
             writer=writer,
             turn_span=turn_input.turn_span,
         )
-        # tool tasks are created under this run's context and inherit this.
-        current_agent.set(agent)
+
+        agent = ai_util.DurableAgent(
+            tools=tools, streamer=streamer, eager_tools=EAGER_TOOLS
+        )
+        # Tool tasks are created under this run's context and inherit this.
+        current_turn_context.set(
+            TurnContext(
+                session_id=session_id,
+                writer=writer,
+                turn_span=turn_input.turn_span,
+            )
+        )
 
         # collect spans that happen inside the workflow body, and send them
         # once in a separate step.
