@@ -39,7 +39,7 @@ def test_hook_payloads_round_trip() -> None:
     restored = proto.NewUserMessage.model_validate(message.model_dump(mode="json"))
     assert restored == message
 
-    approval = proto.ApprovalHook(
+    approval = proto.ApprovalSignal(
         responses=[
             proto.ToolApprovalResponse(
                 hook_id="approve_tc-1",
@@ -49,7 +49,9 @@ def test_hook_payloads_round_trip() -> None:
             )
         ]
     )
-    restored_hook = proto.ApprovalHook.model_validate(approval.model_dump(mode="json"))
+    restored_hook = proto.ApprovalSignal.model_validate(
+        approval.model_dump(mode="json")
+    )
     assert restored_hook == approval
 
 

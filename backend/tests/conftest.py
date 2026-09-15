@@ -1,49 +1,49 @@
-"""Shared test setup.
-
-Every test runs against an isolated temp store (session metadata, workflow
-data); ``DATABASE_URL`` is cleared so the file backend is always selected.
-
-``mock_llm`` scripts model responses for tests that drive the agent loop:
-it attaches a queue of complete messages to ``MOCK_MODEL``'s provider, and
-each ``ai.stream`` call pops one response and replays it as a realistic
-event stream (Start/Delta/End triples bookended by StreamStart/StreamEnd).
-This is the only test double in the suite — everything else (streams,
-hooks, workflows, the UI adapter) is real.
-"""
+"""Shared test setup for the Temporal port."""
 
 from __future__ import annotations
 
 import sys
 from collections.abc import AsyncGenerator, Iterator, Sequence
 from pathlib import Path
-from typing import Any
-
-import pydantic
-import pytest
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # for `import harness`
 
 import ai  # noqa: E402
 import ai.models as models  # noqa: E402
 import ai.types.events as events_  # noqa: E402
 import ai.types.messages as messages_  # noqa: E402
-import harness  # noqa: E402
-import vercel.workflow._internal.world as wf_world  # noqa: E402
+import pydantic
+import pytest
+import temporalio.client
+import temporalio.contrib.workflow_streams
+import temporalio.testing
+import temporalio.worker
+import temporalio.workflow
 
-import agent  # noqa: E402
+from agent import driver, proto, stream, temporal, turn  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _isolate_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("SEAL_SESSIONS_DIR", str(tmp_path / "sessions"))
-    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path / "workflow-data"))
-    # the default world is created lazily and caches WORKFLOW_LOCAL_DATA_DIR,
-    # so drop it around each test to keep world data in the test's tmp dir.
-    wf_world.set_world(None)
     yield
-    wf_world.set_world(None)
+
+
+@temporalio.workflow.defn(sandboxed=False)
+class StreamFixtureWorkflow:
+    def __init__(self) -> None:
+        workflow_stream = temporalio.contrib.workflow_streams.WorkflowStream()
+        self.events = workflow_stream.topic(
+            stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent)
+        )
+
+    @temporalio.workflow.run
+    async def run(self, events: list[proto.StreamEvent]) -> None:
+        for event in events:
+            self.events.publish(event)
+        await temporalio.workflow.wait_condition(lambda: False)
 
 
 # --- scripted model -------------------------------------------------------------
@@ -164,27 +164,27 @@ def mock_llm() -> Iterator[MockProvider]:
     MOCK_PROVIDER.calls = []
 
 
-# --- in-process engine fixtures ---------------------------------------------------
-
-
 @pytest.fixture
-async def world() -> AsyncGenerator[harness.InProcessWorld]:
-    bridged = harness.InProcessWorld(agent.workflow)
-    wf_world.set_world(bridged)
-    yield bridged
-    for task in list(bridged._tasks):
-        task.cancel()
-    wf_world.set_world(None)
-    assert bridged.errors == [], f"workflow delivery errors: {bridged.errors}"
+async def temporal_client() -> AsyncGenerator[temporalio.client.Client]:
+    environment = await temporalio.testing.WorkflowEnvironment.start_time_skipping(
+        data_converter=temporal.DATA_CONVERTER
+    )
+    temporal._client = environment.client
+    async with temporalio.worker.Worker(
+        environment.client,
+        task_queue="seal-temporal",
+        workflows=[driver.SessionWorkflow, turn.TurnWorkflow, StreamFixtureWorkflow],
+        activities=turn.ACTIVITIES,
+    ):
+        yield environment.client
+    temporal._client = None
+    await environment.shutdown()
 
 
 @pytest.fixture
 def scripted_model(
     monkeypatch: pytest.MonkeyPatch, mock_llm: MockProvider
 ) -> MockProvider:
-    # Workflow bodies run in a sandbox, so their model factory does not see
-    # this fixture's host-side monkeypatch. Patch the provider used by the
-    # serialized Context when its model step executes back on the host.
     provider_type = type(ai.get_model("gateway:openai/gpt-5.6-luna").provider)
 
     def stream(
@@ -205,8 +205,6 @@ def scripted_model(
         )
 
     monkeypatch.setattr(provider_type, "stream", stream)
-    model = models.Model(id="mock-model", provider=mock_llm)
-    monkeypatch.setattr(ai, "get_model", lambda model_id=None, **kwargs: model)
     return mock_llm
 
 

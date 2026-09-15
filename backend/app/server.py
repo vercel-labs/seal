@@ -19,18 +19,11 @@ from __future__ import annotations
 
 import collections.abc
 import logging
-import os
 
 # uvicorn's reloader passes watch_filter=None to watchfiles and applies its
-# *.py filter only afterward, so every .workflow-data/.seal write logs an INFO
+# *.py filter only afterward, so every .seal write logs an INFO
 # "N changes detected" without causing a reload; drop those count lines.
 logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
-
-_BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
-os.environ.setdefault(
-    "WORKFLOW_LOCAL_DATA_DIR",
-    os.path.join(_BACKEND_DIR, ".workflow-data"),
-)
 
 from agent import telemetry  # noqa: E402
 
@@ -45,7 +38,7 @@ import fastapi.responses  # noqa: E402
 import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
-from agent import proto  # noqa: E402
+from agent import proto, temporal  # noqa: E402
 from app import attachments, chat, sessions  # noqa: E402
 
 
@@ -209,6 +202,8 @@ async def generate_title(session_id: str) -> sessions.SessionMeta:
 async def delete_session(session_id: str) -> dict[str, str]:
     if not await sessions.delete_session(session_id):
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
+    with contextlib.suppress(Exception):
+        await temporal.terminate(session_id)
     return {"status": "deleted"}
 
 

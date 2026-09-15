@@ -31,9 +31,8 @@ import ai
 import ai.ui.ai_sdk as ai_sdk
 import ai.ui.ai_sdk.outbound_stream as outbound_stream
 import ai.ui.ai_sdk.ui_events as ui_events
-import vercel.workflow
 
-from agent import driver, proto, stream, workflow_util
+from agent import proto, session_workflow_id, stream, temporal
 
 _TERMINAL = {
     proto.SESSION_WAITING,
@@ -64,8 +63,8 @@ async def active_run_start_index(session_id: str) -> int | None:
 
     The run is in flight (resumable) when its opener has no terminal after it.
     """
-    run_id = await stream.session_run_id(session_id)
-    if run_id is None:
+    run_id = session_workflow_id(session_id)
+    if await stream.tail_index(run_id) < 0:
         return None
     run_start: int | None = None
     seen_boundary = True
@@ -89,22 +88,9 @@ async def start_or_resume(session_id: str, prompt: str) -> int:
     Returns the stream index to tail from so only the new turn reaches the
     client.
     """
-    run_id = await stream.session_run_id(session_id)
-    if run_id is None:
-        # no turn hook: start the session, then wait for the workflow to publish
-        # the hook that identifies its run before the response starts tailing it.
-        await workflow_util.start(
-            workflow_util.with_hooks(
-                driver.run_session, [proto.turn_hook_token(session_id)]
-            ),
-            proto.SessionInput(session_id=session_id, prompt=prompt),
-        )
-        return 0
-
+    run_id = session_workflow_id(session_id)
     start_index = await stream.tail_index(run_id) + 1
-    await proto.SessionHook(payload=proto.NewUserMessage(prompt=prompt)).resume(
-        proto.session_hook_token(session_id)
-    )
+    await temporal.start_or_resume(session_id, prompt)
     return start_index
 
 
@@ -118,25 +104,24 @@ async def submit_approvals(
     resubmit carries the parked assistant message, so the client keeps streaming
     into it and the continuation (tool output + answer) folds in.
     """
-    run_id = await stream.session_run_id(session_id)
-    assert run_id is not None  # approvals only park on a started run
+    run_id = session_workflow_id(session_id)
+    if await stream.tail_index(run_id) < 0:
+        raise SessionUnavailableError("Session is not running")
     start_index = await stream.tail_index(run_id) + 1
-    await proto.ApprovalHook(responses=approvals).resume(
-        proto.hooks_hook_token(session_id)
-    )
+    await temporal.submit_approvals(session_id, approvals)
     return start_index
 
 
 async def interrupt(session_id: str) -> None:
     """Interrupt the active turn and wait for its durable stream boundary."""
-    run_id = await stream.session_run_id(session_id)
-    if run_id is None:
+    run_id = session_workflow_id(session_id)
+    if await stream.tail_index(run_id) < 0:
         raise SessionUnavailableError("Session is not running")
 
     start_index = await stream.tail_index(run_id) + 1
     try:
-        await proto.InterruptHook().resume(proto.interrupt_hook_token(session_id))
-    except vercel.workflow.HookNotFoundError:
+        await temporal.interrupt(session_id)
+    except Exception:
         raise SessionUnavailableError("Session has no active turn") from None
 
     async with asyncio.timeout(30):
@@ -208,8 +193,7 @@ async def _turn_events(
     forwards the reload marker and continues reading, so the client can discard
     the current step before applying events from the retried step.
     """
-    run_id = await stream.session_run_id(session_id)
-    assert run_id is not None  # both endpoints guarantee the run has started
+    run_id = session_workflow_id(session_id)
     async for event in stream.get_readable(run_id, start_index=start_index):
         if isinstance(event, ai.events.RunBlocked):
             yield event
@@ -278,6 +262,8 @@ async def _pump_subagent(
     hydrator = ai.events.MessageHydrator()
     async for child_event in stream.get_readable(child_run_id, start_index=0):
         if isinstance(child_event, proto.LifecycleEvent):
+            if child_event.type in _TERMINAL:
+                return
             continue
         child_event = hydrator.feed(child_event)
         nested = bundle_to_wire(hydrator.messages)

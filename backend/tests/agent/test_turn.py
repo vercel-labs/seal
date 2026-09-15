@@ -54,11 +54,13 @@ def test_round_trip_preserves_replay_and_cached_result() -> None:
     assert restored.model_dump(mode="json") == message.model_dump(mode="json")
 
 
-def test_model_and_tool_steps_are_cancellable() -> None:
-    assert turn.llm_step.cancellable
-    assert cast(Any, turn.bash.fn).cancellable
-    assert cast(Any, turn.web_fetch.fn).cancellable
-    assert cast(Any, turn.generate_image.fn).cancellable
+def test_temporal_workflow_and_activities_are_registered() -> None:
+    definition = cast(Any, turn.TurnWorkflow).__temporal_workflow_definition
+    assert definition.name == "TurnWorkflow"
+    assert {
+        cast(Any, activity).__temporal_activity_definition.name
+        for activity in turn.ACTIVITIES
+    } >= {"llm_activity", "bash_activity", "stream_offset_activity"}
 
 
 def test_round_trip_of_plain_message_stays_plain() -> None:

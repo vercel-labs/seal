@@ -1,103 +1,93 @@
-import ai
-import vercel.workflow
+from __future__ import annotations
 
-import agent.proto as proto
-import agent.stream as stream
-import agent.turn as turn
-import agent.workflow_util as workflow_util
-from agent import workflow
+import asyncio
+from typing import Any, cast
 
+import temporalio.contrib.workflow_streams
+import temporalio.workflow
 
-@workflow.step(max_retries=0)
-async def spawn_turn_workflow(
-    turn_input: proto.TurnInput,
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
-) -> str:
-    # TODO: making retry for this safe requires cooperation on the workflow side
-    # ts docs suggest using a hook and checking uniqueness!
-    # fires child workflow for an agent turn
-    if ai.experimental_telemetry.is_enabled():
-        # mint the span for the turn and pass it in. this way
-        # whatever is going on inside will be able to nest under it.
-        turn_span = ai.experimental_telemetry.create_span("turn").stamp_start()
-        turn_span.set_attrs({"openinference.span.kind": "AGENT"})
-        turn_input = turn_input.model_copy(update={"turn_span": turn_span})
-    started = await workflow_util.start(turn.run_turn, turn_input, writer)
-    return started.run_id
+with temporalio.workflow.unsafe.imports_passed_through():
+    import ai
+
+    from agent import proto, stream, turn
 
 
-@workflow.step
-async def save_session(
-    state: proto.SessionState,
-    writer: vercel.workflow.WorkflowWritable[proto.SessionState],
-) -> None:
-    # appends the current session state as the latest snapshot
-    await writer.write(state)
+@temporalio.workflow.defn
+class SessionWorkflow:
+    def __init__(self) -> None:
+        self.workflow_stream = temporalio.contrib.workflow_streams.WorkflowStream()
+        self.events = self.workflow_stream.topic(
+            stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent)
+        )
+        self.hook_registry = ai.HookRegistry()
+        self.pending_messages: list[proto.NewUserMessage] = []
+        self.run_task: asyncio.Task[proto.TurnOutput] | None = None
+        self.state: proto.SessionState | None = None
 
+    @temporalio.workflow.query
+    def get_state(self) -> proto.SessionState | None:
+        return self.state
 
-class SessionWorkflow(workflow_util.WorkflowClass, registry=workflow):
-    # Draw message/part ids from the workflow's deterministic RNG so they're
-    # stable across replay.
-    @ai.messages.use_random(vercel.workflow.random)
-    @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
+    @temporalio.workflow.signal
+    def new_message(self, message: proto.NewUserMessage) -> None:
+        self.pending_messages.append(message)
+
+    @temporalio.workflow.signal
+    def approvals(self, signal: proto.ApprovalSignal) -> None:
+        for response in signal.responses:
+            ai.resolve_hook(
+                response.hook_id,
+                {"granted": response.granted, "reason": response.reason},
+                registry=self.hook_registry,
+            )
+
+    @temporalio.workflow.signal
+    def interrupt(self) -> None:
+        if self.run_task is not None:
+            self.run_task.cancel()
+
+    @temporalio.workflow.run
+    @ai.messages.use_random(temporalio.workflow.random)
     async def run(self, session_input: proto.SessionInput) -> None:
-        # prepare the session
-        session_id = session_input.session_id
-        # the session's event stream is this run's workflow stream; the handle is
-        # writable inside steps and rides TurnInput into the turn workflows.
-        writer = vercel.workflow.get_writable(type=proto.StreamEvent)
-        # session snapshots go on a second, namespaced stream on the same run.
-        state_writer = vercel.workflow.get_writable(
-            type=proto.SessionState, namespace=stream.SESSION_NAMESPACE
-        )
-        # Stable hooks carry all child-turn results and user messages. The turn
-        # hook also lets stream readers discover this workflow's run id.
-        turn_hook = proto.TurnHook.wait(token=proto.turn_hook_token(session_id))
-        session_hook = proto.SessionHook.wait(
-            token=proto.session_hook_token(session_id)
-        )
-
-        state = proto.SessionState(
-            session_id=session_id,
+        self.state = proto.SessionState(
+            session_id=session_input.session_id,
             messages=[
                 ai.system_message(turn.SYSTEM_PROMPT),
                 ai.user_message(session_input.prompt),
             ],
         )
-        await save_session(state, state_writer)
-        await turn.write_event(writer, stream.session_started())
+        await turn.write_event(self.events, stream.session_started())
 
         turn_index = 0
         while True:
-            # run turn workflow and suspend on a hook until it completes
-            await turn.write_event(writer, stream.turn_started(turn_index=turn_index))
-            turn_input = proto.TurnInput(
-                session_id=session_id,
-                messages=state.messages,
-                turn_index=turn_index,
+            await turn.write_event(
+                self.events, stream.turn_started(turn_index=turn_index)
             )
-            await spawn_turn_workflow(turn_input, writer)
-            turn_result = (await turn_hook).output
+            self.run_task = asyncio.create_task(
+                turn.run_turn(
+                    proto.TurnInput(
+                        session_id=session_input.session_id,
+                        messages=self.state.messages,
+                        turn_index=turn_index,
+                    ),
+                    events=self.events,
+                    hook_registry=self.hook_registry,
+                )
+            )
+            output = await self.run_task
+            self.run_task = None
+            self.state.messages = output.messages
 
-            # process turn results
-            state.messages = turn_result.messages
-            await save_session(state, state_writer)
-
-            # A failed or interrupted turn should not destroy the session. Park for
-            # another user message after publishing the terminal UI boundary.
-            if turn_result.kind == "interrupted":
-                await turn.write_event(writer, stream.session_interrupted())
+            if output.kind == "interrupted":
+                await turn.write_event(self.events, stream.session_interrupted())
             else:
                 await turn.write_event(
-                    writer, stream.session_waiting(turn_index=turn_index)
+                    self.events, stream.session_waiting(turn_index=turn_index)
                 )
-            resolution = await session_hook
-            state.messages.append(ai.user_message(resolution.payload.prompt))
 
-            # persist post-turn mutations (resume prompt / subagent results) so the
-            # next turn resumes from the latest state after a crash.
-            await save_session(state, state_writer)
+            await temporalio.workflow.wait_condition(
+                lambda: bool(self.pending_messages)
+            )
+            next_message = self.pending_messages.pop(0)
+            self.state.messages.append(ai.user_message(next_message.prompt))
             turn_index += 1
-
-
-run_session = SessionWorkflow.registered_workflow()

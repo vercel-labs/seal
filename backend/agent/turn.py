@@ -1,21 +1,25 @@
+from __future__ import annotations
+
 import asyncio
-import contextlib
 import contextvars
 import dataclasses
-import functools
+import datetime
 import os
 import signal
 import traceback
-from collections.abc import (
-    AsyncGenerator,
-    AsyncIterator,
-)
+from collections.abc import AsyncGenerator, Callable
+from typing import Any, cast
 
-import ai
-import pydantic
-import vercel.workflow
+import temporalio.activity
+import temporalio.common
+import temporalio.contrib.workflow_streams
+import temporalio.workflow
 
-from agent import ai_util, proto, stream, workflow, workflow_util
+with temporalio.workflow.unsafe.imports_passed_through():
+    import ai
+    import pydantic
+
+    from agent import TASK_QUEUE, ai_util, proto, stream
 
 MODEL_ID = "gateway:openai/gpt-5.6-luna"
 IMAGE_MODEL_ID = "gateway:google/gemini-3.1-flash-image"
@@ -32,88 +36,86 @@ IMAGE_SYSTEM_PROMPT = (
     "You are an image generator. Generate an image for the user's prompt."
 )
 
-
-class EagerToolHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    payload: ai.events.OmitEventMessages[ai.events.ToolEnd]
-
-
-@workflow.step(cancellable=True)
-async def llm_step(
-    context: ai.Context,
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None,
-    tool_token: str | None = None,
-    turn_span: ai.experimental_telemetry.Span | None = None,
-) -> ai.messages.Message:
-    metadata = vercel.workflow.get_step_metadata()
-
-    # On a retry, emit a message requesting a reload. The will trigger
-    # the client to drop everything from the last step.
-    if writer is not None and metadata.attempt > 1:
-        await writer.write(stream.reload_requested())
-
-    # parent this step's spans under the turn's span
-    async with (
-        ai.experimental_telemetry.use_span(turn_span),
-        ai.stream(context=context) as model_stream,
-    ):
-        async for e in model_stream:
-            if e.replay:
-                continue
-
-            if writer is not None:
-                await writer.write(e)
-            if tool_token and isinstance(e, ai.types.events.ToolEnd):
-                await EagerToolHook(payload=e).resume(tool_token)
-
-    return model_stream.message
+NO_RETRIES = temporalio.common.RetryPolicy(maximum_attempts=1)
+ACTIVITY_TIMEOUT = datetime.timedelta(minutes=5)
 
 
-@contextlib.asynccontextmanager
-async def llm_step_stream(
-    context: ai.Context,
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None,
-    tool_token: str | None,
-    turn_span: ai.experimental_telemetry.Span | None = None,
-) -> AsyncIterator[AsyncGenerator[ai.events.AgentEvent]]:
-    eager_tool_hook = EagerToolHook.wait(token=tool_token)
+class ModelActivityInput(pydantic.BaseModel):
+    model: ai.Model
+    messages: list[ai.messages.Message]
+    tools: list[ai.Tool]
 
-    async def _stream() -> AsyncGenerator[ai.events.AgentEvent]:
-        async with eager_tool_hook:
-            message = await llm_step(context, writer, tool_token, turn_span)
 
-        async with ai.Stream.replay_message(message) as replay:
-            async for event in replay:
-                yield event
+class PartialMessagesInput(pydantic.BaseModel):
+    start_index: int
+    messages: list[ai.messages.Message]
 
-    async with contextlib.aclosing(_stream()) as stream:
-        yield ai.util.merge(
-            (ev.payload async for ev in eager_tool_hook),
-            stream,
+
+@temporalio.activity.defn
+async def stream_offset_activity() -> int:
+    return await (
+        temporalio.contrib.workflow_streams.WorkflowStreamClient.from_within_activity()
+    ).get_offset()
+
+
+@temporalio.activity.defn
+async def partial_messages_activity(
+    activity_input: PartialMessagesInput,
+) -> list[ai.messages.Message]:
+    stream_client = (
+        temporalio.contrib.workflow_streams.WorkflowStreamClient.from_within_activity()
+    )
+    end_offset = await stream_client.get_offset()
+    events: list[ai.events.Event] = []
+    if end_offset > activity_input.start_index:
+        topic = stream_client.topic(
+            stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent)
         )
+        async for item in topic.subscribe(
+            from_offset=activity_input.start_index,
+            poll_cooldown=datetime.timedelta(milliseconds=20),
+        ):
+            event = item.data
+            if isinstance(event, ai.events.Event):
+                events.append(event)
+            if item.offset + 1 >= end_offset:
+                break
+    return ai_util.recover_partial_messages(activity_input.messages, events)
 
 
-@workflow.step
-async def write_event(
-    # writes one stream event (agent or lifecycle) to the durable stream.
-    # the handle passed in arrives here as a live writer.
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
-    event: proto.StreamEvent,
-) -> None:
-    await writer.write(event)
+@temporalio.activity.defn
+async def llm_activity(activity_input: ModelActivityInput) -> ai.messages.Message:
+    stream_client = (
+        temporalio.contrib.workflow_streams.WorkflowStreamClient.from_within_activity(
+            batch_interval=datetime.timedelta(milliseconds=50),
+            max_batch_size=64,
+        )
+    )
+    events = stream_client.topic(stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent))
+    message: ai.messages.Message | None = None
+    async with (
+        stream_client,
+        ai.stream(
+            activity_input.model,
+            activity_input.messages,
+            tools=activity_input.tools,
+        ) as model_stream,
+    ):
+        async for event in model_stream:
+            if not event.replay:
+                events.publish(event)
+            if isinstance(event, ai.events.StreamEnd):
+                message = event.message
+
+        if message is None:
+            message = model_stream.message
+
+    return message
 
 
-# closes a durable event stream once the owning session is terminal.
-@workflow.step
-async def close_stream(
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
-) -> None:
-    await writer.close()
-
-
-@ai.tool(require_approval=True)
-@workflow.step(max_retries=0, cancellable=True)
-async def bash(command: str, timeout: int | None = None) -> str:
-    proc = await asyncio.create_subprocess_exec(
+@temporalio.activity.defn
+async def bash_activity(command: str, timeout: int | None = None) -> str:
+    process = await asyncio.create_subprocess_exec(
         "bash",
         "-c",
         command,
@@ -122,34 +124,26 @@ async def bash(command: str, timeout: int | None = None) -> str:
         start_new_session=True,
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except (asyncio.CancelledError, TimeoutError) as error:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(process.pid, signal.SIGTERM)
         try:
-            await asyncio.wait_for(proc.communicate(), timeout=0.5)
+            await asyncio.wait_for(process.communicate(), timeout=0.5)
         except TimeoutError:
-            os.killpg(proc.pid, signal.SIGKILL)
-            await proc.communicate()
+            os.killpg(process.pid, signal.SIGKILL)
+            await process.communicate()
         if isinstance(error, asyncio.CancelledError):
             raise
         return f"Command timed out after {timeout}s."
 
     output = stdout.decode() if stdout else ""
-    if proc.returncode != 0:
-        return f"[exit code {proc.returncode}]\n{output}"
+    if process.returncode != 0:
+        return f"[exit code {process.returncode}]\n{output}"
     return output
 
 
-# subagent (task) sessions cannot surface tool approvals to a human and would
-# deadlock on a gated tool, so they run an ungated copy of the same tool.
-bash_ungated = dataclasses.replace(
-    bash, tool=bash.tool.model_copy(update={"require_approval": False})
-)
-
-
-@ai.tool
-@workflow.step(cancellable=True)
-async def web_fetch(
+@temporalio.activity.defn
+async def web_fetch_activity(
     url: str,
     method: str = "GET",
     headers: str = "",
@@ -171,24 +165,18 @@ async def web_fetch(
             content=body or None,
         )
 
-    parts = [
-        f"HTTP {response.status_code}",
-        *(f"{key}: {value}" for key, value in response.headers.items()),
-        "",
-        response.text[:50_000],
-    ]
-    return "\n".join(parts)
+    return "\n".join(
+        [
+            f"HTTP {response.status_code}",
+            *(f"{key}: {value}" for key, value in response.headers.items()),
+            "",
+            response.text[:50_000],
+        ]
+    )
 
 
-@ai.tool
-@workflow.step(cancellable=True)
-async def generate_image(prompt: str) -> ai.messages.ContentOutput:
-    """Generate an image from a text prompt. Describe the desired image in
-    detail, including subject, style, and composition."""
-
-    # the ai library has no direct image-generation API yet, so this
-    # runs a model that emits images inline with its response
-    # (FileParts on the message).
+@temporalio.activity.defn
+async def generate_image_activity(prompt: str) -> ai.messages.ContentOutput:
     model = ai.get_model(IMAGE_MODEL_ID)
     messages = [ai.system_message(IMAGE_SYSTEM_PROMPT), ai.user_message(prompt)]
     async with ai.stream(model, messages) as model_stream:
@@ -197,46 +185,73 @@ async def generate_image(prompt: str) -> ai.messages.ContentOutput:
     message = model_stream.message
 
     if not message.images:
-        return ai.content_output(
-            message.text or "The image model returned no image.",
+        output = ai.content_output(message.text or "The image model returned no image.")
+    else:
+        output = ai.content_output(
+            *(
+                part
+                for part in message.parts
+                if isinstance(part, ai.messages.TextPart | ai.messages.FilePart)
+            )
         )
-    # keep any caption text the model emitted alongside its images
-    return ai.content_output(
-        *(
-            part
-            for part in message.parts
-            if isinstance(part, ai.messages.TextPart | ai.messages.FilePart)
-        )
+    return output
+
+
+async def _execute_activity(function: Any, *, args: list[Any]) -> Any:
+    return await temporalio.workflow.execute_activity(
+        function,
+        args=args,
+        start_to_close_timeout=ACTIVITY_TIMEOUT,
+        retry_policy=NO_RETRIES,
     )
 
 
-@workflow.step(max_retries=0)
-async def spawn_subagent_turn(
-    turn_input: proto.TurnInput,
-    parent_span: ai.experimental_telemetry.Span | None = None,
+async def write_event(
+    events: temporalio.contrib.workflow_streams.WorkflowTopicHandle[proto.StreamEvent],
+    event: proto.StreamEvent,
+) -> None:
+    events.publish(event)
+    await asyncio.sleep(0)
+
+
+@ai.tool(require_approval=True)
+async def bash(command: str, timeout: int | None = None) -> str:
+    return cast(str, await _execute_activity(bash_activity, args=[command, timeout]))
+
+
+bash_ungated = dataclasses.replace(
+    bash, tool=bash.tool.model_copy(update={"require_approval": False})
+)
+
+
+@ai.tool
+async def web_fetch(
+    url: str,
+    method: str = "GET",
+    headers: str = "",
+    body: str = "",
 ) -> str:
-    # a subagent is just one ungated turn writing to its own stream. its span
-    if ai.experimental_telemetry.is_enabled():
-        # create and nest the span for the subagent turn
-        turn_span = ai.experimental_telemetry.create_span(
-            "turn", parent=parent_span
-        ).stamp_start()
-        turn_span.set_attrs({"openinference.span.kind": "AGENT"})
-        turn_input = turn_input.model_copy(update={"turn_span": turn_span})
-    started = await workflow_util.start(run_turn, turn_input)
-    return started.run_id
+    return cast(
+        str,
+        await _execute_activity(web_fetch_activity, args=[url, method, headers, body]),
+    )
+
+
+@ai.tool
+async def generate_image(prompt: str) -> ai.messages.ContentOutput:
+    """Generate an image from a detailed text prompt."""
+    return cast(
+        ai.messages.ContentOutput,
+        await _execute_activity(generate_image_activity, args=[prompt]),
+    )
 
 
 @dataclasses.dataclass
 class TurnContext:
     session_id: str
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None
-    turn_span: ai.experimental_telemetry.Span | None
+    events: temporalio.contrib.workflow_streams.WorkflowTopicHandle[proto.StreamEvent]
 
 
-# Tools use this to reach the current turn's session/stream/span without
-# smuggling args. Tasks copy the contextvars at creation, so every tool task
-# under the run sees it.
 current_turn_context: contextvars.ContextVar[TurnContext] = contextvars.ContextVar(
     "current_turn_context"
 )
@@ -245,261 +260,160 @@ current_turn_context: contextvars.ContextVar[TurnContext] = contextvars.ContextV
 @ai.tool(to_model_input=ai.agents.MessageAggregator.to_model_input)
 async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBundle:
     """Delegate a focused task to a child agent and return its answer."""
-    turn_context = current_turn_context.get()
-    session_id = turn_context.session_id
+    context = current_turn_context.get()
     tool_call_id = ai_util.current_tool_call_id.get()
-    assert tool_call_id
+    if tool_call_id is None:
+        raise RuntimeError("subagent called outside a tool run")
 
     name = name or "subagent"
-    child_session_id = f"{session_id}:child:{tool_call_id}"
-    hook = proto.TurnHook.wait(token=proto.turn_hook_token(child_session_id))
-
-    child_run_id = await spawn_subagent_turn(
-        proto.TurnInput(
-            session_id=child_session_id,
-            messages=[
-                ai.system_message(SUBAGENT_SYSTEM_PROMPT),
-                ai.user_message(prompt),
-            ],
-            gated=False,
-        ),
-        # the child turn's root span nests under this turn's root span.
-        turn_context.turn_span,
-    )
-    assert turn_context.writer is not None
+    child_session_id = f"{context.session_id}:child:{tool_call_id}"
+    child_workflow_id = f"{temporalio.workflow.info().workflow_id}:child:{tool_call_id}"
     await write_event(
-        turn_context.writer,
+        context.events,
         stream.subagent_called(
             tool_call_id=tool_call_id,
             child_session_id=child_session_id,
-            child_run_id=child_run_id,
+            child_run_id=child_workflow_id,
             name=name,
         ),
     )
     try:
-        resolution = await hook
-    except asyncio.CancelledError:
-        await interrupt_turn(child_session_id)
-        await hook
-        raise
+        output = await temporalio.workflow.execute_child_workflow(
+            TurnWorkflow.run,
+            proto.TurnInput(
+                session_id=child_session_id,
+                messages=[
+                    ai.system_message(SUBAGENT_SYSTEM_PROMPT),
+                    ai.user_message(prompt),
+                ],
+                gated=False,
+            ),
+            id=child_workflow_id,
+            task_queue=TASK_QUEUE,
+        )
     finally:
-        hook.dispose()
+        await write_event(
+            context.events,
+            stream.subagent_completed(
+                tool_call_id=tool_call_id,
+                is_error="output" not in locals() or output.kind == "error",
+            ),
+        )
 
-    output = resolution.output
-    await write_event(
-        turn_context.writer,
-        stream.subagent_completed(
-            tool_call_id=tool_call_id, is_error=output.kind == "error"
-        ),
-    )
     return ai.agents.MessageBundle(
-        messages=tuple(m for m in output.messages if m.role in ("assistant", "tool"))
+        messages=tuple(
+            message
+            for message in output.messages
+            if message.role in ("assistant", "tool")
+        )
     )
 
 
-# Tools that we can run eagerly, before the llm call generating them
-# has completed. These should be non-effectful (because they might get
-# cancelled) and non-streaming (because that would take some extra
-# thought).
-EAGER_TOOLS = {"generate_image", "web_fetch"}
-
-
-@workflow.step
-async def ship_spans(spans: list[ai.experimental_telemetry.Span]) -> None:
-    # re-deliver spans collected in the workflow body to the real adapters.
-    await ai.experimental_telemetry.push_all(spans)
-
-
-@workflow.step
-async def partial_messages(
-    run_id: str,
-    start_index: int,
-    input_messages: list[ai.messages.Message],
-) -> list[ai.messages.Message]:
-    events = [
-        event
-        async for event in stream.replay(run_id, start_index=start_index)
-        if isinstance(event, ai.events.Event)
-    ]
-    return ai_util.recover_partial_messages(input_messages, events)
-
-
-@workflow.step
-async def next_stream_index(
-    writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
-) -> int:
-    return await stream.tail_index(writer.run_id) + 1
-
-
-@workflow.step
-async def resume_turn_hook(token: str, output: proto.TurnOutput) -> None:
-    # resume() is a side effect, so it must run in a step.
-    await proto.TurnHook(output=output).resume(token)
-
-
-@workflow.step
-async def interrupt_turn(session_id: str) -> None:
-    await proto.InterruptHook().resume(proto.interrupt_hook_token(session_id))
-
-
-class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
-    @workflow_util.init
-    def __init__(
-        self,
-        turn_input: proto.TurnInput,
-        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
-    ) -> None:
-        self.hook_registry = ai.HookRegistry()
-        self.session_id = turn_input.session_id
-        self.run_task: asyncio.Task[proto.TurnOutput] | None = None
-
-    @workflow_util.hook(
-        proto.ApprovalHook,
-        token=lambda workflow: proto.hooks_hook_token(workflow.session_id),
-    )
-    async def approval(self, decision: proto.ApprovalHook) -> None:
-        for response in decision.responses:
-            ai.resolve_hook(
-                response.hook_id,
-                {"granted": response.granted, "reason": response.reason},
-                registry=self.hook_registry,
-            )
-
-    @workflow_util.hook(
-        proto.InterruptHook,
-        token=lambda workflow: proto.interrupt_hook_token(workflow.session_id),
-    )
-    async def interrupt(self, _: proto.InterruptHook) -> None:
-        if self.run_task is not None:
-            self.run_task.cancel()
-
-    # Draw message/part ids from the workflow's deterministic RNG so they're
-    # stable across replay.
-    @ai.messages.use_random(vercel.workflow.random)
-    @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
-    async def _run(
-        self,
-        turn_input: proto.TurnInput,
-        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent],
-    ) -> proto.TurnOutput:
-        messages = turn_input.messages
-        turn_index = turn_input.turn_index
-
-        # messages should already contain either the user message
-        # or the tool result message, so no need to do anything
-
-        tools = [web_fetch, generate_image]
-        tools += [bash, subagent] if turn_input.gated else [bash_ungated]
-        streamer = functools.partial(
-            llm_step_stream,
-            tool_token=f"seal-early-tool:{self.session_id}",
-            writer=writer,
-            turn_span=turn_input.turn_span,
-        )
-
-        agent = ai_util.DurableAgent(
-            tools=tools, streamer=streamer, eager_tools=EAGER_TOOLS
-        )
-        # Tool tasks are created under this run's context and inherit this.
-        current_turn_context.set(
-            TurnContext(
-                session_id=self.session_id,
-                writer=writer,
-                turn_span=turn_input.turn_span,
-            )
-        )
-
-        # collect spans that happen inside the workflow body, and send them
-        # once in a separate step.
-        collector = (
-            ai.experimental_telemetry.DictSink()
-            if turn_input.turn_span is not None
-            else None
-        )
-        try:
-            model = ai.get_model(MODEL_ID)
-            async with (
-                ai.experimental_telemetry.use_sink(collector),
-                ai.experimental_telemetry.use_span(turn_input.turn_span),
-                agent.run(
-                    model,
-                    messages,
-                    hook_registry=self.hook_registry,
-                ) as run,
-            ):
-                async for event in run:
-                    # ModelEvents get streamed directly by the step.
-                    if not isinstance(event, ai.events.ModelEvent):
-                        await write_event(writer, event)
-
-                messages = run.messages
-        except Exception as error:
-            output = proto.TurnOutput(
-                kind="error",
-                messages=messages,
-                error=f"{type(error).__name__}: {error}",
-            )
-            print(
-                f"[seal] error in run_turn:\n{traceback.format_exc()}",
-                flush=True,
-            )
-        else:
-            output = proto.TurnOutput(kind="suspend", messages=messages)
-
-        # deliver the body's collected spans. only complete records ship: a span
-        # still open here would dangle in the shipping process's adapter.
-        if collector is not None:
-            # a copy: the turn span is appended below
-            finished = list(collector.finished_spans)
-            if turn_input.turn_span is not None:
-                # complete the turn span here (pure data ops on workflow time) so
-                # it ships with the rest instead of riding the resume step.
-                turn_span = turn_input.turn_span.stamp_end(
-                    error=ai.experimental_telemetry.SpanError(
-                        type="TurnError", message=output.error
+class TemporalAgent(ai.Agent):
+    async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
+        while context.keep_running():
+            result = await _execute_activity(
+                llm_activity,
+                args=[
+                    ModelActivityInput(
+                        model=context.model,
+                        messages=context.messages,
+                        tools=context.tools,
                     )
-                    if output.kind == "error" and output.error
-                    else None
-                )
-                turn_span.set_attrs(
-                    {"session.id": self.session_id, "turn_index": turn_index}
-                )
-                finished.append(turn_span)
-            if finished:
-                await ship_spans(finished)
+                ],
+            )
+            assistant_message = cast(ai.messages.Message, result)
+            context.add(assistant_message)
 
+            async with ai.Stream.replay_message(assistant_message) as replay:
+                async for model_event in replay:
+                    yield model_event
+
+            async with ai_util.TrackingToolRunner() as runner:
+                for tool_call in assistant_message.tool_calls:
+                    runner.schedule(context.resolve(tool_call))
+
+                async for tool_event in runner.events():
+                    yield tool_event
+
+                tool_message = runner.get_tool_message()
+                if tool_message is not None:
+                    context.add(tool_message)
+
+
+async def run_turn(
+    turn_input: proto.TurnInput,
+    *,
+    events: temporalio.contrib.workflow_streams.WorkflowTopicHandle[proto.StreamEvent],
+    hook_registry: ai.HookRegistry,
+) -> proto.TurnOutput:
+    start_index = await _execute_activity(stream_offset_activity, args=[])
+    current_turn_context.set(
+        TurnContext(session_id=turn_input.session_id, events=events)
+    )
+    tools = [web_fetch, generate_image]
+    tools += [bash, subagent] if turn_input.gated else [bash_ungated]
+    agent = TemporalAgent(tools=tools)
+    messages = turn_input.messages
+
+    try:
+        async with agent.run(
+            ai.get_model(MODEL_ID), messages, hook_registry=hook_registry
+        ) as run:
+            async for event in run:
+                if not isinstance(event, ai.events.ModelEvent):
+                    await write_event(events, event)
+            messages = run.messages
+    except asyncio.CancelledError:
+        messages = await _execute_activity(
+            partial_messages_activity,
+            args=[
+                PartialMessagesInput(start_index=start_index, messages=messages),
+            ],
+        )
+        return proto.TurnOutput(
+            kind="interrupted",
+            messages=cast(list[ai.messages.Message], messages),
+        )
+    except Exception as error:
+        print(f"[seal] error in turn:\n{traceback.format_exc()}", flush=True)
+        return proto.TurnOutput(
+            kind="error",
+            messages=messages,
+            error=f"{type(error).__name__}: {error}",
+        )
+    return proto.TurnOutput(kind="suspend", messages=messages)
+
+
+@temporalio.workflow.defn
+class TurnWorkflow:
+    def __init__(self) -> None:
+        self.workflow_stream = temporalio.contrib.workflow_streams.WorkflowStream()
+        self.events = self.workflow_stream.topic(
+            stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent)
+        )
+
+    @temporalio.workflow.run
+    @ai.messages.use_random(temporalio.workflow.random)
+    async def run(self, turn_input: proto.TurnInput) -> proto.TurnOutput:
+        await write_event(self.events, stream.turn_started(turn_index=0))
+        output = await run_turn(
+            turn_input,
+            events=self.events,
+            hook_registry=ai.HookRegistry(),
+        )
+        await write_event(
+            self.events,
+            stream.session_completed(is_error=output.kind == "error"),
+        )
         return output
 
-    async def run(
-        self,
-        turn_input: proto.TurnInput,
-        writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None = None,
-    ) -> None:
-        owns_stream = writer is None
-        if writer is None:
-            writer = vercel.workflow.get_writable(type=proto.StreamEvent)
-        stream_start_index = await next_stream_index(writer)
 
-        self.run_task = asyncio.create_task(self._run(turn_input, writer))
-        try:
-            output = await self.run_task
-        except asyncio.CancelledError:
-            output = proto.TurnOutput(
-                kind="interrupted",
-                messages=await partial_messages(
-                    writer.run_id,
-                    stream_start_index,
-                    turn_input.messages,
-                ),
-            )
-
-        if owns_stream:
-            # a subagent turn ends its own stream so readers tailing it terminate.
-            await close_stream(writer)
-
-        # notify session that the turn is complete.
-        self.dispose_all()
-        await resume_turn_hook(proto.turn_hook_token(self.session_id), output)
-
-
-run_turn = TurnWorkflow.registered_workflow()
+ACTIVITIES: list[Callable[..., Any]] = [
+    stream_offset_activity,
+    partial_messages_activity,
+    llm_activity,
+    bash_activity,
+    web_fetch_activity,
+    generate_image_activity,
+]

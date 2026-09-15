@@ -1,13 +1,5 @@
-import vercel.workflow
+TASK_QUEUE = "seal-temporal"
 
-workflow = vercel.workflow.Workflows(
-    sandbox_policy=vercel.workflow.SandboxPolicy(
-        passthrough_modules=frozenset(
-            {
-                "rich",  # annoying terminal detection stuff
-                "modelsdotdev",  # sqlite database
-            }
-        ),
-        share_sandboxes=True,
-    )
-)
+
+def session_workflow_id(session_id: str) -> str:
+    return f"seal-session:{session_id}"

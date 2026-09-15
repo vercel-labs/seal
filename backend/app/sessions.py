@@ -1,7 +1,7 @@
 """Session metadata (id, title, timestamps).
 
-History is owned by the durable agent (``stream.read_session`` / the durable
-event stream); this store only tracks the lightweight metadata the UI needs to
+History is owned by the durable Temporal workflow; this store only tracks the
+lightweight metadata the UI needs to
 list, title, and delete chats. Postgres when ``DATABASE_URL`` is set, otherwise
 one JSON file per session for local dev.
 """
@@ -19,7 +19,7 @@ import ai
 import pydantic
 
 import db
-from agent import stream
+from agent import temporal
 
 _TITLE_PROMPT = (
     "Generate a concise 3-6 word title for a conversation that starts with "
@@ -218,10 +218,7 @@ async def delete_session(session_id: str) -> bool:
 
 async def history(session_id: str) -> list[ai.messages.Message]:
     """Return the durable agent's persisted message history for a session."""
-    run_id = await stream.session_run_id(session_id)
-    if run_id is None:
-        return []
-    state = await stream.read_session(run_id)
+    state = await temporal.session_state(session_id)
     return state.messages if state is not None else []
 
 

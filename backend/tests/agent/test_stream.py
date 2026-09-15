@@ -1,106 +1,85 @@
-"""Run-stream read semantics over the workflow SDK's run streams.
-
-``get_readable``/``replay``/``tail_index`` are the seams every consumer (the
-UI bridge, subagent pumps) reads through; a regression here is a missing
-message, a duplicate, or a hang. Writes in these tests go through the world
-directly — in the app the writers are workflow steps, which make the same
-world calls.
-"""
-
 from __future__ import annotations
 
 import asyncio
+import datetime
+from typing import Any, cast
 
 import ai.types.events as events_
-import stream_codec
-import vercel.workflow._internal.streams as wf_streams
-import vercel.workflow._internal.world as wf_world
+import temporalio.client
+import temporalio.contrib.workflow_streams
+from conftest import StreamFixtureWorkflow
 
 from agent import proto, stream
 
 
-async def _write(run_id: str, *events: proto.StreamEvent) -> None:
-    world = wf_world.get_world()
-    name = wf_streams.workflow_run_stream_id(run_id)
-    for event in events:
-        data = stream_codec.adapter.dump_python(event, mode="json")
-        await world.streams_write(run_id, name, wf_streams.encode_value(data))
+async def _start(
+    client: temporalio.client.Client,
+    stream_id: str,
+    events: list[proto.StreamEvent],
+) -> temporalio.client.WorkflowHandle[Any, None]:
+    return cast(
+        temporalio.client.WorkflowHandle[Any, None],
+        await client.start_workflow(
+            cast(Any, StreamFixtureWorkflow.run),
+            events,
+            id=stream_id,
+            task_queue="seal-temporal",
+        ),
+    )
 
 
-async def _close(run_id: str) -> None:
-    world = wf_world.get_world()
-    await world.streams_close(run_id, wf_streams.workflow_run_stream_id(run_id))
+async def test_replay_and_tail_index(
+    temporal_client: temporalio.client.Client,
+) -> None:
+    handle = await _start(
+        temporal_client,
+        "r1",
+        [
+            events_.TextDelta(block_id="b", chunk="one"),
+            events_.TextDelta(block_id="b", chunk="two"),
+        ],
+    )
+    try:
+        async with asyncio.timeout(10):
+            while await stream.tail_index("r1") < 1:
+                await asyncio.sleep(0.01)
+        events = [event async for event in stream.replay("r1")]
+        assert [
+            event.chunk for event in events if isinstance(event, events_.TextDelta)
+        ] == ["one", "two"]
+        assert await stream.tail_index("r1") == 1
+    finally:
+        await handle.terminate("test complete")
 
 
-def _chunks(events: list[proto.StreamEvent]) -> list[str]:
-    # every event in these tests is a TextDelta; a mismatch means an event
-    # was dropped, duplicated, or morphed in transit.
-    assert all(isinstance(event, events_.TextDelta) for event in events)
-    return [event.chunk for event in events if isinstance(event, events_.TextDelta)]
+async def test_readable_tails_new_events(
+    temporal_client: temporalio.client.Client,
+) -> None:
+    handle = await _start(temporal_client, "r2", [])
 
-
-async def _collect(
-    run_id: str, *, start_index: int = 0, timeout: float = 5.0
-) -> list[proto.StreamEvent]:
-    async def drain() -> list[proto.StreamEvent]:
-        return [
-            event
-            async for event in stream.get_readable(run_id, start_index=start_index)
-        ]
-
-    return await asyncio.wait_for(drain(), timeout)
-
-
-async def test_reader_sees_every_event_exactly_once_and_terminates() -> None:
     async def produce() -> None:
-        for n in range(20):
-            await _write("r1", events_.TextDelta(block_id="b", chunk=str(n)))
-            await asyncio.sleep(0.005)
-        await _close("r1")
+        await asyncio.sleep(0.05)
+        stream_client = temporalio.contrib.workflow_streams.WorkflowStreamClient.create(
+            temporal_client,
+            "r2",
+            batch_interval=datetime.timedelta(milliseconds=10),
+        )
+        topic = stream_client.topic(
+            stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent)
+        )
+        async with stream_client:
+            topic.publish(
+                events_.TextDelta(block_id="b", chunk="hello"),
+                force_flush=True,
+            )
 
     producer = asyncio.create_task(produce())
-    events = await _collect("r1")
-    await producer
-
-    assert _chunks(events) == [str(n) for n in range(20)]
-
-
-async def test_reader_drains_events_written_just_before_close() -> None:
-    # everything already written when the reader starts must still arrive.
-    await _write(
-        "r1",
-        events_.TextDelta(block_id="b", chunk="a"),
-        events_.TextDelta(block_id="b", chunk="b"),
-    )
-    await _close("r1")
-
-    events = await _collect("r1")
-    assert _chunks(events) == ["a", "b"]
-
-
-async def test_replay_reads_whats_there_without_tailing() -> None:
-    # the stream stays open; replay must still terminate.
-    await _write(
-        "r1",
-        events_.TextDelta(block_id="b", chunk="a"),
-        events_.TextDelta(block_id="b", chunk="b"),
-        events_.TextDelta(block_id="b", chunk="c"),
-    )
-
-    async def drain() -> list[proto.StreamEvent]:
-        return [event async for event in stream.replay("r1", start_index=1)]
-
-    events = await asyncio.wait_for(drain(), 5)
-    assert _chunks(events) == ["b", "c"]
-
-
-async def test_replay_of_unwritten_run_is_empty() -> None:
-    assert [event async for event in stream.replay("nope")] == []
-
-
-async def test_tail_index_tracks_writes() -> None:
-    assert await stream.tail_index("r1") == -1
-    await _write("r1", events_.TextDelta(block_id="b", chunk="a"))
-    assert await stream.tail_index("r1") == 0
-    await _write("r1", events_.TextDelta(block_id="b", chunk="b"))
-    assert await stream.tail_index("r1") == 1
+    try:
+        async with asyncio.timeout(10):
+            async for event in stream.get_readable("r2"):
+                assert isinstance(event, events_.TextDelta)
+                assert event.chunk == "hello"
+                break
+        await producer
+    finally:
+        await handle.terminate("test complete")
