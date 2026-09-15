@@ -5,6 +5,7 @@ import contextlib
 import contextvars
 import dataclasses
 import datetime
+import functools
 import os
 import signal
 import traceback
@@ -39,8 +40,31 @@ IMAGE_SYSTEM_PROMPT = (
 
 NO_RETRIES = temporalio.common.RetryPolicy(maximum_attempts=1)
 ACTIVITY_TIMEOUT = datetime.timedelta(minutes=5)
+ACTIVITY_HEARTBEAT_TIMEOUT = datetime.timedelta(seconds=5)
+ACTIVITY_HEARTBEAT_INTERVAL = 1
 EAGER_TOOLS = {"generate_image", "web_fetch"}
 EAGER_TOOL_SIGNAL = "eager_tool"
+
+
+def _heartbeating_activity[**Args, Result](
+    function: Callable[Args, Awaitable[Result]],
+) -> Callable[Args, Awaitable[Result]]:
+    @functools.wraps(function)
+    async def wrapper(*args: Args.args, **kwargs: Args.kwargs) -> Result:
+        async def heartbeat() -> None:
+            while True:
+                temporalio.activity.heartbeat()
+                await asyncio.sleep(ACTIVITY_HEARTBEAT_INTERVAL)
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            return await function(*args, **kwargs)
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+    return wrapper
 
 
 class ModelActivityInput(pydantic.BaseModel):
@@ -87,6 +111,7 @@ async def partial_messages_activity(
 
 
 @temporalio.activity.defn
+@_heartbeating_activity
 async def llm_activity(activity_input: ModelActivityInput) -> ai.messages.Message:
     activity_info = temporalio.activity.info()
     if activity_info.workflow_id is None or activity_info.workflow_run_id is None:
@@ -135,6 +160,7 @@ async def llm_activity(activity_input: ModelActivityInput) -> ai.messages.Messag
 
 
 @temporalio.activity.defn
+@_heartbeating_activity
 async def bash_activity(command: str, timeout: int | None = None) -> str:
     process = await asyncio.create_subprocess_exec(
         "bash",
@@ -164,6 +190,7 @@ async def bash_activity(command: str, timeout: int | None = None) -> str:
 
 
 @temporalio.activity.defn
+@_heartbeating_activity
 async def web_fetch_activity(
     url: str,
     method: str = "GET",
@@ -197,6 +224,7 @@ async def web_fetch_activity(
 
 
 @temporalio.activity.defn
+@_heartbeating_activity
 async def generate_image_activity(prompt: str) -> ai.messages.ContentOutput:
     model = ai.get_model(IMAGE_MODEL_ID)
     messages = [ai.system_message(IMAGE_SYSTEM_PROMPT), ai.user_message(prompt)]
@@ -222,12 +250,15 @@ async def _execute_activity[*Args, Result](
     function: Callable[[*Args], Awaitable[Result]],
     *args: *Args,
     retry_policy: temporalio.common.RetryPolicy | None = None,
+    cancellable: bool = False,
 ) -> Result:
     return await temporalio.workflow.execute_activity(
         function,
         args=args,
         start_to_close_timeout=ACTIVITY_TIMEOUT,
+        heartbeat_timeout=ACTIVITY_HEARTBEAT_TIMEOUT if cancellable else None,
         retry_policy=retry_policy,
+        cancellation_type=(temporalio.workflow.ActivityCancellationType.TRY_CANCEL),
     )
 
 
@@ -242,7 +273,11 @@ async def write_event(
 @ai.tool(require_approval=True)
 async def bash(command: str, timeout: int | None = None) -> str:
     return await _execute_activity(
-        bash_activity, command, timeout, retry_policy=NO_RETRIES
+        bash_activity,
+        command,
+        timeout,
+        retry_policy=NO_RETRIES,
+        cancellable=True,
     )
 
 
@@ -258,13 +293,15 @@ async def web_fetch(
     headers: str = "",
     body: str = "",
 ) -> str:
-    return await _execute_activity(web_fetch_activity, url, method, headers, body)
+    return await _execute_activity(
+        web_fetch_activity, url, method, headers, body, cancellable=True
+    )
 
 
 @ai.tool
 async def generate_image(prompt: str) -> ai.messages.ContentOutput:
     """Generate an image from a detailed text prompt."""
-    return await _execute_activity(generate_image_activity, prompt)
+    return await _execute_activity(generate_image_activity, prompt, cancellable=True)
 
 
 @dataclasses.dataclass
@@ -312,6 +349,9 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
             ),
             id=child_workflow_id,
             task_queue=TASK_QUEUE,
+            cancellation_type=(
+                temporalio.workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED
+            ),
         )
     finally:
         await write_event(
@@ -346,6 +386,7 @@ async def temporal_streamer(
                     messages=context.messages,
                     tools=context.tools,
                 ),
+                cancellable=True,
             )
         finally:
             await turn_context.eager_tool_events.astop()

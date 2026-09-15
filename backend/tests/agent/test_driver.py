@@ -168,6 +168,27 @@ async def test_llm_activity_retries_and_requests_reload(
         await handle.terminate("test complete")
 
 
+async def test_interrupt_cancels_llm_activity(
+    scripted_model: MockProvider, temporal_client: temporalio.client.Client
+) -> None:
+    model_blocked = asyncio.Event()
+    cancellation_observed = asyncio.Event()
+    MockProvider.wait_after_tool = model_blocked
+    MockProvider.cancellation_observed = cancellation_observed
+    scripted_model.responses = [
+        [tool_call_msg(tc_id="tc-cancel", name="bash", args='{"command":"true"}')]
+    ]
+    handle = await _start(temporal_client, "s5", "cancel")
+    try:
+        await _wait_for_event("s5", ai.events.ToolEnd)
+        await temporal.interrupt("s5")
+        await _wait_for_event("s5", proto.SESSION_INTERRUPTED)
+        async with asyncio.timeout(10):
+            await cancellation_observed.wait()
+    finally:
+        await handle.terminate("test complete")
+
+
 async def test_web_fetch_starts_before_model_stream_finishes(
     monkeypatch: pytest.MonkeyPatch,
     scripted_model: MockProvider,
@@ -206,13 +227,13 @@ async def test_web_fetch_starts_before_model_stream_finishes(
         return Response()
 
     monkeypatch.setattr(httpx2.AsyncClient, "request", request)
-    handle = await _start(temporal_client, "s5", "fetch")
+    handle = await _start(temporal_client, "s6", "fetch")
     try:
-        await _wait_for_event("s5", proto.SESSION_WAITING)
+        await _wait_for_event("s6", proto.SESSION_WAITING)
         assert tool_started.is_set()
         assert request_count == 1
 
-        state = await temporal.session_state("s5")
+        state = await temporal.session_state("s6")
         assert state is not None
         result = next(
             result
