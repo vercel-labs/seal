@@ -141,3 +141,26 @@ async def test_subagent_runs_as_child_workflow(
         assert_message_invariants(state.messages)
     finally:
         await handle.terminate("test complete")
+
+
+async def test_llm_activity_retries_and_requests_reload(
+    scripted_model: MockProvider, temporal_client: temporalio.client.Client
+) -> None:
+    scripted_model.failures_remaining = 1
+    scripted_model.responses = [[text_msg("recovered")]]
+    handle = await _start(temporal_client, "s4", "retry")
+    try:
+        await _wait_for_event("s4", proto.SESSION_WAITING)
+        events = [event async for event in stream.replay(session_workflow_id("s4"))]
+        assert scripted_model.call_count == 2
+        assert any(
+            isinstance(event, proto.LifecycleEvent)
+            and event.type == proto.RELOAD_REQUESTED
+            for event in events
+        )
+
+        state = await temporal.session_state("s4")
+        assert state is not None
+        assert state.messages[-1].text == "recovered"
+    finally:
+        await handle.terminate("test complete")

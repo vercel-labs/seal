@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import contextvars
 import json
-from collections.abc import AsyncGenerator, Collection, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
 from typing import ClassVar, Protocol
 
 import ai
@@ -67,7 +67,7 @@ class Streamer(Protocol):
     def __call__(
         self, *, context: ai.Context
     ) -> contextlib.AbstractAsyncContextManager[
-        AsyncGenerator[ai.events.AgentEvent]
+        AsyncIterator[ai.events.AgentEvent]
     ]: ...
 
 

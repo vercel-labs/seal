@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import datetime
 import os
 import signal
 import traceback
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
 import temporalio.activity
@@ -93,22 +94,23 @@ async def llm_activity(activity_input: ModelActivityInput) -> ai.messages.Messag
     )
     events = stream_client.topic(stream.EVENTS_TOPIC, type=cast(Any, proto.StreamEvent))
     message: ai.messages.Message | None = None
-    async with (
-        stream_client,
-        ai.stream(
+    async with stream_client:
+        if temporalio.activity.info().attempt > 1:
+            events.publish(stream.reload_requested(), force_flush=True)
+
+        async with ai.stream(
             activity_input.model,
             activity_input.messages,
             tools=activity_input.tools,
-        ) as model_stream,
-    ):
-        async for event in model_stream:
-            if not event.replay:
-                events.publish(event)
-            if isinstance(event, ai.events.StreamEnd):
-                message = event.message
+        ) as model_stream:
+            async for event in model_stream:
+                if not event.replay:
+                    events.publish(event)
+                if isinstance(event, ai.events.StreamEnd):
+                    message = event.message
 
-        if message is None:
-            message = model_stream.message
+            if message is None:
+                message = model_stream.message
 
     return message
 
@@ -197,12 +199,16 @@ async def generate_image_activity(prompt: str) -> ai.messages.ContentOutput:
     return output
 
 
-async def _execute_activity(function: Any, *, args: list[Any]) -> Any:
+async def _execute_activity[*Args, Result](
+    function: Callable[[*Args], Awaitable[Result]],
+    *args: *Args,
+    retry_policy: temporalio.common.RetryPolicy | None = None,
+) -> Result:
     return await temporalio.workflow.execute_activity(
         function,
         args=args,
         start_to_close_timeout=ACTIVITY_TIMEOUT,
-        retry_policy=NO_RETRIES,
+        retry_policy=retry_policy,
     )
 
 
@@ -216,7 +222,9 @@ async def write_event(
 
 @ai.tool(require_approval=True)
 async def bash(command: str, timeout: int | None = None) -> str:
-    return cast(str, await _execute_activity(bash_activity, args=[command, timeout]))
+    return await _execute_activity(
+        bash_activity, command, timeout, retry_policy=NO_RETRIES
+    )
 
 
 bash_ungated = dataclasses.replace(
@@ -231,19 +239,13 @@ async def web_fetch(
     headers: str = "",
     body: str = "",
 ) -> str:
-    return cast(
-        str,
-        await _execute_activity(web_fetch_activity, args=[url, method, headers, body]),
-    )
+    return await _execute_activity(web_fetch_activity, url, method, headers, body)
 
 
 @ai.tool
 async def generate_image(prompt: str) -> ai.messages.ContentOutput:
     """Generate an image from a detailed text prompt."""
-    return cast(
-        ai.messages.ContentOutput,
-        await _execute_activity(generate_image_activity, args=[prompt]),
-    )
+    return await _execute_activity(generate_image_activity, prompt)
 
 
 @dataclasses.dataclass
@@ -309,36 +311,20 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
     )
 
 
-class TemporalAgent(ai.Agent):
-    async def loop(self, context: ai.Context) -> AsyncGenerator[ai.events.AgentEvent]:
-        while context.keep_running():
-            result = await _execute_activity(
-                llm_activity,
-                args=[
-                    ModelActivityInput(
-                        model=context.model,
-                        messages=context.messages,
-                        tools=context.tools,
-                    )
-                ],
-            )
-            assistant_message = cast(ai.messages.Message, result)
-            context.add(assistant_message)
-
-            async with ai.Stream.replay_message(assistant_message) as replay:
-                async for model_event in replay:
-                    yield model_event
-
-            async with ai_util.TrackingToolRunner() as runner:
-                for tool_call in assistant_message.tool_calls:
-                    runner.schedule(context.resolve(tool_call))
-
-                async for tool_event in runner.events():
-                    yield tool_event
-
-                tool_message = runner.get_tool_message()
-                if tool_message is not None:
-                    context.add(tool_message)
+@contextlib.asynccontextmanager
+async def temporal_streamer(
+    *, context: ai.Context
+) -> AsyncGenerator[AsyncIterator[ai.events.AgentEvent]]:
+    assistant_message = await _execute_activity(
+        llm_activity,
+        ModelActivityInput(
+            model=context.model,
+            messages=context.messages,
+            tools=context.tools,
+        ),
+    )
+    async with ai.Stream.replay_message(assistant_message) as replay:
+        yield replay
 
 
 async def run_turn(
@@ -347,13 +333,13 @@ async def run_turn(
     events: temporalio.contrib.workflow_streams.WorkflowTopicHandle[proto.StreamEvent],
     hook_registry: ai.HookRegistry,
 ) -> proto.TurnOutput:
-    start_index = await _execute_activity(stream_offset_activity, args=[])
+    start_index = await _execute_activity(stream_offset_activity)
     current_turn_context.set(
         TurnContext(session_id=turn_input.session_id, events=events)
     )
     tools = [web_fetch, generate_image]
     tools += [bash, subagent] if turn_input.gated else [bash_ungated]
-    agent = TemporalAgent(tools=tools)
+    agent = ai_util.DurableAgent(tools=tools, streamer=temporal_streamer)
     messages = turn_input.messages
 
     try:
@@ -367,13 +353,11 @@ async def run_turn(
     except asyncio.CancelledError:
         messages = await _execute_activity(
             partial_messages_activity,
-            args=[
-                PartialMessagesInput(start_index=start_index, messages=messages),
-            ],
+            PartialMessagesInput(start_index=start_index, messages=messages),
         )
         return proto.TurnOutput(
             kind="interrupted",
-            messages=cast(list[ai.messages.Message], messages),
+            messages=messages,
         )
     except Exception as error:
         print(f"[seal] error in turn:\n{traceback.format_exc()}", flush=True)

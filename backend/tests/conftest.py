@@ -76,6 +76,7 @@ class MockProvider(models.Provider):
         default_factory=dict, exclude=True
     )
     call_count: int = pydantic.Field(default=0, exclude=True)
+    failures_remaining: int = pydantic.Field(default=0, exclude=True)
     calls: list[list[messages_.Message]] = pydantic.Field(
         default_factory=list, exclude=True
     )
@@ -95,6 +96,9 @@ class MockProvider(models.Provider):
     ) -> AsyncGenerator[events_.Event]:
         self.call_count += 1
         self.calls.append(messages)
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
+            return _emit_failure()
         last_user = next((m.text for m in reversed(messages) if m.role == "user"), "")
         for key, response in self.keyed_responses.items():
             if key in last_user:
@@ -151,16 +155,25 @@ async def _emit_events(
     yield events_.StreamEnd()
 
 
+async def _emit_failure() -> AsyncGenerator[events_.Event]:
+    yield events_.StreamStart()
+    yield events_.TextStart(block_id="failed-attempt")
+    yield events_.TextDelta(block_id="failed-attempt", chunk="partial")
+    raise RuntimeError("scripted model failure")
+
+
 @pytest.fixture
 def mock_llm() -> Iterator[MockProvider]:
     """Reset the scripted provider; tests append to ``responses``."""
     MOCK_PROVIDER.responses = []
     MOCK_PROVIDER.keyed_responses = {}
     MOCK_PROVIDER.call_count = 0
+    MOCK_PROVIDER.failures_remaining = 0
     MOCK_PROVIDER.calls = []
     yield MOCK_PROVIDER
     MOCK_PROVIDER.responses = []
     MOCK_PROVIDER.keyed_responses = {}
+    MOCK_PROVIDER.failures_remaining = 0
     MOCK_PROVIDER.calls = []
 
 
