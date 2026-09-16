@@ -192,7 +192,7 @@ describe.each(ALL_SCENARIOS)("%s: consume", (scenario) => {
       // a turn parked on an approval is still in flight, so GET /sessions returns
       // only the committed prefix; the assistant is rebuilt from the resumed
       // stream (see the resume test), not persisted here.
-      expect(fixture.map((m) => m.role)).toEqual(["system", "user"])
+      expect(fixture.map((m) => m.role)).toEqual(["user"])
       return
     }
 

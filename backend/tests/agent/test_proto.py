@@ -52,6 +52,22 @@ def test_hook_payloads_round_trip() -> None:
     restored_hook = proto.ApprovalHook.model_validate(approval.model_dump(mode="json"))
     assert restored_hook == approval
 
+    launch = proto.LaunchSubagentHook(task_id="tc-1", prompt="research", name="helper")
+    assert (
+        proto.LaunchSubagentHook.model_validate(launch.model_dump(mode="json"))
+        == launch
+    )
+    finished = proto.SubagentFinishedHook(
+        task_id="tc-1",
+        output=proto.TurnOutput(
+            kind="suspend", messages=[ai.assistant_message("done")]
+        ),
+    )
+    assert (
+        proto.SubagentFinishedHook.model_validate(finished.model_dump(mode="json"))
+        == finished
+    )
+
 
 # --- stream events ---------------------------------------------------------------
 
@@ -115,13 +131,8 @@ def test_hook_event_round_trip_keeps_approval_fields() -> None:
 
 def test_session_state_round_trip_is_dump_stable() -> None:
     """A realistic snapshot survives persist → load → persist unchanged."""
-    bundle = ai.agents.MessageBundle(
-        messages=(
-            ai.user_message("task"),
-            ai.messages.Message(
-                role="assistant", parts=[messages_.TextPart(text="child answer")]
-            ),
-        )
+    child_answer = ai.messages.Message(
+        role="assistant", parts=[messages_.TextPart(text="child answer")]
     )
     messages = [
         ai.system_message("you are seal"),
@@ -139,10 +150,32 @@ def test_session_state_round_trip_is_dump_stable() -> None:
         ),
         ai.messages.Message(
             role="tool",
-            parts=[ai.tool_result_part("tc-1", tool_name="subagent", result=bundle)],
+            parts=[
+                ai.tool_result_part(
+                    "tc-1",
+                    tool_name="subagent",
+                    result=(
+                        "Subagent is running in the background and will update "
+                        "you later."
+                    ),
+                )
+            ],
         ),
     ]
-    state = proto.SessionState(session_id="s1", messages=messages)
+    state = proto.SessionState(
+        session_id="s1",
+        messages=messages,
+        background_tasks={
+            "tc-1": proto.BackgroundTaskState(
+                task_id="tc-1",
+                child_session_id="s1:child:tc-1",
+                child_run_id="wrun-child",
+                name="helper",
+                status="completed",
+                messages=[child_answer],
+            )
+        },
+    )
 
     once = state.model_dump(mode="json")
     restored = proto.SessionState.model_validate(once)
@@ -153,3 +186,4 @@ def test_session_state_round_trip_is_dump_stable() -> None:
     assert roles == ["system", "user", "assistant", "tool"]
     assert restored.messages[2].tool_calls[0].tool_call_id == "tc-1"
     assert restored.messages[3].tool_results[0].tool_call_id == "tc-1"
+    assert restored.background_tasks["tc-1"].messages == [child_answer]

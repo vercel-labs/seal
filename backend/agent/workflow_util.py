@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import base64
+import contextlib
 import dataclasses
 import functools
+import hashlib
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from typing import Any, Protocol, TypeVar, cast
 
+import pydantic
 import vercel.workflow
 from vercel.workflow._internal import core
 
@@ -296,3 +300,40 @@ class WorkflowClass(abc.ABC):
     @abc.abstractmethod
     async def run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
+
+
+# Responding hooks
+# N.B: These are kind of hacky and only work if the hook contents are distinct!!
+
+
+def hook_id(hook: vercel.workflow.BaseHook) -> str:
+    assert isinstance(hook, pydantic.BaseModel)
+    return (
+        base64.urlsafe_b64encode(
+            hashlib.sha256(hook.model_dump_json().encode()).digest()
+        )
+        .decode()
+        .rstrip("=")[:12]
+    )
+
+
+async def respond_to_hook[T](
+    hook: vercel.workflow.BaseHook, label: str, value: T, type: __builtins__.type[T]
+) -> None:
+    writer = vercel.workflow.get_writable(
+        type=type,
+        namespace=f"__hook_reply:{label}:{hook_id(hook)}",
+    )
+    await writer.write(value)
+
+
+async def resume_and_wait[T](
+    hook: vercel.workflow.BaseHook, label: str, type: __builtins__.type[T]
+) -> T:
+    hook_res = await hook.resume(label)
+    launched = vercel.workflow.Run(hook_res.run_id).readable(
+        type=type,
+        namespace=f"__hook_reply:{label}:{hook_id(hook)}",
+    )
+    async with contextlib.aclosing(launched):
+        return await anext(launched)

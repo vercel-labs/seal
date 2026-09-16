@@ -45,7 +45,7 @@ import fastapi.responses  # noqa: E402
 import pydantic  # noqa: E402
 from vercel.blob import AsyncBlobClient  # noqa: E402
 
-from agent import proto  # noqa: E402
+from agent import proto, stream  # noqa: E402
 from app import attachments, chat, sessions  # noqa: E402
 
 
@@ -118,7 +118,10 @@ async def post_chat(request: ChatRequest) -> fastapi.responses.StreamingResponse
             raise fastapi.HTTPException(
                 status_code=400, detail="No user message to run"
             )
-        start_index = await chat.start_or_resume(request.session_id, prompt)
+        try:
+            start_index = await chat.start_or_resume(request.session_id, prompt)
+        except chat.SessionUnavailableError as error:
+            raise fastapi.HTTPException(status_code=409, detail=str(error)) from None
 
     return fastapi.responses.StreamingResponse(
         chat.to_sse(request.session_id, start_index),
@@ -175,13 +178,26 @@ async def get_session(session_id: str) -> dict[str, object]:
     meta = await sessions.get_session(session_id)
     if meta is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
-    # committed turns only; a turn still parked on an approval is in flight (not
-    # persisted) and the UI rebuilds it from the resumed stream (GET /chat/.../stream).
-    ui_messages = ai_sdk.to_ui_messages(await sessions.history(session_id))
+    run_id = await stream.session_run_id(session_id)
+    state = await stream.read_session(run_id) if run_id is not None else None
+    history = state.messages if state is not None else []
+    if state is not None and state.active_ui_run_message_index is not None:
+        history = history[: state.active_ui_run_message_index]
+    visible_messages = [
+        message
+        for message in history
+        if message.role != "system"
+        and (state is None or message.id not in state.hidden_ui_message_ids)
+    ]
+    ui_messages = ai_sdk.to_ui_messages(visible_messages)
     serialized = [
         message.model_dump(mode="json", by_alias=True) for message in ui_messages
     ]
-    return {**meta.model_dump(), "messages": serialized}
+    tasks = state.background_tasks if state is not None else {}
+    return {
+        **meta.model_dump(),
+        "messages": chat.project_background_tasks(serialized, tasks),
+    }
 
 
 @app.post("/api/sessions/{session_id}/title")
