@@ -5,7 +5,7 @@ import asyncio
 import dataclasses
 import functools
 import inspect
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from typing import Any, Protocol, TypeVar, cast
 
 import vercel.workflow
@@ -249,7 +249,7 @@ class WorkflowClass(abc.ABC):
                     )
                     instance._active_hooks.append(events)
                     tasks.create_task(
-                        instance._listen_for_hook(func_name, events),
+                        instance._listen_for_hook(func_name, events, tasks),
                         name=token,
                     )
 
@@ -271,14 +271,15 @@ class WorkflowClass(abc.ABC):
     async def _listen_for_hook(
         self,
         func_name: str,
-        events: vercel.workflow.HookEvent[Any],
+        events: AsyncIterator[Any],
+        tasks: asyncio.TaskGroup,
     ) -> None:
+        handler = cast(
+            Callable[[vercel.workflow.BaseHook], Coroutine[Any, Any, None]],
+            getattr(self, func_name),
+        )
         async for payload in events:
-            handler = cast(
-                Callable[[vercel.workflow.BaseHook], Awaitable[None]],
-                getattr(self, func_name),
-            )
-            await handler(payload)
+            tasks.create_task(handler(payload))
 
     def dispose_all(self) -> None:
         """Dispose every registered hook."""

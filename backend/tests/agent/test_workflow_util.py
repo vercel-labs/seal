@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import types
 import unittest.mock
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
@@ -51,6 +53,31 @@ def test_dispose_all_disposes_hooks() -> None:
     instance.dispose_all()
 
     hook.dispose.assert_called_once_with()
+
+
+async def test_hook_payloads_run_in_separate_tasks() -> None:
+    instance = ExampleWorkflow()
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    started: list[int] = []
+
+    async def handler(payload: int) -> None:
+        started.append(payload)
+        if len(started) == 2:
+            both_started.set()
+        await release.wait()
+
+    async def events() -> AsyncIterator[int]:
+        yield 1
+        yield 2
+
+    cast(Any, instance).handler = handler
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(instance._listen_for_hook("handler", events(), tasks))
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        release.set()
+
+    assert started == [1, 2]
 
 
 def test_with_hooks_accepts_static_or_generated_labels() -> None:
