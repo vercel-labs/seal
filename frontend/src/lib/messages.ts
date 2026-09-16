@@ -46,11 +46,6 @@ export type WebFetchToolPart = Extract<
 // a data-reload event that signals for us to ignore the previous step.
 // We do that, and it'll drop off the screen.
 //
-// Since AI SDK v7, replaying a completed turn over seeded history also
-// duplicates tool parts (reconciliation is scoped to the current step; the
-// divergence is pinned in tests/contract.test.ts), so tool parts are deduped
-// by toolCallId here, keeping the last occurrence — the replayed one, which
-// carries the freshest state.
 export function getFreshParts<T extends { type: string }>(parts: T[]): T[] {
   const freshParts: T[] = []
 
@@ -64,17 +59,5 @@ export function getFreshParts<T extends { type: string }>(parts: T[]): T[] {
     }
   }
 
-  const isToolLike = (part: T) =>
-    part.type.startsWith("tool-") || part.type === "dynamic-tool"
-  return freshParts.filter((part, index) => {
-    if (!isToolLike(part)) return true
-    const id = (part as { toolCallId?: string }).toolCallId
-    return (
-      freshParts.findLastIndex(
-        (other) =>
-          isToolLike(other) &&
-          (other as { toolCallId?: string }).toolCallId === id
-      ) === index
-    )
-  })
+  return freshParts
 }

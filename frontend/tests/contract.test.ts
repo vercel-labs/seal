@@ -273,38 +273,11 @@ describe.each(ALL_SCENARIOS)("%s: resume", (scenario) => {
     // no message duplication: same number of messages, same ids, in order
     expect(chat.messages.map((m) => m.id)).toEqual(seed.map((m) => m.id))
 
-    // KNOWN DIVERGENCE, pinned since AI SDK v7: tool-part reconciliation is
-    // scoped to the current step (parts after the last `step-start`). The
-    // replayed stream opens a new step, so the seeded tool parts are invisible
-    // to it and every tool part is appended a second time — the same wart as
-    // the text duplication below. The app deduplicates tool parts by
-    // toolCallId at render time (getFreshParts in lib/messages). If this
-    // assertion starts failing because the ids are unique again, the SDK
-    // re-widened reconciliation — restore `new Set(ids).size === ids.length`
-    // and drop the render-time dedup.
+    // The SDK rebuilds a resumed assistant from an empty state, then replaces
+    // the seeded message when the streamed message id matches. Tool and text
+    // parts therefore appear exactly once.
     const last = chat.messages[chat.messages.length - 1]
-    const toolCallIds = last.parts
-      .filter((part) => part.type.startsWith("tool-"))
-      .map((part) => (part as { toolCallId: string }).toolCallId)
-    const seedToolCallIds = seed[seed.length - 1].parts
-      .filter((part) => part.type.startsWith("tool-"))
-      .map((part) => (part as { toolCallId: string }).toolCallId)
-    expect(toolCallIds).toEqual([...seedToolCallIds, ...seedToolCallIds])
-
-    // KNOWN DIVERGENCE, pinned: text parts carry no stable ids, so replaying
-    // a stream over seeded history appends a second copy of every text block
-    // instead of reconciling it (message- and tool-level reconciliation hold,
-    // see above). In production this duplicates assistant text when the page
-    // reloads during a multi-turn run. If this assertion starts failing
-    // because the texts are no longer doubled, the SDK or backend fixed
-    // part-level reconciliation — update this test to assert equality.
-    const seedTexts = seed[seed.length - 1].parts
-      .filter((part) => part.type === "text")
-      .map((part) => (part as { text: string }).text)
-    const texts = last.parts
-      .filter((part) => part.type === "text")
-      .map((part) => (part as { text: string }).text)
-    expect(texts).toEqual([...seedTexts, ...seedTexts])
+    expect(normalize(last)).toEqual(normalize(seed[seed.length - 1]))
   })
 })
 
