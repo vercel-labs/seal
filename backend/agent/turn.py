@@ -72,14 +72,15 @@ async def llm_step(
 async def llm_step_stream(
     context: ai.Context,
     writer: vercel.workflow.WorkflowWritable[proto.StreamEvent] | None,
-    tool_token: str | None,
     turn_span: ai.experimental_telemetry.Span | None = None,
 ) -> AsyncIterator[AsyncGenerator[ai.events.AgentEvent]]:
-    eager_tool_hook = EagerToolHook.wait(token=tool_token)
+    eager_tool_hook = EagerToolHook.wait()
 
     async def _stream() -> AsyncGenerator[ai.events.AgentEvent]:
+        # When the context manager exits, the hook gets disposed,
+        # which will terminate the stream iteration over it.
         async with eager_tool_hook:
-            message = await llm_step(context, writer, tool_token, turn_span)
+            message = await llm_step(context, writer, eager_tool_hook.token, turn_span)
 
         async with ai.Stream.replay_message(message) as replay:
             async for event in replay:
@@ -392,7 +393,6 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
         tools += [bash, subagent] if turn_input.gated else [bash_ungated]
         streamer = functools.partial(
             llm_step_stream,
-            tool_token=f"seal-early-tool:{self.session_id}",
             writer=writer,
             turn_span=turn_input.turn_span,
         )
