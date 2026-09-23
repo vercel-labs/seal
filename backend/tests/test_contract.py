@@ -116,8 +116,8 @@ async def _capture_run(
     sse = await asyncio.wait_for(capture, 10)
 
     # the history exactly as the UI receives it on reload: through the real
-    # GET /sessions/{id} endpoint (which also rebuilds subagent MessageBundles
-    # into the nested UIMessage shape — server-side logic this test covers).
+    # GET /sessions/{id} endpoint, which projects durable background-task state
+    # back onto the original subagent tool calls.
     await sessions.create_session(session_id)
     transport = httpx2.ASGITransport(app=server.app)
     async with httpx2.AsyncClient(
@@ -241,6 +241,7 @@ async def test_parallel_subagents(
                 ("tc-sb", "subagent", '{"prompt": "task-beta", "name": "beta"}'),
             )
         ],
+        [text_msg("both helpers are running")],
         [text_msg("combined findings")],
     ]
     scripted_model.keyed_responses = {
@@ -256,15 +257,21 @@ async def test_parallel_subagents(
     assert state is not None
     assert_message_invariants(state.messages)
 
-    # each child's transcript landed on its own tool call (no cross-wiring)
+    # Tool calls return immediately; child results arrive in a later user message.
     results = {
         part.tool_call_id: part
         for message in state.messages
         for part in message.tool_results
     }
-    for tc_id, expected in [("tc-sa", "alpha report"), ("tc-sb", "beta report")]:
-        bundle = ai.agents.MessageBundle.model_validate(results[tc_id].result)
-        assert bundle.messages[-1].text == expected
+    assert set(results) == {"tc-sa", "tc-sb"}
+    assert all(
+        result.result
+        == "Subagent is running in the background and will update you later."
+        for result in results.values()
+    )
+    assert "alpha report" in state.messages[-2].text
+    assert "beta report" in state.messages[-2].text
+    assert state.messages[-1].text == "combined findings"
 
     _check_or_update("parallel-subagents", sse, ui_messages)
 
@@ -280,6 +287,7 @@ async def test_mixed_subagents_and_approvals(
                 ("tc-cmd", "bash", '{"command": "echo gamma-out"}'),
             )
         ],
+        [text_msg("tools dispatched")],
         [text_msg("wrapped up")],
     ]
     scripted_model.keyed_responses = {"task-gamma": [text_msg("gamma report")]}
@@ -294,8 +302,13 @@ async def test_mixed_subagents_and_approvals(
     )
     assert approvals["tc-cmd"].granted
 
-    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
-    state = await read_state("s1")
+    await wait_for_lifecycle("s1", proto.SUBAGENT_COMPLETED)
+    async with asyncio.timeout(10):
+        while True:
+            state = await read_state("s1")
+            if state is not None and state.messages[-1].text == "wrapped up":
+                break
+            await asyncio.sleep(0.02)
     assert state is not None
     assert_message_invariants(state.messages)
     results = {
@@ -304,5 +317,8 @@ async def test_mixed_subagents_and_approvals(
         for part in message.tool_results
     }
     assert results["tc-cmd"].result == "gamma-out\n"
-    bundle = ai.agents.MessageBundle.model_validate(results["tc-sub"].result)
-    assert bundle.messages[-1].text == "gamma report"
+    assert results["tc-sub"].result == (
+        "Subagent is running in the background and will update you later."
+    )
+    assert "gamma report" in state.messages[-2].text
+    assert state.messages[-1].text == "wrapped up"

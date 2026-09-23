@@ -27,35 +27,19 @@
        ]
       },
       {
-       "id": "msg_7b27178e9775",
+       "id": "msg_d4741173d3b2",
        "role": "internal",
        "turnId": null,
        "partIds": [
-        "part_66fd369019d9"
+        "part_260a5f5df1cc"
        ]
       },
       {
-       "id": "msg_6cbbede91606",
+       "id": "msg_6e40973069b9",
        "role": "internal",
        "turnId": null,
        "partIds": [
-        "part_87b67c08351e"
-       ]
-      },
-      {
-       "id": "msg_19f8cf370af0",
-       "role": "tool",
-       "turnId": null,
-       "partIds": [
-        "part_ff37dab583b0"
-       ]
-      },
-      {
-       "id": "msg_9efe97fa97d7",
-       "role": "tool",
-       "turnId": null,
-       "partIds": [
-        "part_9ffce182ac80"
+        "part_589812c45f91"
        ]
       }
      ]
