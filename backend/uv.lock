@@ -28,8 +28,8 @@ overrides = [
 
 [[package]]
 name = "ai"
-version = "0.5.3.dev11+142b074"
-source = { git = "https://github.com/vercel-labs/ai-python?branch=main#142b074550b81b230e4c8077bf8a32527319791c" }
+version = "0.7.1.dev5+7b406c2"
+source = { git = "https://github.com/vercel-labs/ai-python?branch=main#7b406c2f6428e97d8366b090f3f37d6ac0d01337" }
 dependencies = [
     { name = "httpx2" },
     { name = "modelsdotdev" },

@@ -202,11 +202,6 @@ async def _turn_events(
     An approval resume just tails the continuation from after the park; its first
     event is a tool result (no ``turn_id`` → id-less ``start``), so the client
     folds it into the assistant message it resubmitted.
-
-    ``reload.requested`` is a permanent stream entry, not a one-shot signal --
-    a later connection replaying history past it sees it again. Every connection
-    forwards the reload marker and continues reading, so the client can discard
-    the current step before applying events from the retried step.
     """
     run_id = await stream.session_run_id(session_id)
     assert run_id is not None  # both endpoints guarantee the run has started
@@ -220,12 +215,6 @@ async def _turn_events(
 
         if event.type == proto.SUBAGENT_CALLED:
             children.append(asyncio.create_task(_pump_subagent(event, queue)))
-        elif event.type == proto.RELOAD_REQUESTED:
-            # Tell the client to discard the current step, then keep reading so
-            # events from the retried step can use the same connection.
-            await queue.put(ui_events.UIFinishStepEvent())
-            await queue.put(ui_events.UIDataEvent(data_type="reload", data={}))
-            await queue.put(ui_events.UIStartStepEvent())
 
         elif event.type in _TERMINAL:
             return

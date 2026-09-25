@@ -569,10 +569,7 @@ async def test_eager_tool_result_from_failed_llm_step_is_not_streamed(
     run_id = await stream_.session_run_id("s1")
     assert run_id is not None
     events = [e async for e in stream_.replay(run_id)]
-    assert any(
-        isinstance(e, proto.LifecycleEvent) and e.type == proto.RELOAD_REQUESTED
-        for e in events
-    )
+    assert any(isinstance(e, ai.events.Retry) for e in events)
     # every tool result the client saw must answer a call in the history
     known_calls = {p.tool_call_id for m in state.messages for p in m.tool_calls}
     streamed_results = [

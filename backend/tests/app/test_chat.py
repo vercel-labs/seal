@@ -326,47 +326,23 @@ async def test_approval_resume_continuation_opens_id_less() -> None:
     assert any(p.get("type") == "text-delta" for p in payloads)
 
 
-async def test_to_sse_reloads_the_current_step_and_continues() -> None:
-    # a retried llm_step wipes its own aborted attempt's events and asks the
-    # client to discard the current step. The stream stays open so events from
-    # the retry can continue over the same connection.
+async def test_to_sse_resets_the_current_step_on_retry() -> None:
     await _write(
         "s1",
         stream.session_started(),
         stream.turn_started(turn_index=0),
         events_.StreamStart(),
         events_.ToolStart(tool_call_id="tc-aborted", tool_name="bash"),
-        stream.reload_requested(),
+        events_.Retry(),
         events_.ToolStart(tool_call_id="tc-retry", tool_name="bash"),
         stream.session_waiting(turn_index=0),
     )
     lines = await _collect_sse("s1")
 
     payloads = _sse_payloads(lines)
-    assert any(p.get("type") == "data-reload" for p in payloads)
+    assert any(p.get("type") == "reset-step" for p in payloads)
     tool_starts = [p for p in payloads if p.get("type") == "tool-input-start"]
     assert [p["toolCallId"] for p in tool_starts] == ["tc-aborted", "tc-retry"]
-    assert "[DONE]" in lines[-1]
-
-
-async def test_to_sse_replays_reload_marker() -> None:
-    # ``reload.requested`` is durable history, so a fresh connection sees the
-    # marker too. It forwards it and continues with the retried step's events.
-
-    await _write(
-        "s1",
-        stream.session_started(),
-        stream.turn_started(turn_index=0),
-        stream.reload_requested(),
-        *_text_events("done"),
-        stream.session_waiting(turn_index=0),
-    )
-    lines = await _collect_sse("s1")
-
-    payloads = _sse_payloads(lines)
-    assert any(p.get("type") == "data-reload" for p in payloads)
-    deltas = [p for p in payloads if p.get("type") == "text-delta"]
-    assert [delta["delta"] for delta in deltas] == ["done"]
     assert "[DONE]" in lines[-1]
 
 

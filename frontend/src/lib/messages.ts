@@ -20,8 +20,7 @@ export type SealTools = {
   }
 }
 
-// data-reload is seal's stream-retry signal, see getFreshParts.
-export type ChatUIMessage = UIMessage<unknown, { reload: unknown }, SealTools>
+export type ChatUIMessage = UIMessage<unknown, Record<string, never>, SealTools>
 
 export type ChatMessagePart = ChatUIMessage["parts"][number]
 
@@ -40,24 +39,3 @@ export type WebFetchToolPart = Extract<
   ChatMessagePart,
   { type: "tool-web_fetch" }
 >
-
-// Implement the custom streaming retry logic:
-// If there is a disconnection mid LLM response, the seal stream will emit
-// a data-reload event that signals for us to ignore the previous step.
-// We do that, and it'll drop off the screen.
-//
-export function getFreshParts<T extends { type: string }>(parts: T[]): T[] {
-  const freshParts: T[] = []
-
-  for (const part of parts) {
-    freshParts.push(part)
-    if (part.type == "data-reload") {
-      const reloadIndex = freshParts.findLastIndex(
-        (part) => part.type === "step-start"
-      )
-      freshParts.splice(reloadIndex + 1)
-    }
-  }
-
-  return freshParts
-}

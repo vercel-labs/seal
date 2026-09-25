@@ -83,13 +83,6 @@ def subagent_completed(*, tool_call_id: str, is_error: bool) -> proto.LifecycleE
     )
 
 
-def reload_requested() -> proto.LifecycleEvent:
-    # a retried step just wiped its own aborted first attempt's partial
-    # output; a client that already streamed that output needs to reload
-    # rather than trust it.
-    return proto.LifecycleEvent(type=proto.RELOAD_REQUESTED)
-
-
 async def get_readable(
     run_id: str, *, start_index: int = 0
 ) -> collections.abc.AsyncIterator[proto.StreamEvent]:

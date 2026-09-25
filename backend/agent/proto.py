@@ -99,7 +99,6 @@ SESSION_INTERRUPTED = "session.interrupted"
 TURN_STARTED = "turn.started"
 SUBAGENT_CALLED = "subagent.called"
 SUBAGENT_COMPLETED = "subagent.completed"
-RELOAD_REQUESTED = "reload.requested"
 
 
 class LifecycleEvent(pydantic.BaseModel):

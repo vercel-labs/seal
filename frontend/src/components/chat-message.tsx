@@ -19,7 +19,6 @@ import {
 } from "@/components/ui/attachment"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Message, MessageContent } from "@/components/ui/message"
-import { getFreshParts } from "@/lib/messages"
 import type { ChatMessagePart, ChatUIMessage } from "@/lib/messages"
 
 function FileAttachment({
@@ -153,7 +152,7 @@ export function ChatMessage({
   message: ChatUIMessage
   addToolApprovalResponse: ChatAddToolApproveResponseFunction
 }) {
-  const parts = getFreshParts(message.parts)
+  const parts = message.parts
 
   if (message.role === "user") {
     const text = parts

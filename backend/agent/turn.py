@@ -49,7 +49,7 @@ async def llm_step(
     # On a retry, emit a message requesting a reload. The will trigger
     # the client to drop everything from the last step.
     if writer is not None and metadata.attempt > 1:
-        await writer.write(stream.reload_requested())
+        await writer.write(ai.events.Retry())
 
     # parent this step's spans under the turn's span
     async with (
@@ -57,9 +57,6 @@ async def llm_step(
         ai.stream(context=context) as model_stream,
     ):
         async for e in model_stream:
-            if e.replay:
-                continue
-
             if writer is not None:
                 await writer.write(e)
             if tool_token and isinstance(e, ai.types.events.ToolEnd):
