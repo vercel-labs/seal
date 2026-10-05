@@ -66,8 +66,8 @@ async def test_single_turn_suspends(
 ) -> None:
     scripted_model.responses = [[text_msg("hello there")]]
 
-    await _start("s1", "hi")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    run = await _start("s1", "hi")
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state("s1")
     assert state is not None
@@ -82,12 +82,12 @@ async def test_failed_turn_parks_and_accepts_another_message(
     scripted_model.responses = []
 
     run = await _start("s1", "fail")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
     assert await run.status() not in ("completed", "failed", "cancelled")
 
     scripted_model.responses = [[text_msg("recovered")]]
     await _resume(proto.session_hook_token("s1"), proto.NewUserMessage(prompt="retry"))
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING, count=2)
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING, count=2)
 
     state = await read_state("s1")
     assert state is not None
@@ -107,14 +107,14 @@ async def test_resume_appends_user_message_without_duplicating_history(
     scripted_model.responses = [[text_msg("first answer")], [text_msg("second answer")]]
 
     run = await _start("s1", "one")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
     first_hook = await _wait_for_hook(proto.turn_hook_token("s1"))
     first_session_hook = await _wait_for_hook(proto.session_hook_token("s1"))
     assert first_hook.run_id == run.run_id
     assert first_session_hook.run_id == run.run_id
 
     await _resume(proto.session_hook_token("s1"), proto.NewUserMessage(prompt="two"))
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING, count=2)
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING, count=2)
     second_hook = await _wait_for_hook(proto.turn_hook_token("s1"))
     second_session_hook = await _wait_for_hook(proto.session_hook_token("s1"))
     assert second_hook.hook_id == first_hook.hook_id
@@ -150,10 +150,10 @@ async def test_gated_tool_approval_runs_in_one_turn(
         [text_msg("done")],
     ]
 
-    await _start("s1", "run it")
+    run = await _start("s1", "run it")
     # The turn parks on the approval hook; the gated tool has not run yet, so
     # the model was called exactly once.
-    await _wait_for_event("s1", ai.events.RunBlocked)
+    await _wait_for_event(run, ai.events.RunBlocked)
     assert scripted_model.call_count == 1
 
     await _resume_approvals(
@@ -164,7 +164,7 @@ async def test_gated_tool_approval_runs_in_one_turn(
             )
         ],
     )
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state("s1")
     assert state is not None
@@ -199,8 +199,8 @@ async def test_interrupt_hook_cancels_a_running_tool_step(
         [text_msg("recovered")],
     ]
 
-    await _start("s1", "run it")
-    await _wait_for_event("s1", ai.events.RunBlocked)
+    run = await _start("s1", "run it")
+    await _wait_for_event(run, ai.events.RunBlocked)
     interrupt = await _wait_for_hook(proto.interrupt_hook_token("s1"))
     await _resume_approvals(
         "s1",
@@ -216,7 +216,7 @@ async def test_interrupt_hook_cancels_a_running_tool_step(
 
     await proto.InterruptHook().resume(interrupt)
 
-    await _wait_for_lifecycle("s1", proto.SESSION_INTERRUPTED)
+    await _wait_for_lifecycle(run, proto.SESSION_INTERRUPTED)
     assert await _wait_for_run_stopped(interrupt.run_id) == "completed"
 
     interrupted = await read_state("s1")
@@ -236,7 +236,7 @@ async def test_interrupt_hook_cancels_a_running_tool_step(
         proto.session_hook_token("s1"),
         proto.NewUserMessage(prompt="continue"),
     )
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
     resumed = await read_state("s1")
     assert resumed is not None
     assert resumed.messages[-1].text == "recovered"
@@ -268,9 +268,9 @@ async def test_parallel_gated_tools_park_then_run(
         [text_msg("done")],
     ]
 
-    await _start("s2", "run both")
+    run = await _start("s2", "run both")
     # both gated calls park on their own hook before the turn parks.
-    await _wait_for_event("s2", ai.events.RunBlocked)
+    await _wait_for_event(run, ai.events.RunBlocked)
     assert scripted_model.call_count == 1
 
     await _resume_approvals(
@@ -284,7 +284,7 @@ async def test_parallel_gated_tools_park_then_run(
             ),
         ],
     )
-    await _wait_for_lifecycle("s2", proto.SESSION_WAITING)
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state("s2")
     assert state is not None
@@ -317,7 +317,7 @@ async def test_interrupting_subagent_forwards_interrupt_to_child_turn(
         ]
     }
 
-    await _start("s1", "delegate")
+    run = await _start("s1", "delegate")
     parent_interrupt = await _wait_for_hook(proto.interrupt_hook_token("s1"))
     child_interrupt = await _wait_for_hook(
         proto.interrupt_hook_token("s1:child:tc-sub")
@@ -326,7 +326,7 @@ async def test_interrupting_subagent_forwards_interrupt_to_child_turn(
 
     await proto.InterruptHook().resume(parent_interrupt)
 
-    await _wait_for_lifecycle("s1", proto.SESSION_INTERRUPTED)
+    await _wait_for_lifecycle(run, proto.SESSION_INTERRUPTED)
     assert await _wait_for_run_stopped(parent_interrupt.run_id) == "completed"
     assert await _wait_for_run_stopped(child_interrupt.run_id) == "completed"
 
@@ -347,8 +347,8 @@ async def test_subagent_result_lands_on_the_trailing_tool_message(
         [text_msg("final answer")],  # the parent's follow-up turn
     ]
 
-    await _start("s1", "delegate")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    run = await _start("s1", "delegate")
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state("s1")
     assert state is not None
@@ -408,8 +408,8 @@ async def test_generate_image_returns_multipart_result(
         [text_msg("done drawing")],
     ]
 
-    await _start("s1", "draw a cat")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    run = await _start("s1", "draw a cat")
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state("s1")
     assert state is not None
@@ -483,8 +483,8 @@ async def test_parallel_subagents_land_deterministically(
         "task-beta": [text_msg("beta-report")],
     }
 
-    await _start(session_id, "delegate both")
-    await _wait_for_lifecycle(session_id, proto.SESSION_WAITING)
+    run = await _start(session_id, "delegate both")
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state(session_id)
     assert state is not None
@@ -561,8 +561,8 @@ async def test_eager_tool_result_from_failed_llm_step_is_not_streamed(
 
     monkeypatch.setattr(MockProvider, "stream", stream)
 
-    await _start("s1", "hello")
-    await _wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    run = await _start("s1", "hello")
+    await _wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state("s1")
     assert state is not None

@@ -37,6 +37,7 @@ import ai.types.messages as messages_
 import ai.ui.ai_sdk as ai_sdk
 import httpx2
 import pytest
+import vercel.workflow
 from conftest import MockProvider, assert_message_invariants, text_msg
 from harness import (
     InProcessWorld,
@@ -101,18 +102,18 @@ def _assistant(text: str, *calls: tuple[str, str, str]) -> messages_.Message:
 
 async def _capture_run(
     session_id: str, prompt: str, park_event: str | type[Any]
-) -> tuple[list[str], list[dict[str, Any]]]:
+) -> tuple[vercel.workflow.Run[None], list[str], list[dict[str, Any]]]:
     """Start a session, stream it like a POST /chat would, run until parked."""
-    await start_session(session_id, prompt)
+    run = await start_session(session_id, prompt)
 
     async def collect() -> list[str]:
         return [line async for line in chat.to_sse(session_id, 0)]
 
     capture = asyncio.create_task(collect())
     if isinstance(park_event, str):
-        await wait_for_lifecycle(session_id, park_event)
+        await wait_for_lifecycle(run, park_event)
     else:
-        await wait_for_event(session_id, park_event)
+        await wait_for_event(run, park_event)
     sse = await asyncio.wait_for(capture, 10)
 
     # the history exactly as the UI receives it on reload: through the real
@@ -126,7 +127,7 @@ async def _capture_run(
         response = await client.get(f"/api/sessions/{session_id}")
     assert response.status_code == 200
     ui_messages: list[dict[str, Any]] = response.json()["messages"]
-    return sse, ui_messages
+    return run, sse, ui_messages
 
 
 def _check_or_update(
@@ -205,7 +206,7 @@ async def test_parallel_approvals(
         [text_msg("both handled")],
     ]
 
-    sse, ui_messages = await _capture_run(
+    run, sse, ui_messages = await _capture_run(
         "s1", "run both commands", ai.events.RunBlocked
     )
 
@@ -215,7 +216,7 @@ async def test_parallel_approvals(
     approvals = await _submit_approval_request_fixture("parallel-approvals", "s1")
     assert approvals["tc-a"].granted and not approvals["tc-b"].granted
 
-    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await wait_for_lifecycle(run, proto.SESSION_WAITING)
     state = await read_state("s1")
     assert state is not None
     assert_message_invariants(state.messages)
@@ -248,7 +249,7 @@ async def test_parallel_subagents(
         "task-beta": [text_msg("beta report")],
     }
 
-    sse, ui_messages = await _capture_run(
+    _, sse, ui_messages = await _capture_run(
         "s1", "delegate to two helpers", proto.SESSION_WAITING
     )
 
@@ -284,7 +285,7 @@ async def test_mixed_subagents_and_approvals(
     ]
     scripted_model.keyed_responses = {"task-gamma": [text_msg("gamma report")]}
 
-    sse, ui_messages = await _capture_run(
+    run, sse, ui_messages = await _capture_run(
         "s1", "delegate and run", ai.events.RunBlocked
     )
     _check_or_update("mixed-subagents-approvals", sse, ui_messages)
@@ -294,7 +295,7 @@ async def test_mixed_subagents_and_approvals(
     )
     assert approvals["tc-cmd"].granted
 
-    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await wait_for_lifecycle(run, proto.SESSION_WAITING)
     state = await read_state("s1")
     assert state is not None
     assert_message_invariants(state.messages)

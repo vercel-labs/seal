@@ -253,8 +253,8 @@ async def test_turn_with_telemetry_suspends(
 ) -> None:
     scripted_model.responses = [[text_msg("hello there")]]
 
-    await start_session("s1", "hi")
-    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    run = await start_session("s1", "hi")
+    await wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     spans = {s.name: s for s in telemetry_on.get_finished_spans()}
     # the turn root exported at completion; the model call and the agent run
@@ -293,9 +293,9 @@ async def test_gated_tool_approval_with_telemetry(
         [text_msg("done")],
     ]
 
-    await start_session("s1", "run it")
+    run = await start_session("s1", "run it")
     # the approval request must still reach the stream with telemetry on.
-    await wait_for_event("s1", ai.events.RunBlocked)
+    await wait_for_event(run, ai.events.RunBlocked)
 
     await resume_approvals(
         "s1",
@@ -305,7 +305,7 @@ async def test_gated_tool_approval_with_telemetry(
             )
         ],
     )
-    await wait_for_lifecycle("s1", proto.SESSION_WAITING)
+    await wait_for_lifecycle(run, proto.SESSION_WAITING)
 
     state = await read_state("s1")
     assert state is not None
