@@ -15,6 +15,7 @@ subprocess.
 from __future__ import annotations
 
 import asyncio
+import collections.abc
 import contextlib
 import contextvars
 import itertools
@@ -148,39 +149,59 @@ async def read_state(session_id: str) -> proto.SessionState | None:
 
 
 async def wait_for_lifecycle(
-    session_id: str, type_: str, *, count: int = 1, timeout: float = 30
+    run: vercel.workflow.Run[Any],
+    type_: str,
+    *,
+    count: int = 1,
+    timeout: float = 30,
 ) -> None:
-    async def watch() -> None:
-        while True:
-            run_id = await stream.session_run_id(session_id)
-            if run_id is not None:
-                seen = 0
-                async for event in stream.replay(run_id):
-                    if isinstance(event, proto.LifecycleEvent) and event.type == type_:
-                        seen += 1
-                        if seen >= count:
-                            return
-            await asyncio.sleep(0.02)
-
-    await asyncio.wait_for(watch(), timeout)
+    await wait_for_stream_predicate(
+        run,
+        lambda event: isinstance(event, proto.LifecycleEvent) and event.type == type_,
+        count=count,
+        timeout=timeout,
+    )
 
 
 async def wait_for_event(
-    session_id: str, event_type: type[Any], *, count: int = 1, timeout: float = 30
+    run: vercel.workflow.Run[Any],
+    event_type: type[Any],
+    *,
+    count: int = 1,
+    timeout: float = 30,
 ) -> None:
-    async def watch() -> None:
-        while True:
-            run_id = await stream.session_run_id(session_id)
-            if run_id is not None:
-                seen = 0
-                async for event in stream.replay(run_id):
-                    if isinstance(event, event_type):
-                        seen += 1
-                        if seen >= count:
-                            return
-            await asyncio.sleep(0.02)
+    await wait_for_stream_predicate(
+        run,
+        lambda event: isinstance(event, event_type),
+        count=count,
+        timeout=timeout,
+    )
 
-    await asyncio.wait_for(watch(), timeout)
+
+async def wait_for_stream_predicate(
+    run: vercel.workflow.Run[Any],
+    predicate: collections.abc.Callable[[proto.StreamEvent], bool],
+    *,
+    count: int = 1,
+    timeout: float = 30,
+) -> None:
+    """Wait until an event in ``run``'s stream satisfies ``predicate``."""
+
+    start_index = 0
+    seen = 0
+    async with asyncio.timeout(timeout):
+        while True:
+            async for event in stream.replay(run.run_id, start_index=start_index):
+                start_index += 1
+                if predicate(event):
+                    seen += 1
+                    if seen >= count:
+                        return
+            if await run.status() in ("completed", "failed", "cancelled"):
+                raise AssertionError(
+                    f"run {run.run_id} finished before its stream matched the predicate"
+                )
+            await asyncio.sleep(0.02)
 
 
 async def resume_session(token: str, payload: proto.NewUserMessage) -> None:
