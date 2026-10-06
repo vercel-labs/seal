@@ -83,11 +83,12 @@ async def llm_step_stream(
             async for event in replay:
                 yield event
 
-    async with contextlib.aclosing(_stream()) as stream:
-        yield ai.util.merge(
-            (ev.payload async for ev in eager_tool_hook),
-            stream,
-        )
+    async with ai.util.merge(
+        (ev.payload async for ev in eager_tool_hook),
+        _stream(),
+        restart=False,
+    ) as stream:
+        yield stream
 
 
 @workflow.step
@@ -369,7 +370,7 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
     )
     async def interrupt(self, _: proto.InterruptHook) -> None:
         if self.run_task is not None:
-            self.run_task.cancel()
+            self.run_task.cancel("user requested cancel")
 
     # Draw message/part ids from the workflow's deterministic RNG so they're
     # stable across replay.
