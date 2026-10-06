@@ -103,8 +103,9 @@ class DurableAgent(ai.Agent):
                         if final or event.tool_call.tool_name in self.eager_tools:
                             tool = context.resolve(event.tool_call)
                             tr.schedule(tool)
+                    elif isinstance(event, ai.events.Retry):
+                        tr.discard_all()
                     elif isinstance(event, ai.events.StreamEnd):
-                        tr.discard_except(context.resolve(event.message.tool_calls))
                         context.add(event.message)
                     elif isinstance(event, ai.events.StreamStart):
                         final = True
@@ -127,8 +128,8 @@ class TrackingToolRunner(ai.ToolRunner):
             del self.task_to_id[task]
         super().discard(task)
 
-    def discard_except(self, ok_calls: Collection[ai.ToolCall]) -> None:
-        ok_ids = {tc.id for tc in ok_calls}
+    def discard_all(self, *, except_: Collection[ai.ToolCall] = ()) -> None:
+        ok_ids = {tc.id for tc in except_}
         for id, task in list(self.id_to_task.items()):
             if id not in ok_ids:
                 self.discard(task)

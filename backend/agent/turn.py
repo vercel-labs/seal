@@ -34,7 +34,7 @@ IMAGE_SYSTEM_PROMPT = (
 
 
 class EagerToolHook(pydantic.BaseModel, vercel.workflow.BaseHook):
-    payload: ai.events.OmitEventMessages[ai.events.ToolEnd]
+    payload: ai.events.OmitEventMessages[ai.events.AgentEvent]
 
 
 @workflow.step(cancellable=True)
@@ -48,8 +48,11 @@ async def llm_step(
 
     # On a retry, emit a message requesting a reload. The will trigger
     # the client to drop everything from the last step.
-    if writer is not None and metadata.attempt > 1:
-        await writer.write(ai.events.Retry())
+    if metadata.attempt > 1:
+        if writer:
+            await writer.write(ai.events.Retry())
+        if tool_token:
+            await EagerToolHook(payload=ai.events.Retry()).resume(tool_token)
 
     # parent this step's spans under the turn's span
     async with (
@@ -426,8 +429,8 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
                 ) as run,
             ):
                 async for event in run:
-                    # ModelEvents get streamed directly by the step.
-                    if not isinstance(event, ai.events.ModelEvent):
+                    # ModelEvents and Retries get streamed directly by the step.
+                    if not isinstance(event, ai.events.ModelEvent | ai.events.Retry):
                         await write_event(writer, event)
 
                 messages = run.messages
