@@ -294,8 +294,8 @@ async def test_to_sse_parks_at_a_deferred_approval() -> None:
         events_.ToolStart(tool_call_id="tc-1", tool_name="bash"),
         events_.ToolEnd(tool_call_id="tc-1", tool_call=tool_call.tool_calls[0]),
         events_.StreamEnd(message=tool_call),
-        events_.HookEvent(
-            message=ai.messages.Message(role="internal", parts=[hook]), hook=hook
+        events_.HookEvent.for_hook(
+            ai.messages.Message(role="internal", parts=[hook]), hook
         ),
         events_.RunBlocked(hooks=(hook,)),
     )
