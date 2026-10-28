@@ -25,8 +25,8 @@ def _hook_event() -> events_.HookEvent:
         status="pending",
         metadata={"tool": "bash", "kwargs": {"command": "ls"}},
     )
-    return events_.HookEvent(
-        message=ai.messages.Message(role="internal", parts=[hook]), hook=hook
+    return events_.HookEvent.for_hook(
+        ai.messages.Message(role="internal", parts=[hook]), hook
     )
 
 

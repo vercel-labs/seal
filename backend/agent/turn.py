@@ -246,8 +246,7 @@ async def subagent(prompt: str, name: str | None = None) -> ai.agents.MessageBun
     """Delegate a focused task to a child agent and return its answer."""
     turn_context = current_turn_context.get()
     session_id = turn_context.session_id
-    tool_call_id = ai_util.current_tool_call_id.get()
-    assert tool_call_id
+    tool_call_id = ai.current_tool_call().id
 
     name = name or "subagent"
     child_session_id = f"{session_id}:child:{tool_call_id}"
