@@ -179,7 +179,7 @@ async def get_session(session_id: str) -> dict[str, object]:
     # persisted) and the UI rebuilds it from the resumed stream (GET /chat/.../stream).
     ui_messages = ai_sdk.to_ui_messages(await sessions.history(session_id))
     serialized = [
-        message.model_dump(mode="json", by_alias=True) for message in ui_messages
+        message.model_dump(mode="json", exclude_none=True) for message in ui_messages
     ]
     return {**meta.model_dump(), "messages": serialized}
 

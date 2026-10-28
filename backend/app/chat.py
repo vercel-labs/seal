@@ -17,8 +17,8 @@ Two lifecycle features surface to the UI:
     *preliminary* nested-``UIMessage`` output on the parent's ``subagent`` tool
     call, so the user watches the subagent work live. The driver then stores the
     child's full transcript (a ``MessageBundle``) as the final tool result; both
-    the live preliminary output and :func:`bundle_to_wire` (used on reload) reduce
-    that transcript to the identical nested ``UIMessage`` shape the UI expects.
+    the live preliminary output and the reload path reduce that transcript to
+    the identical nested ``UIMessage`` shape via ``bundle_to_wire_output``.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ import contextlib
 
 import ai
 import ai.ui.ai_sdk as ai_sdk
+import ai.ui.ai_sdk.outbound_messages as outbound_messages
 import ai.ui.ai_sdk.outbound_stream as outbound_stream
 import ai.ui.ai_sdk.ui_events as ui_events
 import vercel.workflow
@@ -220,35 +221,6 @@ async def _turn_events(
             return
 
 
-def bundle_to_wire(
-    messages: collections.abc.Sequence[ai.messages.Message],
-) -> dict[str, object] | None:
-    """Flatten a subagent transcript into one nested wire ``UIMessage``.
-
-    The child may take several turns; we fold all of its assistant bubbles into a
-    single ``UIMessage`` (anchored on the first) so the whole trajectory renders
-    under the parent's ``subagent`` tool call. Returns ``None`` when the child has
-    produced no assistant message yet.
-    """
-    # TODO: Do we really need all this? It is very similar to stuff we
-    # do in `ai`...
-
-    bubbles = [
-        bubble
-        for bubble in ai_sdk.to_ui_messages(list(messages))
-        if bubble.role == "assistant"
-    ]
-    if not bubbles:
-        return None
-    nested = bubbles[0].model_dump(mode="json", by_alias=True)
-    nested["parts"] = [
-        part
-        for bubble in bubbles
-        for part in bubble.model_dump(mode="json", by_alias=True)["parts"]
-    ]
-    return nested
-
-
 async def _pump_subagent(
     event: proto.LifecycleEvent,
     queue: asyncio.Queue[ui_events.UIMessageStreamEvent | None],
@@ -259,7 +231,7 @@ async def _pump_subagent(
     ``UIMessage`` and pushed as a preliminary ``tool-output-available`` SSE line
     on the parent's ``subagent`` tool call. The final, non-preliminary output is
     the same nested ``UIMessage``, rebuilt on reload from the driver-stored
-    ``MessageBundle`` via :func:`bundle_to_wire`.
+    ``MessageBundle``.
     """
     tool_call_id = str(event.data.get("tool_call_id"))
     child_run_id = str(event.data.get("child_run_id"))
@@ -269,7 +241,9 @@ async def _pump_subagent(
         if isinstance(child_event, proto.LifecycleEvent):
             continue
         child_event = hydrator.feed(child_event)
-        nested = bundle_to_wire(hydrator.messages)
+        nested = outbound_messages.bundle_to_wire_output(
+            ai.agents.MessageBundle(messages=tuple(hydrator.messages))
+        )
         if nested is None:
             continue
         await queue.put(

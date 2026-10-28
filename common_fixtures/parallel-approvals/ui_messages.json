@@ -1,16 +1,16 @@
 [
  {
-  "id": "msg_4e2373b5b03f",
+  "id": "msg_08c4644f53dd",
   "role": "system",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_4e2373b5b03f",
+      "id": "msg_08c4644f53dd",
       "role": "system",
       "turnId": null,
       "partIds": [
-       "part_19662e9dad12"
+       "part_a80356db75ef"
       ]
      }
     ]
@@ -19,24 +19,22 @@
   "parts": [
    {
     "type": "text",
-    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work. Use generate_image to create images.",
-    "state": null,
-    "providerMetadata": null
+    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work. Use generate_image to create images."
    }
   ]
  },
  {
-  "id": "msg_8a8a67aae884",
+  "id": "msg_763d7c1623f3",
   "role": "user",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_8a8a67aae884",
+      "id": "msg_763d7c1623f3",
       "role": "user",
       "turnId": null,
       "partIds": [
-       "part_622f6f46462b"
+       "part_0fd0e766f247"
       ]
      }
     ]
@@ -45,9 +43,7 @@
   "parts": [
    {
     "type": "text",
-    "text": "run both commands",
-    "state": null,
-    "providerMetadata": null
+    "text": "run both commands"
    }
   ]
  }

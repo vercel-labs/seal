@@ -2,9 +2,8 @@
 regressions live.
 
 ``active_run_start_index`` decides where a reload resumes (wrong answer =
-duplicated assistant message in the UI), ``to_sse`` decides when a stream
-terminates (wrong answer = hang or truncated turn), and ``bundle_to_wire``
-is the single source of truth for the nested subagent shape.
+duplicated assistant message in the UI) and ``to_sse`` decides when a stream
+terminates (wrong answer = hang or truncated turn).
 
 All tests run against real workflow run streams (on the local world) and the
 real ai SDK UI adapter; writes go through the world directly, as the step
@@ -15,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, cast
+from typing import Any
 
 import ai
 import ai.types.events as events_
@@ -155,39 +154,6 @@ async def test_run_parked_on_approval_is_resumable_from_run_start() -> None:
         events_.RunBlocked(),
     )
     assert await chat.active_run_start_index("s1") == 0
-
-
-# --- bundle_to_wire ---------------------------------------------------------------
-
-
-def test_bundle_to_wire_folds_all_assistant_turns_into_one_ui_message() -> None:
-    transcript = [
-        ai.system_message("you are a subagent"),
-        ai.user_message("task"),
-        ai.messages.Message(
-            role="assistant",
-            parts=[
-                messages_.TextPart(text="first"),
-                messages_.ToolCallPart(
-                    tool_call_id="tc-1", tool_name="web_fetch", tool_args="{}"
-                ),
-            ],
-        ),
-        ai.tool_message(tool_call_id="tc-1", tool_name="web_fetch", result="page"),
-        ai.messages.Message(
-            role="assistant", parts=[messages_.TextPart(text="second")]
-        ),
-    ]
-    nested = chat.bundle_to_wire(transcript)
-    assert nested is not None
-    assert nested["role"] == "assistant"
-    parts = cast(list[dict[str, Any]], nested["parts"])
-    texts = [part["text"] for part in parts if part.get("type") == "text"]
-    assert texts == ["first", "second"]
-
-
-def test_bundle_to_wire_with_no_assistant_message_yet() -> None:
-    assert chat.bundle_to_wire([ai.user_message("task")]) is None
 
 
 # --- to_sse ----------------------------------------------------------------------
