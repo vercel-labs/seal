@@ -30,29 +30,9 @@ data: {"id": "text-0", "delta": "combined findings", "type": "text-delta"}
 
 data: {"id": "text-0", "type": "text-end"}
 
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report"}]}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report"}]}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sa", "output": {"id": "msg_d76ae3e5aa3b", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_d76ae3e5aa3b", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "alpha report"}]}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": []}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": []}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report"}]}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report"}]}, "type": "tool-output-available", "preliminary": true}
-
-data: {"toolCallId": "tc-sb", "output": {"id": "msg_51e28f79d13c", "role": "assistant", "metadata": {"aiPython": {"sourceMessages": [{"id": "msg_51e28f79d13c", "role": "assistant", "turnId": null, "partIds": ["text-0"]}]}}, "parts": [{"type": "text", "text": "beta report"}]}, "type": "tool-output-available", "preliminary": true}
-
 data: {"type": "finish-step"}
 
-data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_03c8af0bb67a", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sa", "tc-sb"]}, {"id": "msg_791deacc94d6", "role": "tool", "turnId": null, "partIds": ["part_370ebf6542c6"]}, {"id": "msg_919e8bba76a4", "role": "tool", "turnId": null, "partIds": ["part_7f6f1de33f6e"]}, {"id": "msg_b00478d372db", "role": "assistant", "turnId": null, "partIds": ["text-0"]}], "toolResultKinds": {"tc-sa": "messages", "tc-sb": "messages"}}}}
+data: {"type": "finish", "finishReason": "stop", "messageMetadata": {"aiPython": {"sourceMessages": [{"id": "msg_03c8af0bb67a", "role": "assistant", "turnId": null, "partIds": ["text-0", "tc-sa", "tc-sb"]}, {"id": "msg_70b9b2e6eb3a", "role": "tool", "turnId": null, "partIds": ["part_42ac883a7afd"]}, {"id": "msg_c678e154c623", "role": "tool", "turnId": null, "partIds": ["part_b3aca8c39cdc"]}, {"id": "msg_b00478d372db", "role": "assistant", "turnId": null, "partIds": ["text-0"]}], "toolResultKinds": {"tc-sa": "messages", "tc-sb": "messages"}}}}
 
 data: [DONE]
 

@@ -162,7 +162,7 @@ async def to_sse(
     funnel through one queue so the merge is sequential.
     """
     queue: asyncio.Queue[ui_events.UIMessageStreamEvent | None] = asyncio.Queue()
-    children: list[asyncio.Task[None]] = []
+    children: dict[str, asyncio.Task[None]] = {}
 
     async def pump_adapter() -> None:
         events = _turn_events(session_id, start_index, queue, children)
@@ -181,7 +181,7 @@ async def to_sse(
         yield outbound_stream.format_done_sse()
     finally:
         adapter_task.cancel()
-        for child in children:
+        for child in children.values():
             child.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await adapter_task
@@ -191,14 +191,15 @@ async def _turn_events(
     session_id: str,
     start_index: int,
     queue: asyncio.Queue[ui_events.UIMessageStreamEvent | None],
-    children: list[asyncio.Task[None]],
+    children: dict[str, asyncio.Task[None]],
 ) -> collections.abc.AsyncIterator[ai.events.AgentEvent]:
     """Yield this turn's ``AgentEvent``s, ending at the next turn boundary.
 
     Lifecycle events stay server-side: ``subagent.called`` spins up a concurrent
     tail of the child stream (collected in ``children`` so the caller can cancel
-    it; its progress lines go straight onto ``queue``), and the loop returns once
-    the turn parks on an approval or finishes.
+    it; its progress lines go straight onto ``queue``), ``subagent.completed``
+    stops that tail, and the loop returns once the turn parks on an approval or
+    finishes.
 
     An approval resume just tails the continuation from after the park; its first
     event is a tool result (no ``turn_id`` → id-less ``start``), so the client
@@ -215,7 +216,17 @@ async def _turn_events(
             continue
 
         if event.type == proto.SUBAGENT_CALLED:
-            children.append(asyncio.create_task(_pump_subagent(event, queue)))
+            children[event.data["tool_call_id"]] = asyncio.create_task(
+                _pump_subagent(event, queue)
+            )
+
+        elif event.type == proto.SUBAGENT_COMPLETED:
+            # the final tool result follows; a lagging pump must not publish
+            # stale preliminary output after it. (an approval resume can see the
+            # completion of a subagent called before the park, with no pump.)
+            child = children.pop(event.data["tool_call_id"], None)
+            if child is not None:
+                child.cancel()
 
         elif event.type in _TERMINAL:
             return
