@@ -27,27 +27,19 @@
        ]
       },
       {
-       "id": "msg_7b27178e9775",
+       "id": "msg_224ee961ef23",
        "role": "internal",
        "turnId": null,
        "partIds": [
-        "part_66fd369019d9"
+        "part_5b866e5fa093"
        ]
       },
       {
-       "id": "msg_6cbbede91606",
+       "id": "msg_4519154eeb93",
        "role": "tool",
        "turnId": null,
        "partIds": [
-        "part_87b67c08351e"
-       ]
-      },
-      {
-       "id": "msg_19f8cf370af0",
-       "role": "tool",
-       "turnId": null,
-       "partIds": [
-        "part_ff37dab583b0"
+        "part_08d590545fc1"
        ]
       }
      ],
@@ -94,9 +86,7 @@
       "parts": [
        {
         "type": "text",
-        "text": "gamma report",
-        "state": null,
-        "provider_metadata": null
+        "text": "gamma report"
        }
       ]
      }

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.13.*"
 
 [options]
@@ -28,8 +28,8 @@ overrides = [
 
 [[package]]
 name = "ai"
-version = "0.8.1.dev10+0544be0"
-source = { git = "https://github.com/vercel-labs/ai-python?branch=main#0544be062928246b5214e605e1c26755c1cb2462" }
+version = "0.8.1.dev14+c0c72ee"
+source = { git = "https://github.com/vercel-labs/ai-python?branch=main#c0c72eeca22d1399fc8859081fba5d973370899b" }
 dependencies = [
     { name = "httpx2" },
     { name = "modelsdotdev" },

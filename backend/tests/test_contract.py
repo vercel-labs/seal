@@ -142,6 +142,21 @@ def _check_or_update(
         )
         return
 
+    finished: set[str] = set()
+    for line in sse:
+        body = line.removeprefix("data: ").strip()
+        if not body or body == "[DONE]":
+            continue
+        event = json.loads(body)
+        if event.get("type") != "tool-output-available":
+            continue
+        tool_call_id = event["toolCallId"]
+        assert not (event.get("preliminary") and tool_call_id in finished), (
+            f"{scenario}: preliminary output for {tool_call_id} after its final output"
+        )
+        if not event.get("preliminary"):
+            finished.add(tool_call_id)
+
     fixture_sse = (directory / "sse.txt").read_text(encoding="utf-8")
     fixture_lines = [f"{block}\n\n" for block in fixture_sse.split("\n\n") if block]
     assert _sse_projection(sse) == _sse_projection(fixture_lines), (

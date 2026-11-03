@@ -1,16 +1,16 @@
 [
  {
-  "id": "msg_4e2373b5b03f",
+  "id": "msg_c0df955b0828",
   "role": "system",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_4e2373b5b03f",
+      "id": "msg_c0df955b0828",
       "role": "system",
       "turnId": null,
       "partIds": [
-       "part_19662e9dad12"
+       "part_b5bed3aeb73a"
       ]
      }
     ]
@@ -19,24 +19,22 @@
   "parts": [
    {
     "type": "text",
-    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work. Use generate_image to create images.",
-    "state": null,
-    "providerMetadata": null
+    "text": "You are Seal, a coding assistant. Use bash, web_fetch, and subagent to inspect the environment, gather information, and delegate focused work. Use generate_image to create images."
    }
   ]
  },
  {
-  "id": "msg_8a8a67aae884",
+  "id": "msg_8501dba88064",
   "role": "user",
   "metadata": {
    "aiPython": {
     "sourceMessages": [
      {
-      "id": "msg_8a8a67aae884",
+      "id": "msg_8501dba88064",
       "role": "user",
       "turnId": null,
       "partIds": [
-       "part_622f6f46462b"
+       "part_13d33a2ffc4e"
       ]
      }
     ]
@@ -45,9 +43,7 @@
   "parts": [
    {
     "type": "text",
-    "text": "delegate to two helpers",
-    "state": null,
-    "providerMetadata": null
+    "text": "delegate to two helpers"
    }
   ]
  },
@@ -68,12 +64,12 @@
       ]
      },
      {
-      "id": "msg_b2c02ace8c5a",
+      "id": "msg_913c9c3dc8c7",
       "role": "tool",
       "turnId": null,
       "partIds": [
-       "part_6778542daa06",
-       "part_ba06b8e1f33f"
+       "part_370ebf6542c6",
+       "part_7f6f1de33f6e"
       ]
      },
      {
@@ -94,9 +90,7 @@
   "parts": [
    {
     "type": "text",
-    "text": "delegating to both",
-    "state": null,
-    "providerMetadata": null
+    "text": "delegating to both"
    },
    {
     "type": "tool-subagent",
@@ -126,21 +120,10 @@
      "parts": [
       {
        "type": "text",
-       "text": "alpha report",
-       "state": null,
-       "provider_metadata": null
+       "text": "alpha report"
       }
      ]
-    },
-    "rawInput": null,
-    "errorText": null,
-    "approval": null,
-    "providerExecuted": null,
-    "callProviderMetadata": null,
-    "resultProviderMetadata": null,
-    "toolMetadata": null,
-    "preliminary": null,
-    "title": null
+    }
    },
    {
     "type": "tool-subagent",
@@ -170,27 +153,14 @@
      "parts": [
       {
        "type": "text",
-       "text": "beta report",
-       "state": null,
-       "provider_metadata": null
+       "text": "beta report"
       }
      ]
-    },
-    "rawInput": null,
-    "errorText": null,
-    "approval": null,
-    "providerExecuted": null,
-    "callProviderMetadata": null,
-    "resultProviderMetadata": null,
-    "toolMetadata": null,
-    "preliminary": null,
-    "title": null
+    }
    },
    {
     "type": "text",
-    "text": "combined findings",
-    "state": null,
-    "providerMetadata": null
+    "text": "combined findings"
    }
   ]
  }

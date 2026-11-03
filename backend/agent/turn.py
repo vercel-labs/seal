@@ -394,7 +394,7 @@ class TurnWorkflow(workflow_util.WorkflowClass, registry=workflow):
             turn_span=turn_input.turn_span,
         )
 
-        agent = ai_util.DurableAgent(
+        agent = ai.durable.DurableAgent(
             tools=tools, streamer=streamer, eager_tools=EAGER_TOOLS
         )
         # Tool tasks are created under this run's context and inherit this.
